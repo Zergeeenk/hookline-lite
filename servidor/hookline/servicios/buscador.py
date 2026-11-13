@@ -42,6 +42,16 @@ MUERTA = 60             # una fuente con 60 vistos y ningún bueno se deja de us
 _lock_tandas = threading.Lock()   # varias tandas pueden terminar a la vez
 
 
+
+def _playwright():
+    """Playwright es opcional (pip install "hookline[buscador]"): sin él, el buscador avisa en vez de romperse."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise ValueError("El buscador no está instalado en este servidor (falta playwright: "
+                         "pip install \"hookline[buscador]\").") from None
+    return sync_playwright
+
 def _hora(fmt: str) -> str:
     from datetime import datetime
     from ..config import config
@@ -185,7 +195,7 @@ def importar_cookies(texto: str) -> int:
         cookies.append(c)
     if not cookies:
         raise ValueError("No encontré cookies de Instagram o TikTok en ese texto (formato cookies.txt).")
-    from playwright.sync_api import sync_playwright
+    sync_playwright = _playwright()
     abrir()
     with sync_playwright() as p:
         _, ctx = _contexto(p)
@@ -196,7 +206,7 @@ def importar_cookies(texto: str) -> int:
 
 
 def exportar_cookies(destino) -> int:
-    from playwright.sync_api import sync_playwright
+    sync_playwright = _playwright()
     abrir()
     with sync_playwright() as p:
         _, ctx = _contexto(p)
@@ -231,7 +241,7 @@ def buscar(objetivo: int = 30) -> dict:
 def _buscar(_d: dict) -> None:
     try:
         from PIL import Image
-        from playwright.sync_api import sync_playwright
+        sync_playwright = _playwright()
         abrir()
         lote = time.strftime("%m%d-%H%M") + "-" + uuid.uuid4().hex[:4]
         d = almacen.dir_de("candidatos", lote)
