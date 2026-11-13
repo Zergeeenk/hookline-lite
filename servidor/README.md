@@ -54,7 +54,7 @@ de Meta y de Claude, mil archivos en la bandeja e importaciones de Lite corrupta
 fija cada bug que encontraron las revisiones. GitHub Actions (`.github/workflows/servidor.yml`) corre todo en SQLite
 y en Postgres y construye la imagen de Docker en cada PR.
 Sin `HOOKLINE_BASE_DATOS` usa SQLite en `./datos-hookline/hookline.db`. Hace falta `ffmpeg` (o el que trae
-`imageio-ffmpeg`) y fuentes TTF (en Debian/Ubuntu: `fonts-montserrat fonts-inter fonts-dejavu-core`).
+`imageio-ffmpeg`) y fuentes TTF (en Debian/Ubuntu: `fonts-inter fonts-dejavu-core`).
 
 ### Pasar los datos de Hookline Lite
 ```bash

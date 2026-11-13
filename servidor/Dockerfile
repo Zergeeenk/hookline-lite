@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
 # ffmpeg (videos), fuentes para los textos de los reels (antes salían de C:\Windows\Fonts),
 # chromium (buscador de memes: opcional, se apaga con HOOKLINE_BUSCADOR=0)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg fonts-montserrat fonts-inter fonts-dejavu-core fonts-liberation2 chromium tini \
+        ffmpeg fonts-inter fonts-dejavu-core fonts-liberation2 chromium tini \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
