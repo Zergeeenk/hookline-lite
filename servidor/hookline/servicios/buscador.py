@@ -25,7 +25,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .. import almacen
-from ..comun import ajuste, guardar_ajuste
+from ..comun import ajuste, candado, guardar_ajuste
 from ..config import config
 from ..db import sesion
 from ..ia import tareas
@@ -40,6 +40,12 @@ FUENTES_POR_VEZ = 12
 MAX_VUELTAS = 5
 MUERTA = 60             # una fuente con 60 vistos y ningún bueno se deja de usar
 _lock_tandas = threading.Lock()   # varias tandas pueden terminar a la vez
+
+
+def _hora(fmt: str) -> str:
+    from datetime import datetime
+    from ..config import config
+    return datetime.now(config().tz).strftime(fmt)
 
 
 def _abierto() -> bool:
@@ -298,7 +304,7 @@ def _buscar(_d: dict) -> None:
         aviso_ = f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá las cookies en Ajustes → Buscador." if sin_sesion else ""
         if not buenos:
             shutil.rmtree(d, ignore_errors=True)
-            estado(estado="error" if aviso_ else "listo", fin=time.strftime("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
+            estado(estado="error" if aviso_ else "listo", fin=_hora("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
             return
         import json
         (d / "candidatos.json").write_text(json.dumps(buenos, ensure_ascii=False), encoding="utf-8")
@@ -363,7 +369,7 @@ def _hojas(d: Path, buenos: list[dict]):
 
 # --- lo que eligió Claude ----------------------------------------------------------------------------------------------------
 def _tanda_hecha(lote: str, k: int, fil: dict) -> None:
-    with _lock_tandas:
+    with _lock_tandas, candado("buscador"):
         _tanda_hecha_ya(lote, k, fil)
 
 
@@ -413,7 +419,7 @@ def _tanda_hecha_ya(lote: str, k: int, fil: dict) -> None:
         encolar("buscar", {}, clave=f"buscar:{time.time():.0f}:{vuelta + 1}", max_intentos=1)
     else:
         vueltas = "1 vuelta" if vuelta == 1 else f"{vuelta} vueltas"
-        estado(estado="listo", hechas=hechas, nuevos=nuevos, acumulado=total, fin=time.strftime("%H:%M"),
+        estado(estado="listo", hechas=hechas, nuevos=nuevos, acumulado=total, fin=_hora("%H:%M"),
                mensaje=f"Listo: {total} memes nuevos en {vueltas}.")
 
 

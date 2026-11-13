@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 
 from sqlalchemy import delete, select
@@ -103,3 +104,55 @@ def evento(nombre: str, /, **datos) -> None:
         return
     with sesion() as s:
         s.add(Evento(tipo=nombre, datos=datos))
+
+
+# --- candados entre procesos (API y worker comparten el volumen de datos) -------------------------------------------------------
+import threading as _threading
+
+_hilos: dict = {}
+_local = _threading.local()
+
+
+@contextmanager
+def candado(nombre: str, espera: float = 120):
+    """Exclusión mutua entre procesos e hilos: un archivo bloqueado con flock en el volumen de datos.
+    Sirve para lo que en Lite protegía un lock en memoria (había un solo proceso): repartir, escanear la bandeja,
+    leer-modificar-escribir los datos de una copia. Reentrante dentro del mismo hilo."""
+    import time as _t
+    tomados = getattr(_local, "tomados", None)
+    if tomados is None:
+        tomados = _local.tomados = {}
+    if tomados.get(nombre):            # ya lo tiene este hilo
+        tomados[nombre] += 1
+        try:
+            yield
+        finally:
+            tomados[nombre] -= 1
+        return
+    lock = _hilos.setdefault(nombre, _threading.Lock())
+    if not lock.acquire(timeout=espera):
+        raise TimeoutError(f"El candado '{nombre}' está ocupado hace mucho.")
+    try:
+        from . import almacen
+        with open(almacen.raiz() / f".candado-{nombre}", "a+") as f:
+            try:
+                import fcntl
+            except ImportError:            # Windows: alcanza con el lock de hilos (un solo proceso)
+                fcntl = None
+            if fcntl:
+                fin = _t.time() + espera
+                while True:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if _t.time() > fin:
+                            raise TimeoutError(f"El candado '{nombre}' está ocupado hace mucho.")
+                        _t.sleep(0.05)
+            tomados[nombre] = 1
+            try:
+                yield
+            finally:
+                tomados[nombre] = 0
+    finally:
+        lock.release()

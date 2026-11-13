@@ -126,13 +126,10 @@ def agregar_archivo(cuenta: str, ruta_abs, **extra) -> str:
 def escanear() -> int:
     """Archivos que alguien dejó a mano en para-subir/<cuenta>/ → una pieza cada uno. Archivos borrados → se sacan
     de su pieza. Los que agrega el sistema van con nombre oculto (".x.jpg") y ya traen su pieza: acá se ignoran.
-    Con Postgres, un candado evita que dos procesos escaneen a la vez (y creen piezas repetidas)."""
-    from ..db import es_postgres
-    from sqlalchemy import text
+    Un candado entre procesos evita escanear a la vez que otro escaneo o que repartir (piezas repetidas)."""
+    from ..comun import candado
     nuevos_n = 0
-    with _lock, sesion() as s:
-        if es_postgres() and not s.scalar(text("SELECT pg_try_advisory_xact_lock(4242001)")):
-            return 0
+    with candado("bandeja"), sesion() as s:
         lista = s.scalars(select(Pieza)).all()
         usados = {a for x in lista for a in (x.archivos or [])}
         for (cid,) in s.execute(select(Cuenta.id)).all():

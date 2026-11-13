@@ -22,7 +22,7 @@ from .modelos import Trabajo
 log = logging.getLogger("hookline.trabajos")
 
 MANEJADORES: dict[str, Callable[[dict], None]] = {}
-DURACION_TOMA = {"publicar": timedelta(minutes=40), "render": timedelta(minutes=20), "ia": timedelta(minutes=15)}
+DURACION_TOMA = {"publicar": timedelta(minutes=40), "render": timedelta(minutes=45), "ia": timedelta(minutes=15)}
 
 
 class Reintentar(Exception):

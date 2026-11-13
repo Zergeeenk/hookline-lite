@@ -98,3 +98,92 @@ def test_marca_de_agua_no_se_arma_sola(tmp_path, modelo_con_multi):
     assert c.get("marca_agua") and not c.get("resultado")
     with pytest.raises(ValueError):
         fabrica.armar(cid, {}, juzgar=True)
+
+
+def test_pegar_de_la_lectura_no_se_pierde(tmp_path, modelo_con_multi):
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "hola", "modelo": 1,
+                                                    "pegar": [{"x0": 0.1, "y0": 0.5, "x1": 0.9, "y1": 0.7, "cuadro": 1.0}]})
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert len(c["pegar"]) == 1 and c["pegar"][0]["x1"] == 0.9
+
+
+def test_marca_de_agua_bloquea_armado_manual_y_bandeja(tmp_path, modelo_con_multi):
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "hola", "modelo": 1, "marca_agua": True})
+    with pytest.raises(ValueError):
+        fabrica.armar(cid, {}, juzgar=False)          # el botón Armar del panel tampoco puede
+    fabrica._datos(cid, resultado="inventado.mp4")
+    with pytest.raises(ValueError):
+        fabrica.a_bandeja(cid, "multi1")
+    # con un remate propio sí
+    fabrica.subir_remate(cid, "propio.mp4", _ejemplo(tmp_path).read_bytes())
+    _vaciar_cola(["render"])
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["resultado"] and c["resultado"] != "inventado.mp4"
+
+
+def test_un_resultado_por_copia_en_resultados(tmp_path, modelo_con_multi):
+    from hookline import almacen
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "uno (con paréntesis)", "modelo": 1})
+    fabrica.armar(cid, {"texto": "dos"})
+    _vaciar_cola(["render"])
+    assert len(list(almacen.dir_de("resultados").glob("*.mp4"))) == 1
+
+
+def test_render_viejo_no_pisa_al_nuevo(tmp_path, modelo_con_multi):
+    from hookline import trabajos
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "uno", "modelo": 1})
+    fabrica.armar(cid, {"texto": "dos"})
+    fabrica.armar(cid, {"texto": "tres"})            # doble clic: el primero queda viejo
+    _vaciar_cola(["render"])
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["estado"] == "lista" and c["versiones"][-1]["texto"] == "tres"
+    assert not any(v["texto"] == "dos" for v in c["versiones"])
+
+
+def test_encargo_respeta_la_aprobacion_del_momento(tmp_path, modelo_con_multi, monkeypatch):
+    from datetime import timedelta
+    from hookline import comun
+    from hookline.comun import hoy_local
+    from hookline.db import sesion
+    from hookline.modelos import Pieza
+    from hookline.servicios import cuentas, repartir
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "hola", "modelo": 1})
+    _responder("juez", {"nota_texto": 4, "nota_tecnica": 4, "motivo": "ok"})
+    monkeypatch.setattr(cuentas, "estado_token", lambda c: {"conectada": True, "vencida": False, "dias_token": 50,
+                                                            "puede_publicar": True, "puede_comentar": True,
+                                                            "puede_insights": True})
+    manana = (hoy_local() + timedelta(days=1)).isoformat()
+    repartir.encargo(manana, 0, 0)                   # encargo creado SIN aprobación previa
+    comun.guardar_ajuste("encargo_aprueba", True)    # después lo activan
+    from hookline.modelos import Encargo
+    with sesion() as s:
+        e = s.query(Encargo).one()
+        e.reels = 1
+    repartir.seguir_encargo()
+    with sesion() as s:
+        p = s.query(Pieza).filter_by(cuenta_id="multi1").one()
+        assert p.estado == "juzgada" and not p.aprobada_por   # sigue pidiendo aprobación
+
+
+def test_repartir_en_paralelo_no_repite(tmp_path, modelo_con_multi):
+    import threading
+    from datetime import timedelta
+    from hookline.comun import hoy_local
+    from hookline.db import sesion
+    from hookline.modelos import Cuenta, Pieza
+    from hookline.servicios import repartir
+    with sesion() as s:
+        s.add(Cuenta(id="multi2", main_id="modelo1", activa_desde="2026-01-01"))
+    _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "hola", "modelo": 1})
+    _responder("juez", {"nota_texto": 4, "nota_tecnica": 4, "motivo": "ok"})
+    manana = (hoy_local() + timedelta(days=1)).isoformat()
+    hs = [threading.Thread(target=repartir.repartir, args=(manana, 1, 0)) for _ in range(4)]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    with sesion() as s:
+        ps = s.query(Pieza).filter(Pieza.copia_id != "").all()
+    assert len(ps) == 1    # una sola copia aprobada → un solo reel, en una sola cuenta

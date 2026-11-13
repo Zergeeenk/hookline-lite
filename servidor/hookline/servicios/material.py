@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import re
 import subprocess
-import time
+from datetime import datetime
 import uuid
 from pathlib import Path
 
 from sqlalchemy import delete, select
 
 from .. import almacen, medios
-from ..comun import actividad, ajuste, guardar_ajuste
+from ..comun import actividad, ajuste, candado, guardar_ajuste
+from ..config import config
 from ..db import sesion
 from ..modelos import Cuenta, MaterialMeta
 from ..trabajos import encolar, manejador
@@ -289,10 +290,11 @@ def sacar_audio(video: Path, destino: Path) -> Path | None:
 
 
 def _bajando(cambiar) -> dict:
-    bj = dict(ajuste("material_bajando", {}) or {})
-    cambiar(bj)
-    guardar_ajuste("material_bajando", bj)
-    return bj
+    with candado("material_bajando"):
+        bj = dict(ajuste("material_bajando", {}) or {})
+        cambiar(bj)
+        guardar_ajuste("material_bajando", bj)
+        return bj
 
 
 def bajar(cuenta: str, link: str) -> str:
@@ -326,7 +328,7 @@ def _bajar(datos: dict) -> None:
     musica = sacar_audio(video, almacen.libre(carpeta(modelo, "musica") / f"{video.stem}.m4a"))
     poner_meta(modelo, "ejemplos", video.name, link=link, autor=info.get("uploader") or "",
                titulo=(info.get("description") or info.get("title") or "")[:200], tema=tema,
-               musica=musica.name if musica else "", bajado=time.strftime("%Y-%m-%dT%H:%M:%S"))
+               musica=musica.name if musica else "", bajado=datetime.now(config().tz).strftime("%Y-%m-%dT%H:%M:%S"))
     if musica:
         poner_meta(modelo, "musica", musica.name, link=link, autor=info.get("uploader") or "", tema=tema, de=video.name)
     actividad("material", f"Bajado un ejemplo para @{modelo}", img=almacen.relativa(video), cuenta=modelo)

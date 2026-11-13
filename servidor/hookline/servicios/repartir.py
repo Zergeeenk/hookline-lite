@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from .. import almacen, medios
-from ..comun import actividad, ajuste, desde_local, iso_local
+from ..comun import actividad, ajuste, candado, desde_local, iso_local
 from ..config import config
 from ..db import ahora, sesion
 from ..modelos import Encargo, Pieza
@@ -93,20 +93,30 @@ def _hora_de(x: Pieza) -> datetime | None:
     return None
 
 
-def _estado_pieza(c: dict, cuando: datetime, usuario: str) -> dict:
+def _estado_pieza(c: dict, cuando: datetime, aprobado_por: str) -> dict:
+    """aprobado_por: quién aprobó de antemano lo que se reparte ("" = nadie: queda 'Para aprobar').
+    Se decide al crear el encargo, no cuando se reparte (si cambian el ajuste en el medio, no cambia lo ya pedido)."""
     hora = cuando.strftime("%Y-%m-%dT%H:%M")
-    if not ajuste("encargo_aprueba", False):
+    if not aprobado_por:
         return {"estado": "juzgada", "sugerido": hora, "cuando": None}
     if c["conectada"] and c["puede_publicar"]:
         return {"estado": "programada", "cuando": desde_local(hora), "sugerido": hora, "aprobada": ahora(),
-                "aprobada_por": f"encargo:{usuario or 'panel'}"}
+                "aprobada_por": f"encargo:{aprobado_por}"}
     if c["conectada"]:
         return {"estado": "juzgada", "sugerido": hora, "cuando": None}
     return {"estado": "planificada", "cuando": desde_local(hora), "sugerido": hora}
 
 
-def repartir(dia: str, reels: int = 3, historias: int = 2, usuario: str = "") -> dict:
+def repartir(dia: str, reels: int = 3, historias: int = 2, usuario: str = "", aprobado_por: str | None = None) -> dict:
+    """Con candado: el API (botón) y el worker (seguir_encargo) no pueden repartir a la vez (repetirían reels)."""
     datetime.fromisoformat(dia)
+    if aprobado_por is None:
+        aprobado_por = (usuario or "panel") if ajuste("encargo_aprueba", False) else ""
+    with candado("bandeja"):
+        return _repartir(dia, reels, historias, aprobado_por)
+
+
+def _repartir(dia: str, reels: int, historias: int, aprobado_por: str) -> dict:
     cs = sorted(svc_cuentas.listar(), key=lambda c: (c.get("main") or c["id"], bool(c.get("main")), c["id"]))
     hechos = {"reels": 0, "historias": 0, "faltan": []}
     copias = fabrica.listar()
@@ -141,12 +151,17 @@ def repartir(dia: str, reels: int = 3, historias: int = 2, usuario: str = "") ->
                     x = pool.pop(0)
                     ya_repartidas.add(x["id"])
                     dst = almacen.libre(almacen.dir_de("subir", c["id"]) / f".reel-{x['id']}.mp4")
-                    shutil.copy2(fabrica.resultado(x["id"]), dst)
+                    try:
+                        shutil.copy2(fabrica.resultado(x["id"]), dst)
+                    except (ValueError, OSError) as ex:   # se borró el video: se saltea esta copia
+                        dst.unlink(missing_ok=True)
+                        hechos["faltan"].append(f"@{c['usuario']}: no encontré el video de la copia {x['id']} ({ex})")
+                        continue
                     hora = cuando.strftime("%H:%M")
                     actividad("programando", f"Reel para @{c['usuario']} a las {hora}", img=almacen.relativa(dst),
                               cuenta=c["id"], copia=x["id"])
                     p = Pieza(id=svc_piezas.nuevo_id(), cuenta_id=c["id"], tipo="reel", archivos=[almacen.relativa(dst)],
-                              plan=True, dia=dia, copia_id=x["id"], **_estado_pieza(c, cuando, usuario))
+                              plan=True, dia=dia, copia_id=x["id"], **_estado_pieza(c, cuando, aprobado_por))
                     s.add(p)
                     lista.append(p)
                     hechos["reels"] += 1
@@ -169,11 +184,16 @@ def repartir(dia: str, reels: int = 3, historias: int = 2, usuario: str = "") ->
                     todas.remove(f)
                     fotos_usadas.add(f"{m}/{f['nombre']}")
                     dst = almacen.libre(almacen.dir_de("subir", c["id"]) / f".hist-{f['nombre']}")
-                    shutil.copy2(material.carpeta(m, f["_sec"]) / f["nombre"], dst)
+                    try:
+                        shutil.copy2(material.carpeta(m, f["_sec"]) / f["nombre"], dst)
+                    except (ValueError, OSError) as ex:   # la borraron recién: se saltea
+                        dst.unlink(missing_ok=True)
+                        hechos["faltan"].append(f"@{c['usuario']} {hora}: no encontré la foto {f['nombre']} ({ex})")
+                        continue
                     actividad("programando", f"Historia para @{c['usuario']} a las {hora}", img=almacen.relativa(dst),
                               cuenta=c["id"])
                     p = Pieza(id=svc_piezas.nuevo_id(), cuenta_id=c["id"], tipo="historia", archivos=[almacen.relativa(dst)],
-                              plan=True, dia=dia, foto=f"{m}/{f['nombre']}", **_estado_pieza(c, cuando, usuario))
+                              plan=True, dia=dia, foto=f"{m}/{f['nombre']}", **_estado_pieza(c, cuando, aprobado_por))
                     s.add(p)
                     lista.append(p)
                     hechos["historias"] += 1
@@ -200,12 +220,12 @@ def encargo(dia: str, reels, historias, usuario: str = "") -> dict:
     reels, historias = max(0, min(6, int(reels))), max(0, min(6, int(historias)))
     with sesion() as s:
         e = Encargo(dia=dia, reels=reels, historias=historias, estado="trabajando", pedidos={},
-                    aprobado_por=usuario if ajuste("encargo_aprueba", False) else "")
+                    aprobado_por=(usuario or "panel") if ajuste("encargo_aprueba", False) else "")
         s.add(e)
         s.flush()
         eid = e.id
     actividad("encargo", f"Encargo para el {dia}: {reels} reels por multicuenta y {historias} historias por cuenta")
-    hechos = repartir(dia, reels, historias, usuario)
+    hechos = repartir(dia, reels, historias, usuario, aprobado_por=(usuario or "panel") if ajuste("encargo_aprueba", False) else "")
     cs = svc_cuentas.listar()
     pedidos = {}
     with sesion() as s:
@@ -236,7 +256,7 @@ def seguir_encargo() -> None:
     e = _ultimo()
     if not e or e.estado != "trabajando":
         return
-    h = repartir(e.dia, e.reels, e.historias, e.aprobado_por)
+    h = repartir(e.dia, e.reels, e.historias, aprobado_por=e.aprobado_por or "")
     falta = 0
     with sesion() as s:
         ps = s.scalars(select(Pieza).where(Pieza.dia == e.dia)).all()

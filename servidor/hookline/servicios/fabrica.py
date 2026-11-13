@@ -16,6 +16,7 @@ la copia queda frenada para que la dueña la descarte o suba un remate propio (s
 from __future__ import annotations
 
 import hashlib
+import logging
 import random
 import re
 import shutil
@@ -28,7 +29,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .. import almacen, chat_img, fuentes, medios
-from ..comun import actividad
+from ..comun import actividad, candado
 from ..db import ahora, sesion
 from ..ia import tareas
 from ..modelos import Copia, LinkBanco
@@ -50,6 +51,8 @@ ESCALA_TEXTO = 1.2                   # la letra un 20 % más grande que la del e
 NOTA_MIN, REINTENTOS = 3, 2          # juez: nota 1-5; menos de 3 se rehace (hasta 2 veces)
 ACTIVOS = ("bajando", "leyendo", "armando")
 _lock = threading.RLock()
+
+log = logging.getLogger("hookline.fabrica")
 
 
 # --- utilidades ffmpeg / texto ------------------------------------------------------------------------------------------------
@@ -138,6 +141,12 @@ def normalizar(c: dict) -> dict:
 
 
 # --- datos ---------------------------------------------------------------------------------------------------------------------
+def _hora_local() -> str:
+    from datetime import datetime
+    from ..config import config
+    return datetime.now(config().tz).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _raiz() -> Path:
     return almacen.dir_de("copias")
 
@@ -145,13 +154,18 @@ def _raiz() -> Path:
 def _dir(cid: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{8}", str(cid or "")):
         raise ValueError("Copia desconocida.")
-    d = _raiz() / cid
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return _raiz() / cid   # la carpeta la crea _nueva: si la copia se borró, no se vuelve a crear sola
 
 
 def _datos(cid: str, **cambios) -> dict:
-    with _lock, sesion() as s:
+    """Lee (y si hay cambios, actualiza) los datos de una copia. El candado evita que el API y el worker se pisen."""
+    if not cambios:
+        with sesion() as s:
+            x = s.get(Copia, str(cid))
+            if x is None:
+                raise ValueError("Esa copia ya no está.")
+            return normalizar(dict(x.datos or {}))
+    with candado("copias"), sesion() as s:
         x = s.get(Copia, str(cid))
         if x is None:
             raise ValueError("Esa copia ya no está.")
@@ -188,13 +202,13 @@ def opciones() -> dict:
 
 def _nueva(**campos) -> str:
     cid = uuid.uuid4().hex[:8]
-    datos = normalizar({"id": cid, "creado": time.strftime("%Y-%m-%dT%H:%M:%S"), "estado": "bajando", "error": "",
+    datos = normalizar({"id": cid, "creado": _hora_local(), "estado": "bajando", "error": "",
                         "link": "", "ejemplo": "", "duracion": 0, "ancho": 720, "alto": 1280, "corte": 0, "texto": "",
                         "texto_tam": 0.042, "texto_y": 0.17, "modelo": "", "resultado": "", "leido": False, "notas": "",
                         "cuenta": "", **campos})
     with sesion() as s:
         s.add(Copia(id=cid, cuenta_id=datos["cuenta"], estado=datos["estado"], link=datos["link"], datos=datos))
-    _dir(cid)
+    _dir(cid).mkdir(parents=True, exist_ok=True)
     return cid
 
 
@@ -236,6 +250,8 @@ def a_bandeja(cid: str, cuenta: str, archivo: str = "") -> str:
     from . import cuentas, piezas
     if not cuentas.existe(cuenta):
         raise ValueError("Elegí una cuenta primero.")
+    if _bloqueada_por_marca(_datos(cid)):
+        raise ValueError("El remate tiene marca de agua de otra cuenta: subí un remate propio o descartá este meme.")
     pid = piezas.copiar_a_bandeja(cuenta, resultado(cid, archivo), f"copia-{cid}.mp4", copia_id=cid)
     return pid
 
@@ -423,12 +439,21 @@ def _descargar(datos: dict) -> None:
         _datos(cid)
     except ValueError:
         return   # la borraron o cancelaron
+    if not _dir(cid).is_dir():
+        return
     try:
         video, _ = material.bajar_video(datos["link"], _dir(cid), "ejemplo")
     except ValueError as ex:
-        _datos(cid, estado="error", error=str(ex))
+        try:
+            _datos(cid, estado="error", error=str(ex))
+        except ValueError:
+            shutil.rmtree(_dir(cid), ignore_errors=True)
         return
-    _datos(cid, ejemplo=video.name)
+    try:
+        _datos(cid, ejemplo=video.name)
+    except ValueError:   # la cancelaron mientras bajaba: no queda nada suelto
+        shutil.rmtree(_dir(cid), ignore_errors=True)
+        return
     encolar("preparar_copia", {"copia": cid}, clave=f"preparar_copia:{cid}:{int(time.time())}", max_intentos=1)
 
 
@@ -576,7 +601,7 @@ def _limpiar_campos(l: dict, dur) -> dict:
         out["textos"] = [{"texto": str(t.get("texto"))[:80], **{k: round(_num(t.get(k), 0.5, 0, 1), 4) for k in ("x", "y", "tam")
                                                                if t.get(k) not in (None, "")}}
                          for t in l["textos"][:4] if isinstance(t, dict) and t.get("texto")]
-    if isinstance(l.get("pegar"), list) and "chat" not in out:
+    if isinstance(l.get("pegar"), list) and not (out.get("chat") or {}).get("mensajes"):
         out["pegar"] = [{**{k: round(_num(b.get(k), 0, 0, 1), 4) for k in ("x0", "y0", "x1", "y1")},
                          **{k: round(_num(b[k], 0, 0, 600), 2) for k in ("cuadro", "aparece") if b.get(k) not in (None, "")},
                          **({"a_y0": round(_num(b["a_y0"], 0, 0, 1), 4)} if b.get("a_y0") not in (None, "") else {})}
@@ -617,7 +642,7 @@ def _leido(t, l: dict) -> None:
         _datos(cid, estado="error", leido=True, error="Descartado: en el ejemplo sale alguien que puede ser menor de edad.")
         actividad("aviso", "Ejemplo descartado: alguien puede ser menor de edad", copia=cid)
         return
-    cambios = _limpiar_campos(l, c.get("duracion"))
+    cambios = _limpiar_campos({k: v for k, v in l.items() if v is not None}, c.get("duracion"))
     cambios["y_ejemplo"] = cambios.get("texto_y", c.get("texto_y"))
     marca = bool(l.get("marca_agua"))
     cambios.update(leido=True, notas=str(l.get("notas") or "")[:300], marca_agua=marca,
@@ -650,7 +675,8 @@ def _elegir_foto(cid: str, cuenta: str, cual) -> None:
 
 
 def _bloqueada_por_marca(c: dict) -> bool:
-    return bool(c.get("marca_agua")) and not c.get("remate")
+    """Marca de agua de otra cuenta en el remate y sin remate propio (que exista de verdad): no se arma ni se usa."""
+    return bool(c.get("marca_agua")) and not (c.get("remate") and (_dir(c["id"]) / c["remate"]).is_file())
 
 
 def _auto(cid: str) -> None:
@@ -714,11 +740,12 @@ def subir_remate(cid: str, nombre: str, datos: bytes) -> str:
     if not medios.es_video(nombre):
         raise ValueError("El remate tiene que ser un video (mp4 o mov).")
     d = _dir(cid)
-    for viejo in d.glob("remate-*.*"):
-        viejo.unlink(missing_ok=True)
+    viejos = list(d.glob("remate-*.*"))
     p = d / f"remate-{int(time.time() * 1000)}{Path(nombre).suffix.lower()}"
     p.write_bytes(datos)
-    _datos(cid, remate=p.name)
+    _datos(cid, remate=p.name)            # primero el nuevo y después se borran los viejos (un render en curso no cae
+    for viejo in viejos:                  # nunca en el remate del ejemplo)
+        viejo.unlink(missing_ok=True)
     actividad("remate", "Remate propio cargado: ya se puede armar", copia=cid)
     _auto(cid)
     return p.name
@@ -815,7 +842,7 @@ def armar(cid: str, campos: dict, juzgar: bool = False) -> None:
         raise ValueError("Todavía no está el video de ejemplo.")
     if not c.get("modelo"):
         raise ValueError("Subí primero la foto o el video de tu modelo.")
-    if _bloqueada_por_marca(c) and juzgar:
+    if _bloqueada_por_marca(c):
         raise ValueError("El remate tiene marca de agua: subí un remate propio o descartá este meme.")
     cambios = _limpiar_campos(campos or {}, c.get("duracion"))
     if cambios.get("ubicacion_auto", c.get("ubicacion_auto")) and not c.get("pegar") and not c.get("chat") and not c.get("noti"):
@@ -827,8 +854,9 @@ def armar(cid: str, campos: dict, juzgar: bool = False) -> None:
         raise ValueError("Elegí o subí la música primero (o cambiá el audio).")
     if not juzgar:
         cambios["juez"] = {}
-    _datos(cid, estado="armando", error="", juzgar=juzgar, **cambios)
-    encolar("render", {"copia": cid}, clave=f"render:{cid}:{time.time():.3f}", max_intentos=1)
+    n = int(c.get("render_n") or 0) + 1
+    _datos(cid, estado="armando", error="", juzgar=juzgar, render_n=n, **cambios)
+    encolar("render", {"copia": cid, "n": n}, clave=f"render:{cid}:{n}", max_intentos=1)
 
 
 def _afinar(ejemplo: Path, b: dict, w: int, h: int, dur: float, tmp: Path) -> dict:
@@ -919,12 +947,29 @@ def _texto_filtros(c: dict, d: Path, w: int, h: int) -> list[str]:
 
 @manejador("render")
 def _render(datos: dict) -> None:
-    cid = datos["copia"]
+    """Un render por copia a la vez (candado). Si mientras esperaba se pidió otro armado, este queda viejo y no corre."""
+    try:
+        with candado(f"render-{datos['copia']}", espera=3600):
+            _render_ya(datos)
+    except ValueError:
+        return
+
+
+def _vigente(cid: str, n) -> bool:
+    try:
+        c = _datos(cid)
+    except ValueError:
+        return False
+    return n is None or int(c.get("render_n") or 0) == int(n)
+
+
+def _render_ya(datos: dict) -> None:
+    cid, n = datos["copia"], datos.get("n")
     try:
         c = _datos(cid)
     except ValueError:
         return
-    if c.get("estado") != "armando":
+    if c.get("estado") != "armando" or not _vigente(cid, n):
         return
     d = _dir(cid)
     actividad("editando", f"Editando el reel «{(c.get('texto') or '').splitlines()[0][:60] if c.get('texto') else cid}»",
@@ -996,6 +1041,8 @@ def _render(datos: dict) -> None:
             base += "," + f
         # el remate: el del ejemplo (sin tocar sus marcas: si las tiene, la copia no llega acá) o uno propio
         remate_p = d / c["remate"] if c.get("remate") and (d / c["remate"]).is_file() else None
+        if c.get("marca_agua") and not remate_p:
+            raise RuntimeError("el remate tiene marca de agua y no hay remate propio")
         if remate_p:
             ri = entradas.count("-i")
             entradas += ["-i", str(remate_p)]
@@ -1047,19 +1094,33 @@ def _render(datos: dict) -> None:
             t.unlink(missing_ok=True)
         if r.returncode or not salida.is_file():
             raise RuntimeError(r.stderr.strip()[-300:] or "ffmpeg falló")
-        vs = (c.get("versiones") or []) + [{"archivo": salida.name, "armado": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                             "texto": (c.get("texto") or "")[:120]}]
+        actual = _datos(cid)
+        vs = (actual.get("versiones") or []) + [{"archivo": salida.name, "armado": _hora_local(),
+                                                  "texto": (c.get("texto") or "")[:120]}]
         for v in vs[:-MAX_VERSIONES]:
             (d / v["archivo"]).unlink(missing_ok=True)
-        _datos(cid, estado="lista", resultado=salida.name, armado=vs[-1]["armado"], versiones=vs[-MAX_VERSIONES:],
-               duracion_final=round(total, 2))
-        actividad("listo", "Reel armado: pasa al juez" if c.get("juzgar") else "Reel armado",
-                  img=almacen.relativa(salida), copia=cid, cuenta=c.get("cuenta", ""))
-        a_resultados(cid)
-        if c.get("juzgar"):
-            _al_juez(cid, salida, total)
+        vigente = _vigente(cid, n)   # si pidieron otro armado mientras tanto, este queda en el historial y nada más
+        _datos(cid, versiones=vs[-MAX_VERSIONES:], **({"estado": "lista", "resultado": salida.name,
+                                                       "armado": vs[-1]["armado"], "duracion_final": round(total, 2)}
+                                                      if vigente else {}))
     except Exception as ex:
-        _datos(cid, estado="lista", error=f"No se pudo armar: {str(ex)[:180]}")
+        if _vigente(cid, n):
+            _datos(cid, estado="lista", error=f"No se pudo armar: {str(ex)[:180]}")
+        return
+    if not vigente:
+        return
+    actividad("listo", "Reel armado: pasa al juez" if c.get("juzgar") else "Reel armado",
+              img=almacen.relativa(salida), copia=cid, cuenta=c.get("cuenta", ""))
+    try:
+        a_resultados(cid)
+    except Exception as ex:
+        log.warning("resultados %s: %s", cid, ex)
+    if c.get("juzgar"):
+        try:
+            _al_juez(cid, salida, total)
+        except Exception as ex:
+            c2 = _datos(cid)
+            _datos(cid, juez={**(c2.get("juez") or {}), "estado": "sin_juez", "motivo": f"No se pudo pedir el juez: {str(ex)[:150]}"})
 
 
 # --- 4) el juez --------------------------------------------------------------------------------------------------------------------------
@@ -1090,7 +1151,7 @@ def _al_juez(cid: str, video: Path, dur: float) -> None:
         dr.text((x + 4, y + 4), f"{t:g}s", fill="yellow")
     shutil.rmtree(tmp, ignore_errors=True)
     if hoja is None:
-        return
+        raise RuntimeError("no se pudieron sacar cuadros del reel armado")
     hoja.save(d / "revision.jpg", quality=82)
     c = _datos(cid)
     _datos(cid, juez={**(c.get("juez") or {}), "estado": "mirando"}, revision="revision.jpg")
@@ -1101,6 +1162,17 @@ def _al_juez(cid: str, video: Path, dur: float) -> None:
 
 @tareas.al_terminar("juez")
 def _juzgado(t, j: dict) -> None:
+    try:
+        _juzgado_ya(t, j)
+    except ValueError as ex:   # no se pudo rehacer (ej.: falta la música o la foto): queda rechazado con el motivo
+        try:
+            c = _datos(t.referencia)
+            _datos(t.referencia, juez={**(c.get("juez") or {}), "estado": "rechazado", "motivo": str(ex)[:200]})
+        except ValueError:
+            pass
+
+
+def _juzgado_ya(t, j: dict) -> None:
     cid = t.referencia
     try:
         c = _datos(cid)
@@ -1166,10 +1238,12 @@ def a_resultados(cid: str) -> Path | None:
     except ValueError:
         return None
     dst_dir = almacen.dir_de("resultados")
-    for viejo in dst_dir.glob(f"* ({cid[:4]}).mp4"):
-        viejo.unlink(missing_ok=True)
+    viejo = c.get("resultado_lindo")
+    if viejo:
+        (dst_dir / Path(viejo).name).unlink(missing_ok=True)   # el anterior de ESTA copia (no por prefijo)
     dst = dst_dir / almacen.nombre_seguro(nombre_lindo(c), 140)
     shutil.copy2(src, dst)
+    _datos(cid, resultado_lindo=dst.name)
     return dst
 
 
