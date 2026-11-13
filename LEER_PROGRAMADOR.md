@@ -8,6 +8,18 @@ Quiero **integrar Hookline Lite dentro de otro sistema** (el repo de **Pyro**). 
 
 Abajo te dejo un primer borrador con lo que se ve en el código. **Verificalo, corregilo y completalo**, sobre todo lo marcado con **[A CONFIRMAR]**.
 
+## Cómo hacerlo con Claude Code (recomendado)
+Abrí el repo en VS Code con Claude Code y pegale esto:
+
+```
+Leé TODO este repo antes de hacer nada, archivo por archivo y completo: LEER_PROGRAMADOR.md primero, después LEEME.md,
+CLAUDE.md, CONTEXTO.md, INSTALAR.md, CONECTAR-INSTAGRAM.md, .claude/agents/*.md, buscador/*.md, ejemplos/EJEMPLOS.md,
+todos los .py (panel.py entero con cada endpoint /api/*) y panel/index.html. No te quedes con el resumen: abrí cada archivo.
+Cuando termines de leer, decime en 10 líneas qué entendiste del sistema. Después escribí REQUERIMIENTOS_INTEGRACION.md
+siguiendo LEER_PROGRAMADOR.md, verificando cada dato contra el código y resolviendo los [A CONFIRMAR].
+No corras el panel, no te conectes a Instagram ni publiques nada.
+```
+
 ---
 
 ## Qué tiene que tener `REQUERIMIENTOS_INTEGRACION.md`

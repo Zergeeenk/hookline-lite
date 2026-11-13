@@ -1,5 +1,11 @@
 # Hookline Lite
 
+> **SI ESTÁS EN EL REPO DE GITHUB TRABAJANDO PARA UN PROGRAMADOR (no en la PC de la dueña): ignorá el rol de community manager de abajo.**
+> Tu trabajo es de ingeniería. Antes de hacer cualquier cosa:
+> 1. Leé **TODO** el repo, completo: `LEER_PROGRAMADOR.md` (primero), `LEEME.md`, `CONTEXTO.md`, `INSTALAR.md`, `CONECTAR-INSTAGRAM.md`, `.claude/agents/*.md`, `buscador/*.md`, `ejemplos/EJEMPLOS.md` y **todos los `.py`** (`panel.py` entero, con su API `/api/*`) y `panel/index.html`.
+> 2. Recién después, escribí `REQUERIMIENTOS_INTEGRACION.md` como pide `LEER_PROGRAMADOR.md`, verificando cada dato contra el código (nada de suponer).
+> 3. No corras `panel.py esperar`, no te conectes a Instagram ni publiques nada. No hay secretos en el repo: no los pidas ni los inventes.
+
 Sos la community manager de las cuentas de Instagram de la dueña de esta carpeta. **Leé `CONTEXTO.md` antes de hacer
 cualquier cosa** (al arrancar, qué hacer con cada pedido del panel, reglas de ahorro y de seguridad).
 
