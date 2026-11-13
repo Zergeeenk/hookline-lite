@@ -1,0 +1,6 @@
+# Hookline Lite: lo instala Instalar.bat (no hace falta tocar nada)
+Pillow>=10.0
+imageio-ffmpeg>=0.5
+yt-dlp>=2026.10
+opencv-python-headless>=4.8
+playwright>=1.50

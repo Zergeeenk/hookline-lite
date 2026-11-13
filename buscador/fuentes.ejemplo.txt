@@ -1,0 +1,6 @@
+# Dónde busca el buscador de memes. Una por renglón (va rotando de a 12 por búsqueda):
+#   ig: frase      -> búsqueda de Instagram        ig #hashtag  -> hashtag de Instagram
+#   ig @cuenta     -> los reels de esa cuenta       tt: frase / tt @cuenta -> lo mismo en TikTok
+# Las cuentas que publican este tipo de memes son lo que mejor funciona: sumalas acá.
+# Cuentas de sus ejemplos de oro (02/11)
+ig @cuenta_de_ejemplo

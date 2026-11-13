@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Volviendo a Hookline Lite</title>
+<style>body{font-family:system-ui,sans-serif;background:#fff6f9;color:#2b1a22;padding:40px}a{color:#e8467c}</style>
+</head>
+<body>
+<h2>Volviendo a Hookline Lite…</h2>
+<p>Si no pasa nada en unos segundos, <a id="ir" href="#">tocá acá</a> (Hookline Lite tiene que estar abierto en esta compu).</p>
+<script>
+  // OPCIONAL (avanzado): si subís esta página a una dirección https propia (por ejemplo GitHub Pages) y la ponés como
+  // "dirección de vuelta" en Ajustes y en la app de Meta, no hace falta copiar y pegar la dirección al conectar.
+  // Instagram vuelve acá con ?code=...&state=...; esta página se lo pasa al panel local, que es quien canjea el código.
+  var destino = "http://localhost:8791/instagram/callback" + location.search;
+  document.getElementById("ir").href = destino;
+  location.replace(destino);
+</script>
+</body>
+</html>

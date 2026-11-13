@@ -1,0 +1,17 @@
+# Datos privados: nunca al repo
+datos/
+cuentas/*
+!cuentas/ejemplo/
+**/token*.json
+*client*.json
+*.env
+cookies*.txt
+buscador/fuentes.txt
+# Pesados / generados
+Material/
+Para subir/
+Resultados/
+capturas/
+herramientas/cloudflared.exe
+__pycache__/
+*.pyc
