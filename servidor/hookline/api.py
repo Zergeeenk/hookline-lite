@@ -1,0 +1,549 @@
+"""API HTTP (FastAPI). Mismas rutas y formas que el panel de Hookline Lite (/api/*), más:
+  - login (/api/login, /api/logout, /api/yo), CSRF y roles;
+  - tokens Bearer para Pyro (/api/tokens) y usuarios (/api/usuarios), solo admin;
+  - /publico/... (URLs firmadas para que Meta baje los archivos) y /api/salud.
+Documentación automática en /docs (OpenAPI).
+"""
+from __future__ import annotations
+
+import logging
+import urllib.parse
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import select
+
+from . import __version__, almacen, auth, comun, instagram as ig, medios
+from .auth import Quien, requerir
+from .config import config
+from .db import sesion
+from .ia import tareas
+from .modelos import MensajeChat, TokenAPI, Usuario
+from .servicios import comentarios as svc_com
+from .servicios import cuentas as svc_cuentas
+from .servicios import jueces as svc_jueces
+from .servicios import piezas as svc_piezas
+
+log = logging.getLogger("hookline.api")
+PANEL = Path(__file__).parent / "panel" / "index.html"
+MAX_SUBIDA = 1024 * 1024 * 1024
+# desde dónde se pueden ver archivos por /mini y /media
+SECCIONES_VISIBLES = ("subir", "material", "copias", "resultados", "jueces", "candidatos")
+
+app = FastAPI(title="Hookline", version=__version__,
+              description="Community manager de Instagram multi-cuenta. Auth: cookie de sesión (panel) o "
+                          "`Authorization: Bearer hl_...` (integraciones).")
+if config().origenes_permitidos:
+    app.add_middleware(CORSMiddleware, allow_origins=list(config().origenes_permitidos), allow_credentials=False,
+                       allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+
+
+def _opcional(nombre: str):
+    """Los módulos de la fábrica se cargan si están (así la API arranca aunque falte playwright, por ejemplo)."""
+    try:
+        return __import__(f"hookline.servicios.{nombre}", fromlist=["x"])
+    except ImportError as ex:
+        log.warning("módulo %s no disponible: %s", nombre, ex)
+        return None
+
+
+svc_material, svc_fabrica, svc_buscador, svc_repartir = (_opcional(n) for n in ("material", "fabrica", "buscador", "repartir"))
+
+
+def _mod(m, nombre):
+    if m is None:
+        raise HTTPException(503, f"La parte '{nombre}' no está disponible en este servidor.")
+    return m
+
+
+@app.exception_handler(ValueError)
+async def _valor(_req, ex: ValueError):
+    return JSONResponse({"error": str(ex)[:300]}, status_code=400)
+
+
+@app.exception_handler(ig.TokenVencido)
+async def _vencido(_req, _ex):
+    return JSONResponse({"error": "El permiso de Instagram venció: reconectá la cuenta."}, status_code=400)
+
+
+@app.exception_handler(ig.ErrorInstagram)
+async def _err_ig(_req, ex):
+    return JSONResponse({"error": str(ex)[:300]}, status_code=400)
+
+
+@app.exception_handler(RuntimeError)
+async def _runtime(_req, ex):
+    return JSONResponse({"error": str(ex)[:300]}, status_code=400)
+
+
+@app.exception_handler(HTTPException)
+async def _http(_req, ex: HTTPException):
+    return JSONResponse({"error": ex.detail}, status_code=ex.status_code)
+
+
+def _cuenta(cid: str) -> str:
+    if not svc_cuentas.existe(cid):
+        raise HTTPException(404, "Cuenta desconocida.")
+    return cid
+
+
+async def _cuerpo(req: Request) -> bytes:
+    n = int(req.headers.get("content-length") or 0)
+    if n > MAX_SUBIDA:
+        raise HTTPException(400, "El archivo pesa más de 1 GB.")
+    datos = await req.body()
+    if len(datos) > MAX_SUBIDA:
+        raise HTTPException(400, "El archivo pesa más de 1 GB.")
+    return datos
+
+
+async def _json(req: Request) -> dict:
+    """Solo JSON de verdad (Lite aceptaba cualquier Content-Type: CSRF con text/plain)."""
+    if "application/json" not in (req.headers.get("content-type") or ""):
+        raise HTTPException(415, "Mandá JSON (Content-Type: application/json).")
+    try:
+        d = await req.json()
+    except ValueError:
+        raise HTTPException(400, "JSON inválido.")
+    return d if isinstance(d, dict) else {}
+
+
+# --- panel y sistema --------------------------------------------------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def panel():
+    return HTMLResponse(PANEL.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
+
+@app.get("/api/salud")
+def salud():
+    """Para el balanceador / Pyro: no pide login. No muestra datos."""
+    try:
+        with sesion() as s:
+            s.execute(select(1))
+        bd = True
+    except Exception:
+        bd = False
+    return {"ok": bd, "version": __version__, "motor_ia": tareas.motor_actual(), "ffmpeg": bool(medios.ffmpeg())}
+
+
+@app.post("/api/login")
+def login(resp: Response, d: dict = Depends(_json)):
+    q = auth.login(d.get("email", ""), d.get("clave", ""), resp)
+    return {"usuario": q.dict(), "csrf": q.csrf}
+
+
+@app.post("/api/logout")
+def logout(req: Request, resp: Response):
+    auth.logout(req, resp)
+    return {"ok": True}
+
+
+@app.get("/api/yo")
+def yo(q: Quien = requerir()):
+    return {"usuario": q.dict(), "csrf": q.csrf, "via": q.via}
+
+
+@app.get("/api/estado")
+def estado(q: Quien = requerir()):
+    with sesion() as s:
+        chat = [comun.mensaje_dict(m) for m in s.scalars(select(MensajeChat).order_by(MensajeChat.id.desc()).limit(80))]
+    app_id, secret = comun.app_meta()
+    return {"cuentas": svc_cuentas.listar(), "piezas": svc_piezas.listar(), "chat": list(reversed(chat)),
+            "claude": tareas.estado_puente(),
+            "app": {"configurada": bool(app_id and secret), "cloudflared": True, "ffmpeg": bool(medios.ffmpeg())},
+            "ahora": comun.iso_local(comun.ahora()), "carpeta": "", "usuario": q.dict()}
+
+
+# --- ajustes (admin) ------------------------------------------------------------------------------------------------------------
+def _ajustes() -> dict:
+    cfg = config()
+    app_id, secret = comun.app_meta()
+    return {"app_id": app_id, "tiene_secret": bool(secret), "app_por_entorno": bool(cfg.meta_app_id),
+            "redirect": cfg.redirect_instagram, "redirect_defecto": cfg.redirect_instagram, "cloudflared": "",
+            "ffmpeg": bool(medios.ffmpeg()), "carpeta": "", "version": cfg.ig_version, "url_publica": cfg.url_publica,
+            "motor_ia": tareas.motor_actual(), "modelo": cfg.modelo, "modelo_rapido": cfg.modelo_rapido,
+            "encargo_aprueba": bool(comun.ajuste("encargo_aprueba", False)), "problemas": cfg.problemas()}
+
+
+@app.get("/api/ajustes")
+def ajustes_get(q: Quien = requerir()):
+    return _ajustes()
+
+
+@app.post("/api/ajustes")
+def ajustes_set(d: dict = Depends(_json), q: Quien = requerir("admin")):
+    if "app_id" in d:
+        comun.guardar_ajuste("meta_app_id", "".join(ch for ch in str(d["app_id"] or "") if ch.isdigit()))
+    if d.get("app_secret"):
+        comun.guardar_ajuste("meta_app_secret", str(d["app_secret"]).strip(), cifrado=True)
+    if "motor_ia" in d:
+        if d["motor_ia"] not in tareas.MOTORES:
+            raise ValueError("Motor desconocido.")
+        comun.guardar_ajuste("motor_ia", d["motor_ia"])
+    if "encargo_aprueba" in d:
+        comun.guardar_ajuste("encargo_aprueba", bool(d["encargo_aprueba"]))
+    return _ajustes()
+
+
+# --- cuentas --------------------------------------------------------------------------------------------------------------------
+@app.post("/api/cuenta")
+def cuenta(d: dict = Depends(_json), q: Quien = requerir()):
+    cid, op = str(d.get("id", "")), d.get("op")
+    if op == "crear_local":
+        return {"ok": True, "id": svc_cuentas.crear_local(cid, str(d.get("main") or ""))}
+    _cuenta(cid)
+    if op == "guardar":
+        svc_cuentas.guardar(cid, d)
+        return {"ok": True}
+    if op == "sincronizar":
+        return svc_cuentas.sincronizar(cid)
+    if op == "desconectar":
+        svc_cuentas.desconectar(cid)
+        return {"ok": True}
+    if op == "borrar":
+        if q.rol != "admin":
+            raise HTTPException(403, "Solo un admin puede borrar cuentas.")
+        svc_cuentas.borrar(cid)
+        return {"ok": True}
+    raise HTTPException(400, "op")
+
+
+@app.post("/api/conectar_url")
+def conectar_url(q: Quien = requerir()):
+    return {"url": svc_cuentas.url_conectar(q.id)}
+
+
+@app.get("/instagram/conectar", include_in_schema=False)
+def ig_conectar(q: Quien = requerir("editor")):
+    return RedirectResponse(svc_cuentas.url_conectar(q.id), status_code=302)
+
+
+def _pagina(titulo: str, texto: str, ok: bool = True) -> HTMLResponse:
+    import html
+    color = "#e8467c" if ok else "#c0392b"
+    return HTMLResponse(
+        f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>Hookline</title><body style='font-family:Inter,system-ui,sans-serif;background:#fff6f9;color:#2b1a22;"
+        f"display:grid;place-items:center;min-height:90vh;margin:0 16px'><div style='max-width:480px;background:#fff;"
+        f"border:1px solid #f6d3e0;border-radius:18px;padding:32px'><h2 style='margin:0 0 8px;color:{color}'>"
+        f"{html.escape(titulo)}</h2><p>{html.escape(texto)}</p><a href='/#cuentas' style='color:#e8467c;font-weight:600'>"
+        f"Volver al panel</a></div>")
+
+
+@app.get("/instagram/callback", include_in_schema=False)
+def ig_callback(code: str = "", state: str = "", error: str = ""):
+    """Sin login a propósito: lo protege el `state` (obligatorio, de un uso, guardado en la base)."""
+    if error:
+        return _pagina("No se conectó", "Se canceló el permiso en Instagram.", False)
+    try:
+        usuario, _tipo = svc_cuentas.conectar_con_codigo(code, state)
+        return _pagina(f"@{usuario} conectada", "Listo. Ya podés cerrar esta pestaña y volver al panel.")
+    except Exception as ex:
+        return _pagina("No se pudo conectar", str(ex)[:300], False)
+
+
+@app.post("/api/conectar")
+def conectar(d: dict = Depends(_json), q: Quien = requerir()):
+    """Plan B: pegar la dirección completa a la que volvió Instagram."""
+    u = urllib.parse.urlparse(str(d.get("url") or "").strip())
+    qq = urllib.parse.parse_qs(u.query)
+    code = (qq.get("code") or [""])[0]
+    if not code:
+        raise ValueError("Esa dirección no trae el código: copiala entera desde la barra de arriba.")
+    usuario, tipo = svc_cuentas.conectar_con_codigo(code, (qq.get("state") or [""])[0])
+    return {"ok": True, "usuario": usuario, "tipo": tipo}
+
+
+@app.get("/api/stats")
+def stats(cuenta: str, q: Quien = requerir()):
+    return svc_cuentas.stats(_cuenta(cuenta))
+
+
+@app.get("/api/calendario")
+def calendario(cuenta: str = "", q: Quien = requerir()):
+    return {"medios": svc_cuentas.calendario(cuenta)}
+
+
+# --- bandeja --------------------------------------------------------------------------------------------------------------------
+@app.post("/api/subir")
+def subir(cuenta: str = "", nombre: str = "archivo", datos: bytes = Depends(_cuerpo), q: Quien = requerir()):
+    return {"ok": True, "archivo": svc_piezas.guardar_subida(cuenta, nombre, datos)}
+
+
+@app.post("/api/pieza")
+def pieza(d: dict = Depends(_json), q: Quien = requerir()):
+    return svc_piezas.accion(d, usuario=q.firma)
+
+
+@app.get("/api/piezas")
+def piezas(cuenta: str = "", q: Quien = requerir()):
+    """Para integraciones: la bandeja (opcionalmente de una cuenta)."""
+    return {"piezas": svc_piezas.listar(cuenta or None)}
+
+
+# --- comentarios, tendencias, chat -----------------------------------------------------------------------------------------------
+@app.get("/api/comentarios")
+def comentarios(cuenta: str, q: Quien = requerir()):
+    return svc_com.de_cuenta(_cuenta(cuenta))
+
+
+@app.post("/api/comentario")
+def comentario(d: dict = Depends(_json), q: Quien = requerir()):
+    return svc_com.accion(d, usuario=q.firma)
+
+
+@app.get("/api/tendencias")
+def tendencias_get(cuenta: str, q: Quien = requerir()):
+    return svc_jueces.tendencias_de(_cuenta(cuenta))
+
+
+@app.post("/api/tendencias")
+def tendencias_post(d: dict = Depends(_json), q: Quien = requerir()):
+    return svc_jueces.pedir_tendencias(_cuenta(str(d.get("cuenta", ""))))
+
+
+@app.post("/api/chat")
+def chat(d: dict = Depends(_json), q: Quien = requerir()):
+    return svc_jueces.mensaje(d.get("texto", ""), autor=q.firma)
+
+
+@app.get("/api/actividad")
+def actividad(q: Quien = requerir()):
+    from .modelos import Actividad, Encargo
+    with sesion() as s:
+        items = [{"t": comun.local(a.t).isoformat(timespec="seconds"), "tipo": a.tipo, "texto": a.texto, "img": a.img,
+                  "cuenta": a.cuenta, "copia": a.copia}
+                 for a in s.scalars(select(Actividad).order_by(Actividad.id.desc()).limit(60))]
+        e = s.scalar(select(Encargo).order_by(Encargo.id.desc()).limit(1))
+        enc = {"dia": e.dia, "reels": e.reels, "historias": e.historias, "estado": e.estado, "pedidos": e.pedidos,
+               "creado": comun.iso_local(e.creado)} if e else {}
+    return {"items": items, "encargo": enc}
+
+
+# --- material, fábrica, buscador, repartir ----------------------------------------------------------------------------------------
+@app.get("/api/modelos")
+def modelos(q: Quien = requerir()):
+    return {"modelos": _mod(svc_material, "material").resumen_modelos()}
+
+
+@app.get("/api/material")
+def material_get(cuenta: str, q: Quien = requerir()):
+    return _mod(svc_material, "material").listar(_cuenta(cuenta))
+
+
+@app.post("/api/material_subir")
+def material_subir(cuenta: str = "", sec: str = "", nombre: str = "archivo", datos: bytes = Depends(_cuerpo),
+                   q: Quien = requerir()):
+    m = _mod(svc_material, "material")
+    return {"ok": True, "archivo": m.guardar(_cuenta(cuenta), sec, nombre, datos)}
+
+
+@app.post("/api/material")
+def material_post(d: dict = Depends(_json), q: Quien = requerir()):
+    m = _mod(svc_material, "material")
+    cid, op = _cuenta(str(d.get("cuenta", ""))), d.get("op")
+    sec, nombre = str(d.get("sec", "")), str(d.get("nombre", ""))
+    if op == "nueva_carpeta":
+        return {"ok": True, "nombre": m.nueva_carpeta(cid, d.get("nombre"))}
+    if op == "bajar":
+        return {"ok": True, "id": m.bajar(cid, d.get("link"))}
+    if op == "etiquetar":
+        return {"ok": True, "etiquetas": m.etiquetar(cid, sec, nombre, d.get("etiquetas"))}
+    if op == "descartar":
+        m.descartar(str(d.get("id", "")))
+        return {"ok": True}
+    if op == "borrar":
+        m.borrar(cid, sec, nombre)
+        return {"ok": True}
+    if op == "a_bandeja":
+        m.a_bandeja(cid, sec, nombre)
+        return {"ok": True}
+    raise HTTPException(400, "op")
+
+
+@app.get("/api/copias")
+def copias(q: Quien = requerir()):
+    f = _mod(svc_fabrica, "fábrica")
+    return {"items": f.listar(), "opciones": f.opciones(), "links": f.links(),
+            "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."}}
+
+
+@app.post("/api/copiar_subir")
+def copiar_subir(que: str = "", id: str = "", nombre: str = "archivo", cuenta: str = "",
+                 datos: bytes = Depends(_cuerpo), q: Quien = requerir()):
+    f = _mod(svc_fabrica, "fábrica")
+    if que == "ejemplo":
+        return {"ok": True, "id": f.desde_archivo(nombre, datos, cuenta)}
+    if que == "audio":
+        return {"ok": True, "archivo": f.subir_audio(id, nombre, datos)}
+    if que == "remate":
+        return {"ok": True, "archivo": f.subir_remate(id, nombre, datos)}
+    return {"ok": True, "archivo": f.subir_modelo(id, nombre, datos)}
+
+
+@app.post("/api/copiar")
+def copiar(d: dict = Depends(_json), q: Quien = requerir()):
+    f = _mod(svc_fabrica, "fábrica")
+    op, cid = d.get("op"), str(d.get("id", ""))
+    link = str(d.get("link") or "")
+    if op == "link":
+        ids = f.desde_links(d.get("link"), str(d.get("cuenta") or ""))
+        return {"ok": True, "id": ids[0], "ids": ids}
+    if op == "cancelar":
+        return {"ok": True, "n": f.cancelar()}
+    if op == "guardar_links":
+        return {"ok": True, "n": f.guardar_links(d.get("link"))}
+    if op == "buscar":
+        _mod(svc_buscador, "buscador").buscar()
+        return {"ok": True}
+    if op == "importar_cookies":
+        return {"ok": True, "n": _mod(svc_buscador, "buscador").importar_cookies(str(d.get("texto") or ""))}
+    if op == "agregar_encontrados":
+        items = []
+        for x in d.get("items") or []:
+            try:
+                p = almacen.ruta(str(x.get("img", "")))
+            except ValueError:
+                continue
+            if p.is_file() and x.get("link"):
+                items.append({**x, "img": p})
+        return {"ok": True, "n": f.agregar_encontrados(items)}
+    if op == "votar":
+        f.votar(link, d.get("voto"), d.get("motivo"))
+        return {"ok": True}
+    if op == "previa":
+        return {"ok": True, "url": almacen.relativa(f.previa(link))}
+    if op == "borrar_link":
+        f.borrar_link(link)
+        return {"ok": True}
+    if op == "hacer_guardados":
+        ids = f.hacer_guardados(d.get("n"), str(d.get("cuenta") or ""))
+        return {"ok": True, "id": ids[0], "ids": ids}
+    if op == "armar":
+        f.armar(cid, d)
+        return {"ok": True}
+    if op == "borrar":
+        f.borrar(cid)
+        return {"ok": True}
+    if op in ("modelo_material", "audio_material"):
+        m = _mod(svc_material, "material")
+        cuenta = _cuenta(str(d.get("cuenta", "")))
+        if op == "modelo_material":
+            return {"ok": True, "archivo": f.modelo_de(cid, m.ruta(cuenta, str(d.get("sec", "")), str(d.get("nombre", ""))))}
+        sec = "ejemplos" if d.get("sec") == "ejemplos" else "musica"
+        return {"ok": True, "archivo": f.audio_de(cid, m.ruta(cuenta, sec, str(d.get("nombre", ""))), d.get("titulo") or "")}
+    if op == "ubicar":
+        return f.ubicar(cid, d)
+    if op == "borrar_version":
+        f.borrar_version(cid, str(d.get("archivo", "")))
+        return {"ok": True}
+    if op == "a_bandeja":
+        f.a_bandeja(cid, _cuenta(str(d.get("cuenta", ""))), str(d.get("archivo") or ""))
+        return {"ok": True}
+    raise HTTPException(400, "op")
+
+
+@app.post("/api/repartir")
+def repartir(d: dict = Depends(_json), q: Quien = requerir()):
+    r = _mod(svc_repartir, "repartir")
+    return {"ok": True, **r.repartir(str(d.get("dia") or ""), usuario=q.firma)}
+
+
+@app.post("/api/encargo")
+def encargo(d: dict = Depends(_json), q: Quien = requerir()):
+    r = _mod(svc_repartir, "repartir")
+    return {"ok": True, **r.encargo(str(d.get("dia") or ""), d.get("reels", 3), d.get("historias", 2), usuario=q.firma)}
+
+
+# --- archivos -----------------------------------------------------------------------------------------------------------------------
+def _visible(p: str) -> Path:
+    try:
+        f = almacen.ruta(p)
+    except ValueError:
+        raise HTTPException(404, "no existe")
+    raiz = almacen.raiz()
+    if not f.is_file() or not any(f.is_relative_to(raiz / almacen.SECCIONES[s]) for s in SECCIONES_VISIBLES):
+        raise HTTPException(404, "no existe")
+    return f
+
+
+@app.get("/media")
+def media(p: str, descargar: int = 0, q: Quien = requerir()):
+    f = _visible(p)
+    return FileResponse(f, filename=f.name if descargar else None,
+                        content_disposition_type="attachment" if descargar else "inline",
+                        headers={"Cache-Control": "private, max-age=60"})
+
+
+@app.get("/mini")
+def mini(p: str, q: Quien = requerir()):
+    m = medios.miniatura(_visible(p), almacen.dir_de("minis"))
+    if not m:
+        raise HTTPException(404, "sin miniatura")
+    return FileResponse(m, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.api_route("/publico/{rel:path}", methods=["GET", "HEAD"], include_in_schema=False)
+def publico(rel: str, v: str = "", f: str = ""):
+    """Lo baja Meta (sin login): solo con firma válida y vigente."""
+    p = almacen.verificar_publica(rel, v, f)
+    if not p:
+        raise HTTPException(404, "no existe")
+    tipo = "video/mp4" if medios.es_video(p) else "image/jpeg"
+    return FileResponse(p, media_type=tipo, headers={"Cache-Control": "no-store"})
+
+
+# --- usuarios y tokens (admin) -------------------------------------------------------------------------------------------------------
+@app.get("/api/usuarios")
+def usuarios(q: Quien = requerir("admin")):
+    with sesion() as s:
+        us = [{"id": u.id, "email": u.email, "nombre": u.nombre, "rol": u.rol, "activo": u.activo}
+              for u in s.scalars(select(Usuario).order_by(Usuario.id))]
+        ts = [{"id": t.id, "nombre": t.nombre, "prefijo": t.prefijo, "rol": t.rol, "revocado": t.revocado,
+               "ultimo_uso": comun.iso_local(t.ultimo_uso)} for t in s.scalars(select(TokenAPI).order_by(TokenAPI.id))]
+    return {"usuarios": us, "tokens": ts}
+
+
+@app.post("/api/usuarios")
+def usuarios_post(d: dict = Depends(_json), q: Quien = requerir("admin")):
+    op = d.get("op")
+    if op == "crear":
+        return {"ok": True, "id": auth.crear_usuario(str(d.get("email", "")), str(d.get("clave", "")),
+                                                     str(d.get("nombre", "")), str(d.get("rol") or "editor"))}
+    if op == "desactivar":
+        with sesion() as s:
+            u = s.get(Usuario, int(d.get("id") or 0))
+            if not u:
+                raise ValueError("Usuario desconocido.")
+            if u.id == q.id:
+                raise ValueError("No te podés desactivar a vos misma.")
+            u.activo = False
+        return {"ok": True}
+    if op == "token":
+        return {"ok": True, "token": auth.crear_token(str(d.get("nombre") or "integración"), str(d.get("rol") or "editor"))}
+    if op == "revocar_token":
+        with sesion() as s:
+            t = s.get(TokenAPI, int(d.get("id") or 0))
+            if not t:
+                raise ValueError("Token desconocido.")
+            t.revocado = True
+        return {"ok": True}
+    raise HTTPException(400, "op")
+
+
+@app.get("/api/tareas_ia")
+def tareas_ia(q: Quien = requerir("admin")):
+    """Para controlar costo y errores de Claude."""
+    from .modelos import TareaIA
+    with sesion() as s:
+        ts = s.scalars(select(TareaIA).order_by(TareaIA.creado.desc()).limit(100)).all()
+        return {"tareas": [{"id": t.id, "tipo": t.tipo, "estado": t.estado, "motor": t.motor, "referencia": t.referencia,
+                            "error": t.error, "uso": t.uso, "creado": comun.iso_local(t.creado),
+                            "terminado": comun.iso_local(t.terminado)} for t in ts]}

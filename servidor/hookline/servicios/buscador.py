@@ -1,0 +1,438 @@
+"""Buscador de memes. Portado de Hookline Lite (buscador.py).
+
+Recorre Instagram/TikTok con un Chrome/Chromium headless propio (perfil en navegador/, con la sesión de una cuenta
+"para mirar"), junta candidatos con su miniatura y le pide a Claude (tarea "filtrar") que deje solo los que sirven.
+Lo que pasa va al banco de links de la fábrica.
+
+En el servidor no hay ventana para iniciar sesión: la sesión se carga con importar_cookies(texto) (cookies.txt en
+formato Netscape exportado del navegador de la cuenta "para mirar").
+
+Ojo (ver REQUERIMIENTOS §11): recorrer Instagram/TikTok con sesión va contra los términos de esas plataformas y los
+selectores se rompen cuando cambian las páginas. Se puede apagar con HOOKLINE_BUSCADOR=0.
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import threading
+import socket
+import subprocess
+import time
+import urllib.parse
+import uuid
+from pathlib import Path
+
+from sqlalchemy import select
+
+from .. import almacen
+from ..comun import ajuste, guardar_ajuste
+from ..config import config
+from ..db import sesion
+from ..ia import tareas
+from ..modelos import FuenteBusqueda, LinkBanco
+from ..trabajos import encolar, manejador
+from . import fabrica
+
+PUERTO = 9333
+POR_TANDA = 40          # miniaturas por hoja que mira Claude
+MAX_CANDIDATOS = 400
+FUENTES_POR_VEZ = 12
+MAX_VUELTAS = 5
+MUERTA = 60             # una fuente con 60 vistos y ningún bueno se deja de usar
+_lock_tandas = threading.Lock()   # varias tandas pueden terminar a la vez
+
+
+def _abierto() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", PUERTO), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _link(href: str, red: str) -> str:
+    if red == "ig":
+        m = re.search(r"/(?:reel|p)/([\w-]+)", href)
+        return f"https://www.instagram.com/reel/{m.group(1)}/" if m else ""
+    m = re.search(r"/@([\w.]+)/video/(\d+)", href)
+    return f"https://www.tiktok.com/@{m.group(1)}/video/{m.group(2)}" if m else ""
+
+
+def _url(red: str, q: str) -> str:
+    if red == "ig":
+        return (f"https://www.instagram.com/{q[1:]}/reels/" if q.startswith("@") else
+                f"https://www.instagram.com/explore/tags/{urllib.parse.quote(q[1:])}/" if q.startswith("#") else
+                f"https://www.instagram.com/explore/search/keyword/?q={urllib.parse.quote(q)}")
+    return (f"https://www.tiktok.com/{q}" if q.startswith("@") else
+            f"https://www.tiktok.com/search/video?q={urllib.parse.quote(q.lstrip('#'))}")
+
+
+def clave(red: str, q: str) -> str:
+    return f"{red} {q}".lower()
+
+
+# --- estado ----------------------------------------------------------------------------------------------------------------
+def estado(**cambios) -> dict:
+    e = ajuste("busqueda", None) or {"estado": "parado", "mensaje": "", "giro": 0}
+    if cambios:
+        e = {**e, **cambios}
+        guardar_ajuste("busqueda", e)
+    return e
+
+
+def al_arrancar() -> None:
+    if estado().get("estado") == "buscando":
+        estado(estado="error", mensaje="La búsqueda se cortó (se reinició el sistema). Tocá «Buscar memes» de nuevo.")
+
+
+# --- fuentes ---------------------------------------------------------------------------------------------------------------
+def sumar_fuentes(nuevas) -> int:
+    """Agrega fuentes ("ig @cuenta", "ig: frase", "ig #tag", "tt @cuenta", "tt: frase"), sin repetir."""
+    n = 0
+    with sesion() as s:
+        ya = {clave(f.red, f.consulta) for f in s.scalars(select(FuenteBusqueda))}
+        for x in nuevas or []:
+            m = re.match(r"\s*(ig|tt)\s*:?\s*(.+)", str(x), re.I)
+            if not m or str(x).strip().startswith("#"):
+                continue
+            red, q = m.group(1).lower(), m.group(2).strip()[:200]
+            if clave(red, q) in ya:
+                continue
+            ya.add(clave(red, q))
+            s.add(FuenteBusqueda(red=red, consulta=q))
+            n += 1
+    return n
+
+
+def fuentes() -> list[dict]:
+    with sesion() as s:
+        return [{"red": f.red, "consulta": f.consulta, "vistos": f.vistos, "sirven": f.sirven, "activa": f.activa}
+                for f in s.scalars(select(FuenteBusqueda).order_by(FuenteBusqueda.id))]
+
+
+def _elegir() -> list[tuple[str, str, str]]:
+    with sesion() as s:
+        fs = [f for f in s.scalars(select(FuenteBusqueda).where(FuenteBusqueda.activa.is_(True)))
+              if not (f.vistos >= MUERTA and not f.sirven)]
+    def puntaje(f):   # primero las que nunca probó, después las que más buenos dieron
+        return (1 if f.vistos else 0, 0 if f.consulta.startswith("@") else 1, -(f.sirven + 1) / (f.vistos + 10))
+    return [(f.red, f.consulta, _url(f.red, f.consulta)) for f in sorted(fs, key=puntaje)[:FUENTES_POR_VEZ]]
+
+
+# --- el navegador ----------------------------------------------------------------------------------------------------------
+def _chrome() -> str:
+    c = config().chrome
+    if c and Path(c).exists():
+        return c
+    for n in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"):
+        p = shutil.which(n)
+        if p:
+            return p
+    for p in ("/opt/pw-browsers/chromium", r"C:\Program Files\Google\Chrome\Application\chrome.exe"):
+        q = Path(p)
+        if q.is_file():
+            return str(q)
+        if q.is_dir():
+            cand = next(iter(sorted(q.rglob("chrome"))), None)
+            if cand and cand.is_file():
+                return str(cand)
+    raise ValueError("No encontré Chrome/Chromium en el servidor (instalalo o poné HOOKLINE_CHROME).")
+
+
+def abrir() -> None:
+    if _abierto():
+        return
+    perfil = almacen.dir_de("navegador", "perfil")
+    subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}", "--no-first-run",
+                      "--headless=new", "--no-sandbox", "--window-size=1280,900", "--mute-audio", "about:blank"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(40):
+        if _abierto():
+            return
+        time.sleep(0.5)
+    raise ValueError("No pude abrir el navegador del buscador.")
+
+
+def _contexto(p):
+    br = p.chromium.connect_over_cdp(f"http://127.0.0.1:{PUERTO}")
+    return br, (br.contexts[0] if br.contexts else br.new_context())
+
+
+def importar_cookies(texto: str) -> int:
+    """Carga la sesión de Instagram/TikTok (cookies.txt formato Netscape) en el perfil del buscador."""
+    cookies = []
+    for r in str(texto or "").splitlines():
+        if not r.strip() or (r.startswith("#") and not r.startswith("#HttpOnly_")):
+            continue
+        partes = r.split("\t")
+        if len(partes) < 7:
+            continue
+        dominio, _, ruta, segura, vence, nombre, valor = partes[:7]
+        http_only = dominio.startswith("#HttpOnly_")
+        dominio = dominio.replace("#HttpOnly_", "")
+        if not any(k in dominio for k in ("instagram", "tiktok")):
+            continue
+        c = {"name": nombre, "value": valor.strip(), "domain": dominio, "path": ruta or "/",
+             "secure": segura.upper() == "TRUE", "httpOnly": http_only}
+        if vence.strip().isdigit() and int(vence) > 0:
+            c["expires"] = int(vence)
+        cookies.append(c)
+    if not cookies:
+        raise ValueError("No encontré cookies de Instagram o TikTok en ese texto (formato cookies.txt).")
+    from playwright.sync_api import sync_playwright
+    abrir()
+    with sync_playwright() as p:
+        _, ctx = _contexto(p)
+        ctx.add_cookies(cookies)
+    # también para yt-dlp (bajar reels de Instagram con la misma sesión)
+    exportar_cookies(almacen.raiz() / "navegador" / "cookies.txt")
+    return len(cookies)
+
+
+def exportar_cookies(destino) -> int:
+    from playwright.sync_api import sync_playwright
+    abrir()
+    with sync_playwright() as p:
+        _, ctx = _contexto(p)
+        cs = ctx.cookies()
+    renglones = ["# Netscape HTTP Cookie File"]
+    for c in cs:
+        if not any(k in c["domain"] for k in ("instagram", "tiktok")):
+            continue
+        renglones.append("\t".join([c["domain"], "TRUE" if c["domain"].startswith(".") else "FALSE", c["path"],
+                                    "TRUE" if c["secure"] else "FALSE", str(int(max(0, c.get("expires") or 0))),
+                                    c["name"], c["value"]]))
+    Path(destino).parent.mkdir(parents=True, exist_ok=True)
+    Path(destino).write_text("\n".join(renglones) + "\n", encoding="utf-8")
+    return len(renglones) - 1
+
+
+# --- buscar ------------------------------------------------------------------------------------------------------------------
+def buscar(objetivo: int = 30) -> dict:
+    if not config().buscador_activo:
+        raise ValueError("El buscador de memes está apagado en este servidor (HOOKLINE_BUSCADOR=0).")
+    if estado()["estado"] in ("buscando", "filtrando"):
+        raise ValueError("Ya está buscando: esperá a que termine.")
+    if not _elegir():
+        raise ValueError("No hay fuentes para buscar: agregá cuentas o frases en Memes → Fuentes.")
+    e = estado(estado="buscando", mensaje="Abriendo el navegador…", juntados=0, nuevos=0, error="",
+               objetivo=max(1, int(objetivo or 30)), vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    encolar("buscar", {}, clave=f"buscar:{time.time():.0f}", max_intentos=1)
+    return e
+
+
+@manejador("buscar")
+def _buscar(_d: dict) -> None:
+    try:
+        from PIL import Image
+        from playwright.sync_api import sync_playwright
+        abrir()
+        lote = time.strftime("%m%d-%H%M") + "-" + uuid.uuid4().hex[:4]
+        d = almacen.dir_de("candidatos", lote)
+        with sesion() as s:
+            ya = set(s.scalars(select(LinkBanco.link)).all())
+        cands, sin_sesion = [], set()
+        with sync_playwright() as p:
+            _, ctx = _contexto(p)
+            pg = ctx.new_page()
+            estado(mensaje="Mirando de quién son los buenos…")
+            _autores(pg)
+            elegidas = _elegir()
+            if not elegidas:
+                pg.close()
+                estado(estado="error", mensaje="Ya probé todas las fuentes y ninguna dio buenos: pasame cuentas que suban este tipo de video.")
+                return
+            for i, (red, q, url) in enumerate(elegidas):
+                if len(cands) >= MAX_CANDIDATOS:
+                    break
+                estado(mensaje=f"Buscando «{q}» ({i + 1} de {len(elegidas)})…", juntados=len(cands))
+                try:
+                    pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+                    pg.wait_for_timeout(4000)
+                    if "/login" in pg.url or "accounts/login" in pg.url:
+                        sin_sesion.add("Instagram" if red == "ig" else "TikTok")
+                        continue
+                    sel = "a[href*='/reel/'], a[href*='/p/']" if red == "ig" else "a[href*='/video/']"
+                    for _ in range(6):
+                        for a in pg.query_selector_all(sel):
+                            href = a.get_attribute("href") or ""
+                            link = _link(href, red)
+                            if not link or link in ya:
+                                continue
+                            if red == "ig" and "/reel/" not in href and not a.query_selector(
+                                    "svg[aria-label*='Clip'], svg[aria-label*='Reel'], svg[aria-label*='Video'], svg[aria-label*='clip']"):
+                                continue
+                            img = a.query_selector("img")
+                            src = img.get_attribute("src") if img else ""
+                            if not src:
+                                src = a.evaluate("""el => { for (const n of [el, ...el.querySelectorAll('*')]) {
+                                    const b = getComputedStyle(n).backgroundImage;
+                                    if (b && b.startsWith('url(')) return b.slice(4, -1).replace(/^["']|["']$/g, ''); }
+                                    return ''; }""")
+                            if not src:
+                                continue
+                            ya.add(link)
+                            cands.append({"link": link, "src": src, "alt": ((img.get_attribute("alt") if img else "") or "")[:160],
+                                          "fuente": clave(red, q)})
+                        pg.mouse.wheel(0, 3000)
+                        pg.wait_for_timeout(1200)
+                except Exception:
+                    continue
+            estado(mensaje="Bajando miniaturas…", juntados=len(cands))
+            buenos = []
+            for c in cands[:MAX_CANDIDATOS]:
+                try:
+                    r = pg.request.get(c["src"], timeout=15000)
+                    if not r.ok:
+                        continue
+                    n = len(buenos) + 1
+                    (d / f"{n}.img").write_bytes(r.body())
+                    im = Image.open(d / f"{n}.img").convert("RGB")
+                    im.thumbnail((300, 534))
+                    im.save(d / f"{n}.jpg", quality=80)
+                    (d / f"{n}.img").unlink(missing_ok=True)
+                    buenos.append({**c, "n": n})
+                except Exception:
+                    continue
+            pg.close()
+        aviso_ = f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá las cookies en Ajustes → Buscador." if sin_sesion else ""
+        if not buenos:
+            shutil.rmtree(d, ignore_errors=True)
+            estado(estado="error" if aviso_ else "listo", fin=time.strftime("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
+            return
+        import json
+        (d / "candidatos.json").write_text(json.dumps(buenos, ensure_ascii=False), encoding="utf-8")
+        hojas = _hojas(d, buenos)
+        estado(estado="filtrando", lote=lote, hojas=len(hojas), hechas=0, juntados=len(buenos),
+               mensaje=f"Claude está mirando {len(buenos)} candidatos…")
+        for k, (hoja, rango, parte) in enumerate(hojas, 1):
+            tareas.crear("filtrar", {"desde": rango[0], "hasta": rango[1],
+                                     "textos": {str(c["n"]): c["alt"] for c in parte if c.get("alt")}},
+                         referencia=f"{lote}:{k}", imagenes=[almacen.relativa(hoja)])
+    except ValueError as ex:
+        estado(estado="error", mensaje=str(ex))
+    except Exception as ex:
+        estado(estado="error", mensaje=f"Se cortó la búsqueda: {str(ex)[:150]}")
+
+
+def _autores(pg) -> None:
+    """De los reels de Instagram buenos averigua la cuenta y la suma como fuente."""
+    with sesion() as s:
+        sin = [l.link for l in s.scalars(select(LinkBanco)) if (l.origen == "buscador" or l.voto in ("oro", "bueno"))
+               and "instagram.com" in l.link and not l.autor][:15]
+    nuevas = []
+    for link in sin:
+        autor = "?"
+        try:
+            pg.goto(link, wait_until="domcontentloaded", timeout=30000)
+            pg.wait_for_timeout(2500)
+            og = pg.get_attribute("meta[property='og:url']", "content") or ""
+            m = re.search(r"instagram\.com/([\w.]+)/(?:reel|p)/", og) or re.search(r"@([\w.]+)", pg.title() or "")
+            if m and m.group(1) not in ("reel", "reels", "p", "explore"):
+                autor = m.group(1)
+                nuevas.append(f"ig @{autor}")
+        except Exception:
+            pass
+        fabrica.poner_autor(link, autor)
+    sumar_fuentes(nuevas)
+
+
+def _hojas(d: Path, buenos: list[dict]):
+    from PIL import Image, ImageDraw
+    out = []
+    cw, ch, cols = 200, 300, 10
+    for k in range(0, len(buenos), POR_TANDA):
+        parte = buenos[k:k + POR_TANDA]
+        img = Image.new("RGB", (cw * cols, ch * ((len(parte) + cols - 1) // cols)), "white")
+        dr = ImageDraw.Draw(img)
+        for i, c in enumerate(parte):
+            try:
+                im = Image.open(d / f"{c['n']}.jpg")
+                im.thumbnail((cw - 4, ch - 4))
+            except Exception:
+                continue
+            x, y = (i % cols) * cw, (i // cols) * ch
+            img.paste(im, (x + 2, y + 2))
+            dr.rectangle((x, y, x + 34, y + 20), fill="black")
+            dr.text((x + 5, y + 4), str(c["n"]), fill="yellow")
+        hoja = d / f"hoja-{k // POR_TANDA + 1}.jpg"
+        img.save(hoja, quality=82)
+        out.append((hoja, (parte[0]["n"], parte[-1]["n"]), parte))
+    return out
+
+
+# --- lo que eligió Claude ----------------------------------------------------------------------------------------------------
+def _tanda_hecha(lote: str, k: int, fil: dict) -> None:
+    with _lock_tandas:
+        _tanda_hecha_ya(lote, k, fil)
+
+
+def _tanda_hecha_ya(lote: str, k: int, fil: dict) -> None:
+    import json
+    e = estado()
+    if e.get("lote") != lote:
+        return
+    d = almacen.dir_de("candidatos", lote)
+    try:
+        cands = {c["n"]: c for c in json.loads((d / "candidatos.json").read_text(encoding="utf-8"))}
+    except Exception:
+        cands = {}
+    de_hoja = [c for n, c in cands.items() if (k - 1) * POR_TANDA < n <= k * POR_TANDA]
+    ok_ns = {int(x["n"]) for x in fil.get("sirven") or []}
+    with sesion() as s:   # qué fuentes dan buenos (aprende solo)
+        for c in de_hoja:
+            red, _, q = c.get("fuente", "? ?").partition(" ")
+            f = next((x for x in s.scalars(select(FuenteBusqueda).where(FuenteBusqueda.red == red))
+                      if clave(x.red, x.consulta) == c.get("fuente")), None)
+            if f:
+                f.vistos += 1
+                f.sirven += 1 if c["n"] in ok_ns else 0
+    nuevas = list(fil.get("fuentes_nuevas") or [])[:5]
+    for n in ok_ns:
+        m = re.search(r"tiktok\.com/@([\w.]+)/", (cands.get(n) or {}).get("link", ""))
+        if m:
+            nuevas.append(f"tt @{m.group(1)}")
+    sumar_fuentes(nuevas)
+    items = []
+    for x in fil.get("sirven") or []:
+        c = cands.get(int(x["n"]))
+        if c:
+            items.append({"link": c["link"], "titulo": str(x.get("titulo") or c["alt"])[:120], "cat": str(x.get("cat") or "")[:30],
+                          "img": d / f"{c['n']}.jpg"})
+    nuevos = int(e.get("nuevos") or 0) + fabrica.agregar_encontrados(items)
+    hechas = int(e.get("hechas") or 0) + 1
+    if hechas < int(e.get("hojas") or 0):
+        estado(hechas=hechas, nuevos=nuevos, mensaje=f"Claude está mirando… ({hechas} de {e['hojas']} tandas, {nuevos} sirven)")
+        return
+    shutil.rmtree(d, ignore_errors=True)
+    total = int(e.get("acumulado") or 0) + nuevos
+    vuelta, objetivo = int(e.get("vuelta") or 1), int(e.get("objetivo") or 30)
+    if total < objetivo and vuelta < MAX_VUELTAS:
+        estado(estado="buscando", hechas=0, nuevos=0, acumulado=total, vuelta=vuelta + 1, lote="",
+               mensaje=f"Vuelta {vuelta + 1} de {MAX_VUELTAS}: llevo {total} de {objetivo}, busco en otros lados…")
+        encolar("buscar", {}, clave=f"buscar:{time.time():.0f}:{vuelta + 1}", max_intentos=1)
+    else:
+        vueltas = "1 vuelta" if vuelta == 1 else f"{vuelta} vueltas"
+        estado(estado="listo", hechas=hechas, nuevos=nuevos, acumulado=total, fin=time.strftime("%H:%M"),
+               mensaje=f"Listo: {total} memes nuevos en {vueltas}.")
+
+
+@tareas.al_terminar("filtrar")
+def _filtrado(t, fil: dict) -> None:
+    lote, _, k = t.referencia.rpartition(":")
+    _tanda_hecha(lote, int(k or 0), fil)
+
+
+@tareas.al_fallar("filtrar")
+def _filtro_fallo(t, motivo: str) -> None:
+    lote, _, k = t.referencia.rpartition(":")
+    _tanda_hecha(lote, int(k or 0), {"sirven": []})
+
+
+def recoger() -> None:
+    """Los filtros llegan por al_terminar; acá solo se destraba una búsqueda colgada (más de 3 h filtrando)."""
+    e = estado()
+    if e.get("estado") == "filtrando" and e.get("lote"):
+        d = almacen.raiz() / almacen.SECCIONES["candidatos"] / e["lote"]
+        if d.exists() and time.time() - d.stat().st_mtime > 3 * 3600:
+            estado(estado="error", mensaje="Claude no terminó de mirar los candidatos. Tocá «Buscar memes» de nuevo.")
