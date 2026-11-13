@@ -1,3 +1,5 @@
+> **Programador: leé primero [LEER_PROGRAMADOR.md](LEER_PROGRAMADOR.md).**
+
 # Hookline Lite
 
 Tu community manager de Instagram, en tu compu. Manejás varias cuentas desde un solo lugar:
