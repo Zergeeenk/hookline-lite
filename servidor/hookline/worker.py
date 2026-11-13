@@ -145,6 +145,9 @@ class Worker:
     def correr(self) -> None:
         _importar_manejadores()
         from .servicios import piezas
+        liberados = trabajos.liberar_de_procesos_muertos(socket.gethostname())
+        if liberados:
+            log.warning("se liberaron %d trabajos de un worker anterior que se cortó", liberados)
         piezas.al_arrancar()
         for mod in ("fabrica", "buscador"):
             try:

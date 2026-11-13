@@ -18,12 +18,19 @@ def entorno(tmp_path, monkeypatch):
     monkeypatch.setenv("HOOKLINE_MOTOR_IA", "claude_code")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("HOOKLINE_WEBHOOK_URL", raising=False)
+    import os
+    if os.environ.get("HOOKLINE_TEST_BD"):        # correr todo contra Postgres: HOOKLINE_TEST_BD=postgresql+psycopg://...
+        monkeypatch.setenv("HOOKLINE_BASE_DATOS", os.environ["HOOKLINE_TEST_BD"])
     from hookline import config, db
     config.recargar()
     db.reiniciar_motor()
+    if os.environ.get("HOOKLINE_TEST_BD"):
+        from hookline import modelos  # noqa: F401
+        db.Base.metadata.drop_all(db.motor())
     db.crear_tablas()
-    from hookline import fuentes
+    from hookline import auth, fuentes
     fuentes._indice.cache_clear()
+    auth._fallidos.clear()
     yield tmp_path
     db.reiniciar_motor()
 

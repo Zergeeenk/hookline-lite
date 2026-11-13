@@ -21,7 +21,7 @@ import time
 from datetime import timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .config import config
 from .db import ahora, sesion
@@ -35,15 +35,21 @@ def firmar(cuerpo: bytes, tiempo: str, secreto: str) -> str:
     return "sha256=" + hmac.new(secreto.encode(), f"{tiempo}.".encode() + cuerpo, hashlib.sha256).hexdigest()
 
 
-def enviar_pendientes(limite: int = 50) -> int:
+def enviar_pendientes(limite: int = 20) -> int:
     cfg = config()
     if not cfg.webhook_url:
         return 0
     with sesion() as s:
-        evs = s.scalars(select(Evento).where(Evento.enviado.is_(None), Evento.intentos < MAX_INTENTOS,
-                                             Evento.proximo <= ahora()).order_by(Evento.id).limit(limite)).all()
+        candidatos = s.scalars(select(Evento.id).where(Evento.enviado.is_(None), Evento.intentos < MAX_INTENTOS,
+                                                       Evento.proximo <= ahora()).order_by(Evento.id).limit(limite)).all()
+        # reclamar cada evento (con varios workers, cada evento lo manda uno solo)
+        mios = [i for i in candidatos
+                if s.execute(update(Evento).where(Evento.id == i, Evento.enviado.is_(None), Evento.proximo <= ahora())
+                             .values(proximo=ahora() + timedelta(minutes=2))).rowcount == 1]
+    with sesion() as s:
+        evs = [s.get(Evento, i) for i in mios]
     n = 0
-    with httpx.Client(timeout=10) as cli:
+    with httpx.Client(timeout=5) as cli:
         for e in evs:
             cuerpo = json.dumps({"id": e.id, "tipo": e.tipo, "creado": e.creado.isoformat(), "datos": e.datos},
                                 ensure_ascii=False).encode()

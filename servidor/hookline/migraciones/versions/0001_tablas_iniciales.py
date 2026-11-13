@@ -2,7 +2,7 @@
 
 Revision ID: 0001
 Revises: 
-Create Date: 2026-11-13 22:49:51.150854
+Create Date: 2026-11-13 23:36:42.176081
 """
 from alembic import op
 import sqlalchemy as sa
@@ -345,6 +345,7 @@ def upgrade():
     sa.Column('foto', sa.Text(), nullable=False),
     sa.Column('creado', hookline.db.FechaUTC(timezone=True), nullable=False),
     sa.Column('actualizado', hookline.db.FechaUTC(timezone=True), nullable=False),
+    sa.Column('version', sa.Integer(), nullable=False),
     sa.ForeignKeyConstraint(['cuenta_id'], ['cuentas.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )

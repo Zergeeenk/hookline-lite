@@ -17,13 +17,13 @@ import threading
 import time
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .. import almacen, instagram as ig, medios
 from ..comun import actividad, aviso, desde_local, evento, iso_local
 from ..db import ahora, sesion
 from ..modelos import Cuenta, Pieza, Trabajo
-from ..trabajos import encolar, manejador
+from ..trabajos import encolar, latido, manejador
 from . import cuentas as svc_cuentas
 
 log = logging.getLogger("hookline.piezas")
@@ -157,6 +157,14 @@ def escanear() -> int:
 
 # --- acciones de la bandeja ---------------------------------------------------------------------------------------------
 def accion(d: dict, usuario: str = "") -> dict:
+    from sqlalchemy.orm.exc import StaleDataError
+    try:
+        return _accion(d, usuario)
+    except StaleDataError:
+        raise ValueError("La pieza cambió mientras tanto (¿se está publicando?): recargá y probá de nuevo.")
+
+
+def _accion(d: dict, usuario: str = "") -> dict:
     op, pid = d.get("op"), str(d.get("id", ""))
     if op == "jueces":
         from .jueces import pedir_jueces
@@ -164,7 +172,7 @@ def accion(d: dict, usuario: str = "") -> dict:
     programar_ya = False
     with _lock, sesion() as s:
         if op == "juntar":
-            ids = [str(i) for i in d.get("ids") or []]
+            ids = list(dict.fromkeys(str(i) for i in (d.get("ids") if isinstance(d.get("ids"), list) else [])))
             sel = [s.get(Pieza, i) for i in ids]
             if len(sel) < 2 or any(x is None for x in sel):
                 raise ValueError("Elegí al menos 2 fotos de la bandeja.")
@@ -240,7 +248,10 @@ def accion(d: dict, usuario: str = "") -> dict:
         s.flush()
         out = como_dict(x)
     if programar_ya:
-        revisar_cola()
+        try:
+            revisar_cola()   # para que "Publicar ahora" arranque sin esperar la vuelta del worker
+        except Exception as ex:   # la pieza ya quedó programada: el worker la toma en su próxima vuelta
+            log.info("revisar_cola desde la API: %s", ex)
     return out
 
 
@@ -289,36 +300,67 @@ def planificadas_a_revisar(cid: str) -> int:
 
 
 # --- la cola -------------------------------------------------------------------------------------------------------------
+def _clave(x: Pieza) -> str:
+    """Una clave por aprobación: si la cancelan y la vuelven a programar (aunque sea a la misma hora), es otro trabajo."""
+    return f"publicar:{x.id}:{x.aprobada.timestamp() if x.aprobada else 0:.0f}:{x.cuando.isoformat(timespec='minutes')}"
+
+
 def revisar_cola() -> None:
-    """Cada 30 s (scheduler del worker). Encola lo que llega a su hora; marca 'vencida' lo que se pasó."""
+    """Cada 30 s (scheduler del worker). Encola lo que llega a su hora; marca 'vencida' lo que se pasó;
+    y resuelve lo que quedó 'subiendo' sin un worker vivo detrás."""
     t = ahora()
-    vencidas = []
+    vencidas, cortadas, a_encolar = [], [], []
     with sesion() as s:
-        ps = s.scalars(select(Pieza).where(Pieza.estado == "programada").order_by(Pieza.cuando)).all()
-        for x in ps:
+        trabajos_ = {x.clave: x for x in s.scalars(select(Trabajo).where(Trabajo.tipo == "publicar",
+                                                                         Trabajo.creado > t - timedelta(days=30)))}
+        for x in s.scalars(select(Pieza).where(Pieza.estado.in_(("programada", "subiendo"))).order_by(Pieza.cuando)):
             if not x.cuando:
                 continue
-            clave = f"publicar:{x.id}:{x.cuando.isoformat(timespec='minutes')}"
-            trab = s.scalar(select(Trabajo).where(Trabajo.clave == clave))
-            if not x.ahora and t > x.cuando + TOLERANCIA and (trab is None or trab.estado == "pendiente"):
-                x.estado, x.etapa = "vencida", ""
-                if trab is not None:
-                    trab.estado, trab.terminado, trab.error = "hecho", t, "cancelado: vencida"
-                vencidas.append((x.id, x.cuenta_id, x.tipo, iso_local(x.cuando)))
+            trab = trabajos_.get(_clave(x))
+            vivo = trab is not None and trab.estado == "corriendo" and trab.tomado_hasta and trab.tomado_hasta > t
+            if x.estado == "subiendo":
+                if not vivo and not x.media_id:
+                    cortadas.append(x.id)
+                continue
+            if not x.ahora and t > x.cuando + TOLERANCIA and not vivo:
+                vencidas.append(x.id)
             elif trab is None and (x.ahora or t >= x.cuando - ANTICIPO):
-                s.add(Trabajo(tipo="publicar", datos={"pieza": x.id}, clave=clave, max_intentos=1))
-    for pid, cid, tipo, cuando in vencidas:
-        aviso(f"NO se publicó la pieza de @{cid} ({tipo}, era para el {cuando.replace('T', ' ')}) porque el sistema "
-              "no estuvo disponible a esa hora. Reprogramala o tocá Publicar ahora.", pieza=pid)
-        evento("pieza.vencida", pieza=pid, cuenta=cid)
+                a_encolar.append((x.id, _clave(x)))
+    for pid, clave in a_encolar:
+        encolar("publicar", {"pieza": pid, "clave": clave}, clave=clave, max_intentos=1)
+    for pid in vencidas:
+        if _pasar(pid, "programada", estado="vencida", etapa=""):
+            _cancelar_trabajos(pid)
+            x = obtener(pid)
+            aviso(f"NO se publicó la pieza de @{x['cuenta']} ({x['tipo']}, era para el {x['cuando'].replace('T', ' ')}) "
+                  "porque el sistema no estuvo disponible a esa hora. Reprogramala o tocá Publicar ahora.", pieza=pid)
+            evento("pieza.vencida", pieza=pid, cuenta=x["cuenta"])
+    for pid in cortadas:
+        if _pasar(pid, "subiendo", estado="error", etapa="",
+                  error="Se cortó mientras se publicaba. Fijate en Instagram si salió antes de volver a programarla."):
+            x = obtener(pid)
+            aviso(f"Se cortó la publicación de @{x['cuenta']} ({x['tipo']}): revisá en Instagram si salió.", pieza=pid)
+            evento("pieza.error", pieza=pid, cuenta=x["cuenta"], error="cortada")
+
+
+def _pasar(pid: str, desde: str, **cambios) -> bool:
+    """Cambio de estado atómico: solo si la pieza sigue en `desde` (entre procesos, sin pisar a nadie)."""
+    with sesion() as s:
+        r = s.execute(update(Pieza).where(Pieza.id == pid, Pieza.estado == desde)
+                      .values(version=Pieza.version + 1, actualizado=ahora(), **cambios))
+        return r.rowcount == 1
+
+
+def _cancelar_trabajos(pid: str) -> None:
+    with sesion() as s:
+        for t in s.scalars(select(Trabajo).where(Trabajo.tipo == "publicar", Trabajo.estado == "pendiente")):
+            if (t.datos or {}).get("pieza") == pid:
+                t.estado, t.terminado, t.error = "hecho", ahora(), "cancelado"
 
 
 def _cambiar(pid: str, **kw) -> None:
     with sesion() as s:
-        x = s.get(Pieza, pid)
-        if x:
-            for k, v in kw.items():
-                setattr(x, k, v)
+        s.execute(update(Pieza).where(Pieza.id == pid).values(version=Pieza.version + 1, actualizado=ahora(), **kw))
 
 
 @manejador("publicar")
@@ -326,15 +368,24 @@ def publicar(datos: dict) -> None:
     pid = datos["pieza"]
     with sesion() as s:
         x = s.get(Pieza, pid)
-        if not x or x.media_id or x.estado not in ("programada", "subiendo"):
-            return   # cancelada, borrada o ya publicada: nada que hacer
-        x.estado, x.etapa, x.inicio, x.error = "subiendo", "arrancando", ahora(), ""
+        if not x or x.media_id or x.estado != "programada" or (datos.get("clave") and _clave(x) != datos["clave"]):
+            return   # cancelada, reprogramada, borrada o ya publicada: este trabajo quedó viejo
         tipo, archivos, caption, cuando, ya, cid = x.tipo, list(x.archivos), x.caption, x.cuando, x.ahora, x.cuenta_id
         contenedor = x.contenedor_id
+    if not ya and cuando and ahora() > cuando + TOLERANCIA:   # nunca se publica sola tarde
+        if _pasar(pid, "programada", estado="vencida", etapa=""):
+            aviso(f"NO se publicó la pieza de @{cid} ({tipo}): se pasó la hora. Reprogramala o tocá Publicar ahora.", pieza=pid)
+        return
+    # la toma de la pieza es atómica: si dos trabajos llegaran a la vez, uno solo pasa de 'programada' a 'subiendo'
+    if not _pasar(pid, "programada", estado="subiendo", etapa="arrancando", inicio=ahora(), error=""):
+        return
     salida = almacen.dir_de("salida", pid)
+
+    def avisar(e: str) -> None:
+        _cambiar(pid, etapa=str(e)[:200])
+        latido()
     try:
         cli = ig.Cliente(cid)
-        avisar = lambda e: _cambiar(pid, etapa=str(e)[:200])
         listos = []
         prop = medios.proporcion_carrusel([almacen.ruta(a) for a in archivos]) if tipo == "carrusel" else None
         for i, a in enumerate(archivos):
@@ -342,12 +393,16 @@ def publicar(datos: dict) -> None:
                 listos.append(almacen.relativa(medios.jpeg_para_instagram(almacen.ruta(a), salida / f"{i + 1}.jpg", tipo, prop)))
             else:
                 listos.append(a)
-        usado = "url"
-        if contenedor:   # un intento anterior ya lo dejó listo en Instagram: se reusa si sigue vivo
-            try:
-                cli.esperar_contenedor(contenedor, avisar)
-            except Exception:
+        if contenedor:   # un intento anterior ya lo dejó en Instagram: ¿se puede reusar? ¿ya salió?
+            estado_c = (cli.get(contenedor, fields="status_code").get("status_code") or "") if contenedor else ""
+            if estado_c == "PUBLISHED":
+                _cambiar(pid, estado="publicada", etapa="", error="",
+                         permalink="", publicado=ahora())
+                aviso(f"La pieza de @{cid} ya figuraba publicada en Instagram (de un intento anterior).", pieza=pid)
+                return
+            if estado_c != "FINISHED":
                 contenedor = ""
+        usado = "url"
         if not contenedor:
             contenedor, usado = cli.preparar(tipo, listos, caption, avisar)
             _cambiar(pid, contenedor_id=contenedor, subida=usado)
@@ -355,12 +410,14 @@ def publicar(datos: dict) -> None:
             avisar("listo en Instagram, esperando la hora programada")
             while cuando > ahora():
                 time.sleep(min(20, max(1, (cuando - ahora()).total_seconds())))
-                with sesion() as s:
-                    if s.get(Pieza, pid) is None:
-                        return
+                latido()
+        with sesion() as s:                     # última verificación antes de publicar
+            y = s.get(Pieza, pid)
+            if not y or y.estado != "subiendo" or y.media_id:
+                return
         avisar("publicando")
         r = cli.publicar_contenedor(contenedor)
-        # los originales pasan a para-subir/<cuenta>/_publicados/ (la bandeja queda limpia)
+        _cambiar(pid, media_id=r["id"])           # lo primero que se guarda: que nunca se vuelva a publicar
         nuevos = []
         destino = dir_cuenta(cid) / "_publicados"
         for a in archivos:
@@ -371,8 +428,8 @@ def publicar(datos: dict) -> None:
                 nuevos.append(a)
         for a in listos:
             almacen.borrar_publica(a)
-        _cambiar(pid, estado="publicada", etapa="", media_id=r["id"], permalink=r.get("permalink", ""),
-                 publicado=r.get("publicado"), archivos=nuevos)
+        _cambiar(pid, estado="publicada", etapa="", permalink=r.get("permalink", ""), publicado=r.get("publicado"),
+                 archivos=nuevos)
         aviso(f"Publicado en @{cid} ({tipo}). {r.get('permalink', '')}", pieza=pid)
         actividad("publicado", f"Publicado en @{cid} ({tipo})", img=nuevos[0] if nuevos else "", cuenta=cid)
         evento("pieza.publicada", pieza=pid, cuenta=cid, tipo=tipo, media_id=r["id"], permalink=r.get("permalink", ""))
@@ -380,6 +437,12 @@ def publicar(datos: dict) -> None:
                 cuando=ahora() + timedelta(minutes=2))
     except Exception as ex:
         msg = "El permiso de Instagram venció: reconectá la cuenta." if isinstance(ex, ig.TokenVencido) else str(ex)[:300]
+        with sesion() as s:
+            y = s.get(Pieza, pid)
+            ya_salio = bool(y and y.media_id)
+        if ya_salio:   # salió en Instagram y falló algo después (mover archivos, etc.): queda publicada igual
+            _cambiar(pid, estado="publicada", etapa="", error=f"Salió, pero: {msg[:200]}")
+            return
         _cambiar(pid, estado="error", etapa="", error=msg)
         aviso(f"No se pudo publicar en @{cid} ({tipo}): {msg[:200]}", pieza=pid)
         evento("pieza.error", pieza=pid, cuenta=cid, error=msg)
@@ -388,16 +451,5 @@ def publicar(datos: dict) -> None:
 
 
 def al_arrancar() -> None:
-    """Lo que quedó 'subiendo' cuando se cortó un worker vuelve a 'programada' (el trabajo se reencola o vence).
-    Si otro worker vivo lo tiene tomado (tomado_hasta en el futuro), no se toca."""
-    with sesion() as s:
-        trabajos = [t for t in s.scalars(select(Trabajo).where(Trabajo.tipo == "publicar", Trabajo.estado != "hecho"))]
-        for x in s.scalars(select(Pieza).where(Pieza.estado == "subiendo")):
-            if x.media_id:
-                continue
-            suyos = [t for t in trabajos if (t.datos or {}).get("pieza") == x.id]
-            if any(t.estado == "corriendo" and t.tomado_hasta and t.tomado_hasta > ahora() for t in suyos):
-                continue
-            x.estado, x.etapa = "programada", ""
-            for t in suyos:   # revisar_cola lo vuelve a encolar si todavía está en hora (o lo marca vencida)
-                s.delete(t)
+    """Al arrancar el worker: lo que quedó 'subiendo' sin worker vivo se resuelve en la primera vuelta de la cola."""
+    revisar_cola()

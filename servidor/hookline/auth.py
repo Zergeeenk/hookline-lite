@@ -52,10 +52,30 @@ def crear_usuario(email: str, clave: str, nombre: str = "", rol: str = "admin") 
         return u.id
 
 
-def login(email: str, clave: str, resp: Response) -> Quien:
+_fallidos: dict[str, list[float]] = {}
+MAX_FALLIDOS, VENTANA = 8, 15 * 60
+
+
+def _frenar(clave: str) -> None:
+    import time
+    t = time.time()
+    lista = [x for x in _fallidos.get(clave, []) if t - x < VENTANA]
+    _fallidos[clave] = lista
+    if len(lista) >= MAX_FALLIDOS:
+        raise HTTPException(429, "Demasiados intentos: esperá unos minutos.")
+
+
+def login(email: str, clave: str, resp: Response, ip: str = "") -> Quien:
+    import time
+    email = email.strip().lower() if isinstance(email, str) else ""
+    clave = clave if isinstance(clave, str) else ""
+    for k in (f"e:{email}", f"i:{ip}"):
+        _frenar(k)
     with sesion() as s:
-        u = s.scalar(select(Usuario).where(Usuario.email == str(email or "").strip().lower()))
-        if not u or not u.activo or not seguridad.verificar_clave(str(clave or ""), u.clave_hash):
+        u = s.scalar(select(Usuario).where(Usuario.email == email)) if email else None
+        if not u or not u.activo or not seguridad.verificar_clave(clave, u.clave_hash):
+            for k in (f"e:{email}", f"i:{ip}"):
+                _fallidos.setdefault(k, []).append(time.time())
             raise HTTPException(401, "Email o contraseña incorrectos.")
         token, csrf = seguridad.nuevo_token(), seguridad.nuevo_token(n=24)
         s.add(Sesion(id=seguridad.sha256(token), usuario_id=u.id, csrf=csrf, expira=ahora() + DURACION))

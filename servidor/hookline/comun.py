@@ -26,8 +26,8 @@ def iso_local(dt: datetime | None) -> str:
 
 
 def desde_local(texto: str) -> datetime:
-    """'AAAA-MM-DDTHH:MM' (hora local, como lo manda el panel) → datetime UTC."""
-    dt = datetime.fromisoformat(str(texto)[:16])
+    """'AAAA-MM-DDTHH:MM' (hora local, como lo manda el panel) o ISO con zona ('...Z', '...-03:00') → datetime UTC."""
+    dt = datetime.fromisoformat(str(texto).strip().replace("Z", "+00:00"))   # respeta la zona si viene (Pyro en UTC)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=config().tz)
     return dt.astimezone(timezone.utc)

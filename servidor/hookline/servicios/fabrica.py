@@ -579,7 +579,9 @@ def _usadas(cuenta: str) -> dict:
 
 
 def _limpiar_campos(l: dict, dur) -> dict:
-    """Valida lo que manda el panel o lo que leyó Claude."""
+    """Valida lo que manda el panel o lo que leyó Claude. Con cualquier basura: ignora lo que no entiende."""
+    if not isinstance(l, dict):
+        return {}
     out = {}
     if "noti" in l and not (isinstance(l["noti"], dict) and l["noti"].get("texto")):
         out["noti"] = None
@@ -608,9 +610,11 @@ def _limpiar_campos(l: dict, dur) -> dict:
                         for b in l["pegar"][:3] if isinstance(b, dict)]
     if l.get("texto") is not None:
         out["texto"] = str(l["texto"]).replace("\\n", "\n")[:300]
-    if l.get("texto_pos") in VIEJAS_POS and l.get("texto_y") is None:
+    l = {k: v for k, v in (l or {}).items() if isinstance(k, str)}
+    txt = lambda v: v if isinstance(v, str) else None   # para buscar en dicts sin TypeError con listas
+    if txt(l.get("texto_pos")) in VIEJAS_POS and l.get("texto_y") is None:
         out["texto_y"] = VIEJAS_POS[l["texto_pos"]]
-    if l.get("texto_tam") in VIEJOS_TAM:
+    if txt(l.get("texto_tam")) in VIEJOS_TAM:
         out["texto_tam"] = VIEJOS_TAM[l["texto_tam"]]
     elif l.get("texto_tam") not in (None, ""):
         out["texto_tam"] = round(_num(l["texto_tam"], 0.042, 0.02, 0.1), 4)
@@ -619,7 +623,7 @@ def _limpiar_campos(l: dict, dur) -> dict:
             out[k] = round(_num(l[k], 0.5, lo, hi), 4)
     if isinstance(l.get("ubicacion_auto"), bool):
         out["ubicacion_auto"] = l["ubicacion_auto"]
-    if l.get("audio") in AUDIOS:
+    if txt(l.get("audio")) in AUDIOS:
         out["audio"] = l["audio"]
     if l.get("audio_desde") not in (None, ""):
         out["audio_desde"] = round(_num(l["audio_desde"], 0, 0, 3600), 2)

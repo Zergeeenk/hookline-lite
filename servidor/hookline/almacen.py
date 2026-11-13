@@ -52,7 +52,9 @@ def _limpio(parte: str) -> str:
 
 
 def ruta(rel: str) -> Path:
-    """Relativa → absoluta, sin poder salir del volumen (protección contra ../)."""
+    """Relativa → absoluta, sin poder salir del volumen (protección contra ../ y links simbólicos)."""
+    if "\x00" in str(rel):
+        raise ValueError("Ruta inválida.")
     p = (raiz() / str(rel)).resolve()
     if not p.is_relative_to(raiz()):
         raise ValueError("Ruta fuera del almacenamiento.")
@@ -103,9 +105,15 @@ def verificar_publica(rel: str, vence: str, firma: str) -> Path | None:
         v = int(vence)
     except (TypeError, ValueError):
         return None
-    if not seguridad.firma_valida(rel, v, firma or ""):
+    if not seguridad.firma_valida(rel, v, str(firma or "")):
         return None
-    p = ruta(rel)
+    try:
+        p = ruta(rel)
+    except ValueError:
+        return None
+    # solo lo que se le ofrece a Meta: la bandeja y las fotos convertidas (nunca la base, candados, etc.)
+    if not any(p.is_relative_to(raiz() / SECCIONES[s]) for s in ("subir", "salida")) or p.name.startswith(".candado"):
+        return None
     return p if p.is_file() else None
 
 

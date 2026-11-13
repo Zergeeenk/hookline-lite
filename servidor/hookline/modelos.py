@@ -200,6 +200,9 @@ class Pieza(Base):
     foto: Mapped[str] = mapped_column(Text, default="")
     creado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora)
     actualizado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora, onupdate=_ahora)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # bloqueo optimista: si el panel y el worker tocan la misma pieza a la vez, el segundo falla en vez de pisar
+    __mapper_args__ = {"version_id_col": version}
 
 
 # --- IA y trabajos ---------------------------------------------------------------------------------------

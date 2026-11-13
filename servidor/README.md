@@ -45,8 +45,14 @@ export HOOKLINE_CLAVE_SECRETA=$(hookline generar-clave) HOOKLINE_CLAVE_SESION=al
 hookline crear-usuario vos@ejemplo.com
 hookline api            # http://localhost:8000  (panel) · /docs (API)
 hookline worker         # en otra terminal
-python -m pytest        # tests
+python -m pytest        # tests (~115, 1-2 min)
+HOOKLINE_TEST_BD=postgresql+psycopg://usuario:clave@localhost/hookline_test python -m pytest   # los mismos, contra Postgres
 ```
+Los tests incluyen una batería para intentar romperlo (`tests/test_romper.py`): miles de pedidos con datos basura
+generados al azar (hypothesis) contra cada endpoint, ataques de rutas y permisos, publicaciones concurrentes, caídas
+de Meta y de Claude, mil archivos en la bandeja e importaciones de Lite corruptas; y `tests/test_regresiones.py`
+fija cada bug que encontraron las revisiones. GitHub Actions (`.github/workflows/servidor.yml`) corre todo en SQLite
+y en Postgres y construye la imagen de Docker en cada PR.
 Sin `HOOKLINE_BASE_DATOS` usa SQLite en `./datos-hookline/hookline.db`. Hace falta `ffmpeg` (o el que trae
 `imageio-ffmpeg`) y fuentes TTF (en Debian/Ubuntu: `fonts-montserrat fonts-inter fonts-dejavu-core`).
 
@@ -126,7 +132,7 @@ espera creciente (hasta 12 veces). Eventos: `pieza.juzgada`, `pieza.publicada`, 
   cuenta "para mirar" se carga pegando un `cookies.txt` (Memes → Cargar sesión). Se apaga con `HOOKLINE_BUSCADOR=0`.
 
 ## Pendiente / a decidir
-- Probar el build de Docker en una máquina con internet (acá no se pudo: sin acceso a los repositorios de Debian).
+- El build de Docker lo prueba GitHub Actions en cada PR (en el entorno donde se desarrolló no había acceso a Debian).
 - Prueba real contra Meta con una app en modo desarrollo y una cuenta de prueba (los tests simulan a Meta).
 - Si Pyro va a manejar cuentas de terceros: App Review de Meta y verificación del negocio.
 - Riesgos de términos de uso (multicuentas, scraping, reuso de videos ajenos): ver `REQUERIMIENTOS_INTEGRACION.md` §11.

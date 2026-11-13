@@ -20,7 +20,7 @@ from datetime import timedelta
 from typing import Callable
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .. import almacen
 from ..comun import ajuste
@@ -71,7 +71,7 @@ def crear(tipo: str, datos: dict, referencia: str = "", imagenes: list[str] | No
     with sesion() as s:
         s.add(TareaIA(id=tid, tipo=tipo, motor=motor, referencia=referencia, entrada=entrada))
     if motor == "api":
-        encolar("ia", {"tarea": tid}, clave=f"ia:{tid}", max_intentos=3)
+        encolar("ia", {"tarea": tid}, clave=f"ia:{tid}", max_intentos=4)
     else:
         _materializar(tid, tipo, entrada)
     return tid
@@ -97,11 +97,13 @@ def completar(tid: str, resultado: dict, uso: dict | None = None) -> None:
         valido = ESQUEMAS[tipo].model_validate(resultado).model_dump()
     except ValidationError as ex:
         return fallar(tid, f"La respuesta no tiene la forma esperada: {str(ex)[:300]}")
+    with sesion() as s:   # atómico: si dos procesos completan la misma tarea, uno solo aplica el resultado
+        r = s.execute(update(TareaIA).where(TareaIA.id == tid, TareaIA.estado.in_(("pendiente", "enviada")))
+                      .values(estado="hecha", resultado=valido, terminado=ahora(), error="", **({"uso": uso} if uso else {})))
+        if r.rowcount != 1:
+            return
     with sesion() as s:
         t = s.get(TareaIA, tid)
-        t.estado, t.resultado, t.terminado, t.error = "hecha", valido, ahora(), ""
-        if uso:
-            t.uso = uso
     f = _TERMINAR.get(tipo)
     if f:
         try:
@@ -114,10 +116,11 @@ def completar(tid: str, resultado: dict, uso: dict | None = None) -> None:
 
 def fallar(tid: str, motivo: str) -> None:
     with sesion() as s:
-        t = s.get(TareaIA, tid)
-        if not t or t.estado in ("hecha", "error"):
+        r = s.execute(update(TareaIA).where(TareaIA.id == tid, TareaIA.estado.in_(("pendiente", "enviada")))
+                      .values(estado="error", error=str(motivo)[:1000], terminado=ahora()))
+        if r.rowcount != 1:
             return
-        t.estado, t.error, t.terminado = "error", str(motivo)[:1000], ahora()
+        t = s.get(TareaIA, tid)
     f = _FALLAR.get(t.tipo)
     if f:
         try:
@@ -173,14 +176,22 @@ def recoger_claude_code() -> int:
         f = dir_tarea(t.id) / "resultado.json"
         if f.exists():
             try:
-                texto = f.read_text(encoding="utf-8")
+                texto = f.read_bytes().decode("utf-8", errors="replace")
                 f.unlink()
-                completar(t.id, json.loads(texto))
-            except json.JSONDecodeError as ex:
-                fallar(t.id, f"resultado.json no es JSON válido: {ex}")
+            except OSError:          # otro worker lo tomó primero
+                continue
+            try:
+                datos = json.loads(texto)
+            except ValueError as ex:
+                fallar(t.id, f"resultado.json no es JSON válido: {str(ex)[:200]}")
+                continue
+            if not isinstance(datos, dict):
+                fallar(t.id, "resultado.json tiene que ser un objeto JSON.")
+                continue
+            completar(t.id, datos)
             n += 1
-        elif t.enviada and ahora() - t.enviada > ESPERA_CLAUDE_CODE:
-            fallar(t.id, "Claude Code no respondió a tiempo (¿se cerró VS Code?).")
+        elif ahora() - (t.enviada or t.creado) > ESPERA_CLAUDE_CODE:
+            fallar(t.id, "Claude Code no atendió el pedido a tiempo (¿está corriendo `hookline puente esperar`?).")
     return n
 
 

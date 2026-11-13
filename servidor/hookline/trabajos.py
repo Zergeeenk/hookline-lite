@@ -8,6 +8,7 @@ Si un worker se muere con un trabajo tomado, al vencer `tomado_hasta` vuelve a q
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import traceback
 from datetime import datetime, timedelta
@@ -22,7 +23,20 @@ from .modelos import Trabajo
 log = logging.getLogger("hookline.trabajos")
 
 MANEJADORES: dict[str, Callable[[dict], None]] = {}
-DURACION_TOMA = {"publicar": timedelta(minutes=40), "render": timedelta(minutes=45), "ia": timedelta(minutes=15)}
+# cuánto tiempo un worker "tiene" un trabajo sin dar señales. Los trabajos largos renuevan la toma con latido().
+DURACION_TOMA = {"publicar": timedelta(minutes=20), "render": timedelta(minutes=45), "ia": timedelta(minutes=45)}
+_actual: contextvars.ContextVar = contextvars.ContextVar("trabajo_actual", default=None)
+
+
+def latido() -> None:
+    """Desde un manejador: 'sigo vivo'. Extiende la toma del trabajo en curso (así no se reabre mientras corre)."""
+    t = _actual.get()
+    if not t:
+        return
+    tid, tipo = t
+    with sesion() as s:
+        s.execute(update(Trabajo).where(Trabajo.id == tid, Trabajo.estado == "corriendo")
+                  .values(tomado_hasta=ahora() + DURACION_TOMA.get(tipo, timedelta(minutes=10))))
 
 
 class Reintentar(Exception):
@@ -58,9 +72,13 @@ def encolar(tipo: str, datos: dict | None = None, clave: str | None = None, cuan
 def tomar(worker: str, tipos: list[str]) -> Trabajo | None:
     with sesion() as s:
         t0 = ahora()
-        # devolver a la cola lo que quedó tomado por un worker que se murió
-        s.execute(update(Trabajo).where(Trabajo.estado == "corriendo", Trabajo.tomado_hasta < t0)
+        # lo que quedó tomado por un worker que se murió: vuelve a la cola si le quedan intentos; si no, error
+        s.execute(update(Trabajo).where(Trabajo.estado == "corriendo", Trabajo.tomado_hasta < t0,
+                                        Trabajo.intentos < Trabajo.max_intentos)
                   .values(estado="pendiente", tomado_por=""))
+        s.execute(update(Trabajo).where(Trabajo.estado == "corriendo", Trabajo.tomado_hasta < t0,
+                                        Trabajo.intentos >= Trabajo.max_intentos)
+                  .values(estado="error", tomado_por="", terminado=t0, error="El worker se cortó con este trabajo."))
         candidatos = s.scalars(select(Trabajo.id).where(Trabajo.estado == "pendiente", Trabajo.ejecutar_en <= t0,
                                                         Trabajo.tipo.in_(tipos))
                                .order_by(Trabajo.ejecutar_en, Trabajo.id).limit(5)).all()
@@ -78,6 +96,7 @@ def tomar(worker: str, tipos: list[str]) -> Trabajo | None:
 
 def correr(t: Trabajo) -> None:
     f = MANEJADORES.get(t.tipo)
+    marca = _actual.set((t.id, t.tipo))
     try:
         if not f:
             raise RuntimeError(f"No hay manejador para {t.tipo}")
@@ -99,6 +118,34 @@ def correr(t: Trabajo) -> None:
             else:
                 x.estado, x.tomado_por = "pendiente", ""
                 x.ejecutar_en = ahora() + timedelta(seconds=30 * 2 ** x.intentos)
+    finally:
+        _actual.reset(marca)
+
+
+def liberar_de_procesos_muertos(host: str) -> int:
+    """Al arrancar un worker: los trabajos 'corriendo' de otro proceso de ESTA máquina que ya no existe se liberan
+    enseguida (sin esperar que venza la toma). Publicar no se reabre nunca: queda en error para revisar."""
+    import os
+    n = 0
+    with sesion() as s:
+        for x in s.scalars(select(Trabajo).where(Trabajo.estado == "corriendo", Trabajo.tomado_por.like(f"{host}:%"))):
+            try:
+                pid = int(x.tomado_por.rsplit(":", 1)[1])
+                os.kill(pid, 0)
+                continue          # el proceso sigue vivo
+            except (ValueError, IndexError):
+                continue
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                continue
+            if x.tipo == "publicar" or x.intentos >= x.max_intentos:
+                x.estado, x.terminado, x.error = "error", ahora(), "El worker se cortó con este trabajo."
+            else:
+                x.estado = "pendiente"
+            x.tomado_por = ""
+            n += 1
+    return n
 
 
 def _terminar(tid: int, estado: str) -> None:

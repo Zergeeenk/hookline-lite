@@ -58,6 +58,24 @@ def _mod(m, nombre):
     return m
 
 
+def _tiene_nulo(v) -> bool:
+    if isinstance(v, str):
+        return "\x00" in v
+    if isinstance(v, dict):
+        return any(_tiene_nulo(k) or _tiene_nulo(x) for k, x in v.items())
+    if isinstance(v, list):
+        return any(_tiene_nulo(x) for x in v)
+    return False
+
+
+@app.middleware("http")
+async def _sin_nulos(req: Request, siguiente):
+    """Un byte nulo en la URL no es nunca algo legítimo (y Postgres no lo acepta en textos): 400 de entrada."""
+    if "%00" in req.url.query.lower() or "%00" in req.url.path.lower() or "\x00" in req.url.path:
+        return JSONResponse({"error": "Pedido inválido."}, status_code=400)
+    return await siguiente(req)
+
+
 @app.exception_handler(ValueError)
 async def _valor(_req, ex: ValueError):
     return JSONResponse({"error": str(ex)[:300]}, status_code=400)
@@ -107,6 +125,8 @@ async def _json(req: Request) -> dict:
         d = await req.json()
     except ValueError:
         raise HTTPException(400, "JSON inválido.")
+    if _tiene_nulo(d):
+        raise HTTPException(400, "Pedido inválido.")
     return d if isinstance(d, dict) else {}
 
 
@@ -134,8 +154,8 @@ def salud():
 
 
 @app.post("/api/login")
-def login(resp: Response, d: dict = Depends(_json)):
-    q = auth.login(d.get("email", ""), d.get("clave", ""), resp)
+def login(req: Request, resp: Response, d: dict = Depends(_json)):
+    q = auth.login(d.get("email", ""), d.get("clave", ""), resp, ip=req.client.host if req.client else "")
     return {"usuario": q.dict(), "csrf": q.csrf}
 
 
@@ -405,16 +425,6 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
         return {"ok": True}
     if op == "importar_cookies":
         return {"ok": True, "n": _mod(svc_buscador, "buscador").importar_cookies(str(d.get("texto") or ""))}
-    if op == "agregar_encontrados":
-        items = []
-        for x in d.get("items") or []:
-            try:
-                p = almacen.ruta(str(x.get("img", "")))
-            except ValueError:
-                continue
-            if p.is_file() and x.get("link"):
-                items.append({**x, "img": p})
-        return {"ok": True, "n": f.agregar_encontrados(items)}
     if op == "votar":
         f.votar(link, d.get("voto"), d.get("motivo"))
         return {"ok": True}
