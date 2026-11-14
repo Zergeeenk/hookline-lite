@@ -187,3 +187,22 @@ def test_repartir_en_paralelo_no_repite(tmp_path, modelo_con_multi):
     with sesion() as s:
         ps = s.query(Pieza).filter(Pieza.copia_id != "").all()
     assert len(ps) == 1    # una sola copia aprobada → un solo reel, en una sola cuenta
+
+
+def test_reel_armado_con_una_fuente_subida(tmp_path, modelo_con_multi):
+    """Una fuente subida en la sección Fuentes llega al video (ffmpeg drawtext) y el reel sale."""
+    from pathlib import Path
+    from hookline import fuentes
+    from hookline.servicios import fabrica
+    ttf = Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf")
+    if not ttf.is_file():
+        pytest.skip("falta DejaVuSerif-Bold")
+    k = fuentes.subir("Mi Letra (1).ttf", ttf.read_bytes(), "test")["nuevas"][0]["clave"]
+    fuentes.elegir_predeterminada(k)
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "con letra nueva: ñ á", "modelo": 1})
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["fuente"] == k and c["estado"] == "lista" and c["versiones"]
+    fabrica.armar(cid, {"texto": "otra", "fuente": "maquina"})
+    _vaciar_cola(["render"])
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["fuente"] == "maquina" and c["versiones"][-1]["texto"] == "otra"

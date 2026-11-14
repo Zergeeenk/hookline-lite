@@ -127,8 +127,11 @@ def normalizar(c: dict) -> dict:
     if c.get("texto_y") is None:
         c["texto_y"] = VIEJAS_POS.get(c.get("texto_pos"), 0.17)
     c.setdefault("texto_x", 0.5)
-    # siempre letra blanca, la básica de Instagram (Clásica), sin sombra ni fondo
-    c.update(fuente="clasica", estilo="nada", color="blanco")
+    # siempre letra blanca, sin sombra ni fondo. La fuente: la elegida (a mano o por Claude) si sigue existiendo;
+    # si no, la predeterminada de la sección Fuentes (la Clásica de Instagram si nadie eligió otra)
+    c.update(estilo="nada", color="blanco")
+    if not c.get("fuente") or not fuentes.ruta(c["fuente"]):
+        c["fuente"] = fuentes.predeterminada()
     c.setdefault("audio", "ejemplo")
     c.setdefault("audio_archivo", "")
     c.setdefault("audio_desde", 0)
@@ -517,8 +520,12 @@ def _preparar(datos: dict) -> None:
             imagenes.append(almacen.relativa(fotos_hoja))
             usadas = _usadas(cuenta)
             usadas_txt = ", ".join(f"{i + 1}×{usadas[r.name]}" for i, (r, _) in enumerate(fotos) if usadas.get(r.name))
-        tareas.crear("lectura", {"duracion": dur, "cuenta": cuenta, "hay_fotos": bool(fotos_hoja), "usadas": usadas_txt},
-                     referencia=cid, imagenes=imagenes)
+        datos_l = {"duracion": dur, "cuenta": cuenta, "hay_fotos": bool(fotos_hoja), "usadas": usadas_txt}
+        m = fuentes.muestrario() if fuentes.claude_elige() else None
+        if m:                               # la última imagen: cada fuente escrita en sí misma, con su clave
+            imagenes.append(almacen.relativa(m[0]))
+            datos_l["fuentes"] = [{"clave": x["clave"], "nombre": x["nombre"]} for x in m[1]]
+        tareas.crear("lectura", datos_l, referencia=cid, imagenes=imagenes)
     except Exception as ex:
         _datos(cid, estado="error", error=f"No pude leer el video: {str(ex)[:150]}")
 
@@ -610,6 +617,8 @@ def _limpiar_campos(l: dict, dur) -> dict:
                         for b in l["pegar"][:3] if isinstance(b, dict)]
     if l.get("texto") is not None:
         out["texto"] = str(l["texto"]).replace("\\n", "\n")[:300]
+    if isinstance(l.get("fuente"), str) and l["fuente"] in fuentes.claves_disponibles():
+        out["fuente"] = l["fuente"]
     l = {k: v for k, v in (l or {}).items() if isinstance(k, str)}
     txt = lambda v: v if isinstance(v, str) else None   # para buscar en dicts sin TypeError con listas
     if txt(l.get("texto_pos")) in VIEJAS_POS and l.get("texto_y") is None:
@@ -646,6 +655,8 @@ def _leido(t, l: dict) -> None:
         _datos(cid, estado="error", leido=True, error="Descartado: en el ejemplo sale alguien que puede ser menor de edad.")
         actividad("aviso", "Ejemplo descartado: alguien puede ser menor de edad", copia=cid)
         return
+    if not fuentes.claude_elige():          # Claude elige la letra solo si está prendido en Fuentes
+        l = {k: v for k, v in l.items() if k != "fuente"}
     cambios = _limpiar_campos({k: v for k, v in l.items() if v is not None}, c.get("duracion"))
     cambios["y_ejemplo"] = cambios.get("texto_y", c.get("texto_y"))
     marca = bool(l.get("marca_agua"))

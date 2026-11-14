@@ -110,6 +110,16 @@ Cada item: idea (título corto), formato (Reel | Carrusel | Historia | Foto), au
 si hay), como (2-3 pasos simples), link (URL de ejemplo o de la fuente, o ""). De mayor a menor potencial."""
 
 
+def _fuentes_lectura(p: dict) -> str:
+    fs = [f for f in (p.get("fuentes") or []) if isinstance(f, dict) and f.get("clave")]
+    if not fs:
+        return ""
+    lista = ", ".join(f'{f["clave"]} ({f.get("nombre", "")})' for f in fs[:60])
+    return (f"- fuente: la ÚLTIMA imagen es un muestrario de las letras que hay ({lista}). Elegí la clave de la más "
+            "parecida a la letra del texto del ejemplo. Si el ejemplo usa la letra común de Instagram, o no estás "
+            "segura, no pongas nada.\n")
+
+
 def lectura(p: dict) -> str:
     fotos = ""
     if p.get("hay_fotos"):
@@ -135,7 +145,7 @@ Si no, completá:
   [{{x0, y0, x1, y1, cuadro, a_y0 (opcional)}}] (se pega como imagen fija desde el primer cuadro).
 - textos (opcional): textos sueltos extra [{{texto, x, y, tam}}]. recorte_remate (opcional): {{x0,y0,x1,y1}} para sacar
   bandas negras del remate.
-La foto de la modelo va fija, sin zoom. Estilo de los reels buenos (para tener en cuenta al leer):
+{_fuentes_lectura(p)}La foto de la modelo va fija, sin zoom. Estilo de los reels buenos (para tener en cuenta al leer):
 {_catalogo('estilo')[:3500]}"""
 
 

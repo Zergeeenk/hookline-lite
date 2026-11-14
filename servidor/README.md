@@ -79,6 +79,14 @@ Modelos por defecto: `claude-opus-5-5` (jueces, lectura de memes, juez, filtro, 
 (respuestas). Tendencias usa la búsqueda web de Anthropic. Si Claude se niega a un pedido, queda en error con el motivo
 y no se reintenta. El costo por pedido queda en `/api/tareas_ia` (tokens).
 
+## Fuentes (tipografías de los reels)
+
+Sección **Fuentes** del panel: muestra cada letra escrita en sí misma (con un texto de prueba), deja subir `.ttf`/`.otf`
+sueltos o el `.zip` de Google Fonts, ocultar las del sistema, borrar las subidas y elegir la **predeterminada** (la de los
+reels nuevos). En **Copiar video → Ajustar a mano** se elige la letra de cada reel. Con "Que Claude elija la letra"
+prendido, Claude recibe un muestrario y usa la más parecida a la del meme de ejemplo. Las subidas viven en
+`datos/fuentes/` (el volumen compartido) y se validan dibujándolas antes de aceptarlas (`hookline/fuentes.py`).
+
 ## Integración con Pyro
 
 El plan completo (qué tiene Pyro, cómo se conectan los dos y cómo encenderlo) está en
