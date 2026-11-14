@@ -1,16 +1,23 @@
 """Fuentes (tipografías) de los textos de los reels y de las capturas dibujadas.
 
-Hay dos clases:
-  - **del sistema**: las que trae el servidor (en Docker: Inter, DejaVu, Liberation). Para cada estilo hay una lista
-    de candidatas; se usa la primera que exista. Se buscan en HOOKLINE_DIR_FUENTES, /usr/share/fonts y, si existe,
-    C:\\Windows\\Fonts. No se pueden borrar: se **ocultan**.
-  - **subidas** desde el panel (sección Fuentes): .ttf u .otf sueltos o dentro de un .zip (como baja Google Fonts).
-    Viven en datos/fuentes/<clave>.<ext> (el volumen que comparten la API y el worker) y sus datos en el ajuste
-    `fuentes_subidas`. Se pueden borrar.
+Hay tres clases:
+  - **las de siempre** (ESTILOS: Clásica, Fuerte, Moderna...): para cada una hay una lista de candidatas y se usa la
+    primera que exista en el servidor.
+  - **el catálogo**: todas las demás fuentes instaladas en el servidor (en Docker: Roboto, Open Sans, Lato, las de
+    Word como Arial, Times New Roman, Comic Sans o Impact, y muchas más). Se buscan en HOOKLINE_DIR_FUENTES,
+    /usr/share/fonts y, si existe, C:\\Windows\\Fonts. Solo las que tienen letras latinas con acentos y ñ.
+  - **subidas** desde el panel: .ttf u .otf sueltos o en un .zip (como baja Google Fonts). Viven en
+    datos/fuentes/<clave>.<ext> (el volumen que comparten la API y el worker) y sus datos en `fuentes_subidas`.
 
-La **predeterminada** es la que usa la fábrica en los reels nuevos (ajuste `fuente_predeterminada`; si no hay, la
-Clásica). Con `fuente_claude` prendido, Claude ve un muestrario y elige para cada reel la más parecida al ejemplo.
-Una fuente oculta o borrada deja de ofrecerse, pero lo que ya se armó con ella sigue saliendo (cae a la Clásica).
+**Mis fuentes** (las que se ofrecen en Copiar video y ve Claude) = las de siempre que no se sacaron
+(`fuentes_ocultas`) + las agregadas del catálogo (`fuentes_activas`) + las subidas. Sacar una de siempre o del
+catálogo la devuelve al catálogo; sacar una subida la borra.
+
+La **predeterminada** es la que usa la fábrica en los reels nuevos (`fuente_predeterminada`; si no, la Clásica). Con
+`fuente_claude` prendido, Claude ve un muestrario y elige la más parecida al ejemplo. Lo que ya se armó con una fuente
+que se sacó sigue saliendo (cae a la predeterminada si el archivo ya no está).
+
+Los caracteres que la letra no tiene (emojis, por ejemplo) no se dibujan: `dibujable()` los saca antes de escribir.
 """
 from __future__ import annotations
 
@@ -58,10 +65,13 @@ def _carpetas() -> list[Path]:
 @lru_cache
 def _indice() -> dict[str, Path]:
     idx: dict[str, Path] = {}
+    reales: dict[Path, Path] = {}              # el mismo archivo con dos nombres (Impact.ttf → impact.ttf): uno solo
     for d in _carpetas():
-        for p in d.rglob("*"):
-            if p.suffix.lower() in EXTENSIONES and p.name.lower() not in idx:
-                idx[p.name.lower()] = p
+        for p in sorted(d.rglob("*")):
+            if p.suffix.lower() not in EXTENSIONES or not p.is_file() or p.name.lower() in idx:
+                continue
+            r = p.resolve()
+            idx[p.name.lower()] = reales.setdefault(r, p)
     return idx
 
 
@@ -72,6 +82,61 @@ def _ruta_sistema(estilo: str) -> Path | None:
         if c.lower() in idx:
             return idx[c.lower()]
     return None
+
+
+@lru_cache(maxsize=1024)
+def _cmap(p: Path) -> frozenset | None:
+    """Los caracteres que la fuente sabe dibujar (None si no se pudo leer)."""
+    try:
+        from fontTools.ttLib import TTFont
+        with TTFont(str(p), lazy=True, fontNumber=0) as f:
+            return frozenset(f.getBestCmap() or {})
+    except Exception:
+        return None
+
+
+LATINAS = frozenset(map(ord, "AaZzÑñÁáÉéÍíÓóÚú¿?¡!0123456789"))
+
+
+@lru_cache
+def _catalogo_sistema() -> tuple[dict, ...]:
+    """Todas las fuentes instaladas que sirven para escribir en castellano, sin las que ya usan las de siempre."""
+    propias = {_ruta_sistema(k) for k, v in ESTILOS.items() if v[4]}
+    out, claves, vistos = [], set(), set()
+    for nombre, p in sorted(_indice().items()):
+        if p in propias or p in vistos or p.stat().st_size > MAX_ARCHIVO * 4:
+            continue
+        vistos.add(p)
+        cm = _cmap(p)
+        if cm is None or not LATINAS <= cm:
+            continue
+        fam = _familia(p)
+        if not fam:
+            continue
+        base = "s_" + (re.sub(r"[^a-z0-9]+", "-", p.stem.lower()).strip("-")[:40] or "fuente")
+        clave, i = base, 2
+        while clave in claves:
+            clave, i = f"{base}-{i}", i + 1
+        claves.add(clave)
+        out.append({"clave": clave, "ruta": p, "nombre": fam})
+    out.sort(key=lambda x: x["nombre"].lower())
+    return tuple(out)
+
+
+def _curadas() -> list[tuple[str, Path]]:
+    """Las de siempre que existen en este servidor, sin repetir archivo (si Meme y Redonda caen en la misma letra,
+    se ofrece solo la primera)."""
+    out, vistos = [], set()
+    for k, v in ESTILOS.items():
+        p = _ruta_sistema(k) if v[4] else None
+        if p and p not in vistos:
+            vistos.add(p)
+            out.append((k, p))
+    return out
+
+
+def _del_catalogo(clave: str) -> dict | None:
+    return next((x for x in _catalogo_sistema() if x["clave"] == clave), None)
 
 
 # --- ajustes (con un cache cortito: normalizar() de la fábrica pregunta por cada copia) ---------------------------------
@@ -85,6 +150,7 @@ def _ajustes() -> dict:
     v = {"subidas": [x for x in (ajuste("fuentes_subidas", []) or []) if isinstance(x, dict)
                      and CLAVE_SUBIDA.fullmatch(str(x.get("clave", "")))],
          "ocultas": [str(x) for x in (ajuste("fuentes_ocultas", []) or [])],
+         "activas": [str(x) for x in (ajuste("fuentes_activas", []) or [])],
          "predeterminada": str(ajuste("fuente_predeterminada", "") or ""),
          "claude": bool(ajuste("fuente_claude", False))}
     _cache.update(t=time.monotonic(), v=v)
@@ -115,6 +181,11 @@ def ruta(estilo: str) -> Path | None:
     if CLAVE_SUBIDA.fullmatch(estilo):
         f = next((x for x in _ajustes()["subidas"] if x["clave"] == estilo), None)
         return _archivo_subida(f) if f else None
+    if estilo.startswith("s_"):
+        x = _del_catalogo(estilo)
+        return x["ruta"] if x else None
+    if estilo not in ESTILOS:
+        return None
     return _ruta_sistema(estilo)
 
 
@@ -127,41 +198,74 @@ def ruta_obligatoria(estilo: str = "clasica") -> Path:
 
 
 def lista() -> list[dict]:
-    """Todas, también las ocultas (para la sección Fuentes). Cache de 2 s: la fábrica pregunta por cada copia."""
+    """Mis fuentes: las de siempre que no se sacaron + las agregadas del catálogo + las subidas.
+    Cache de 2 s: la fábrica pregunta por cada copia."""
     if _cache.get("lista") is not None and time.monotonic() - _cache.get("lista_t", 0) < 2:
         return [dict(x) for x in _cache["lista"]]
     a = _ajustes()
     out, vistos = [], set()
-    for k, v in ESTILOS.items():
-        if not v[4]:
-            continue
-        p = _ruta_sistema(k)
-        if not p or p in vistos:          # en este servidor cae al mismo archivo que otra: no se muestra dos veces
-            continue
+    for k, p in _curadas():
         vistos.add(p)
-        out.append({"clave": k, "nombre": v[4], "origen": "sistema", "archivo": p.name, "oculta": k in a["ocultas"],
-                    "familia": _familia(p), "bytes": p.stat().st_size, "por": "", "fecha": ""})
+        if k in a["ocultas"]:
+            continue
+        out.append({"clave": k, "nombre": ESTILOS[k][4], "origen": "sistema", "archivo": p.name, "familia": _familia(p),
+                    "bytes": p.stat().st_size, "por": "", "fecha": ""})
+    for k in a["activas"]:
+        x = _del_catalogo(k)
+        if x and x["ruta"] not in vistos:
+            vistos.add(x["ruta"])
+            out.append({"clave": k, "nombre": x["nombre"], "origen": "catalogo", "archivo": x["ruta"].name,
+                        "familia": x["nombre"], "bytes": x["ruta"].stat().st_size, "por": "", "fecha": ""})
     for f in a["subidas"]:
         p = _archivo_subida(f)
         if not p:
             continue
         out.append({"clave": f["clave"], "nombre": f.get("nombre") or f["clave"], "origen": "subida",
-                    "archivo": f.get("original", ""), "oculta": False, "familia": f.get("familia", ""),
+                    "archivo": f.get("original", ""), "familia": f.get("familia", ""),
                     "bytes": p.stat().st_size, "por": f.get("por", ""), "fecha": f.get("fecha", "")})
     pre = predeterminada(out)
     for x in out:
+        x["oculta"] = False
         x["predeterminada"] = x["clave"] == pre
         x["url"] = f"/api/fuente?k={x['clave']}"
     _cache.update(lista=out, lista_t=time.monotonic())
     return [dict(x) for x in out]
 
 
+def catalogo(q: str = "", pagina: int = 0, por_pagina: int = 24) -> dict:
+    """Lo que se puede agregar: todo lo instalado que no está en Mis fuentes (también las de siempre que se sacaron)."""
+    mias = {x["clave"] for x in lista()}
+    a = _ajustes()
+    todas = [{"clave": k, "nombre": ESTILOS[k][4], "archivo": p.name} for k, p in _curadas() if k in a["ocultas"]]
+    todas += [{"clave": x["clave"], "nombre": x["nombre"], "archivo": x["ruta"].name} for x in _catalogo_sistema()]
+    todas = [x for x in todas if x["clave"] not in mias]
+    q = re.sub(r"\s+", " ", str(q or "")).strip().lower()[:60]
+    if q:
+        todas = [x for x in todas if all(w in (x["nombre"] + " " + x["archivo"]).lower() for w in q.split(" "))]
+    por_pagina = max(1, min(int(por_pagina or 24), 60))
+    pagina = max(0, int(pagina or 0))
+    items = todas[pagina * por_pagina:(pagina + 1) * por_pagina]
+    for x in items:
+        x["url"] = f"/api/fuente?k={x['clave']}"
+    return {"items": items, "total": len(todas), "pagina": pagina, "por_pagina": por_pagina}
+
+
+def existe_alguna(clave: str) -> bool:
+    """Para servir el archivo: está en Mis fuentes o en el catálogo."""
+    clave = str(clave or "")
+    if any(x["clave"] == clave for x in lista()):
+        return True
+    if clave.startswith("s_"):
+        return _del_catalogo(clave) is not None
+    return any(k == clave for k, _ in _curadas())
+
+
 def visibles(todas: list[dict] | None = None) -> list[dict]:
-    return [x for x in (todas if todas is not None else lista()) if not x["oculta"]]
+    return [x for x in (todas if todas is not None else lista()) if not x.get("oculta")]
 
 
 def predeterminada(todas: list[dict] | None = None) -> str:
-    vis = [x["clave"] for x in (todas if todas is not None else lista()) if not x["oculta"]]
+    vis = [x["clave"] for x in (todas if todas is not None else lista()) if not x.get("oculta")]
     p = _ajustes()["predeterminada"]
     if p in vis:
         return p
@@ -302,29 +406,24 @@ def subir(nombre: str, datos: bytes, por: str = "") -> dict:
 def _existe(clave: str) -> dict:
     x = next((f for f in lista() if f["clave"] == clave), None)
     if not x:
-        raise ValueError("Esa fuente ya no está.")
+        raise ValueError("Esa fuente ya no está en Mis fuentes.")
     return x
-
-
-def _queda_otra(clave: str) -> None:
-    if not [x for x in visibles() if x["clave"] != clave]:
-        raise ValueError("Tiene que quedar al menos una fuente: subí otra antes de sacar esta.")
 
 
 @_con_candado
 def borrar(clave: str) -> None:
-    """Las subidas se borran; las del sistema se ocultan."""
+    """Saca una fuente de Mis fuentes: las subidas se borran; las otras vuelven al catálogo."""
     x = _existe(str(clave))
-    if not x["oculta"]:
-        _queda_otra(x["clave"])
+    if len(lista()) <= 1:
+        raise ValueError("Tiene que quedar al menos una fuente: agregá o subí otra antes de sacar esta.")
+    a = _ajustes()
     if x["origen"] == "sistema":
-        ocultas = _ajustes()["ocultas"]
-        if x["clave"] not in ocultas:
-            _guardar("fuentes_ocultas", ocultas + [x["clave"]])
+        _guardar("fuentes_ocultas", a["ocultas"] + [x["clave"]])
+    elif x["origen"] == "catalogo":
+        _guardar("fuentes_activas", [k for k in a["activas"] if k != x["clave"]])
     else:
-        subidas = _ajustes()["subidas"]
-        f = next(f for f in subidas if f["clave"] == x["clave"])
-        _guardar("fuentes_subidas", [s for s in subidas if s["clave"] != x["clave"]])
+        f = next(f for f in a["subidas"] if f["clave"] == x["clave"])
+        _guardar("fuentes_subidas", [s for s in a["subidas"] if s["clave"] != x["clave"]])
         p = _archivo_subida(f)
         if p:
             p.unlink(missing_ok=True)
@@ -332,10 +431,32 @@ def borrar(clave: str) -> None:
         _guardar("fuente_predeterminada", "")
 
 
+MAX_ACTIVAS = 120
+
+
 @_con_candado
+def agregar(clave: str) -> None:
+    """Pasa una fuente del catálogo a Mis fuentes."""
+    clave = str(clave or "")
+    a = _ajustes()
+    if clave in ESTILOS and ESTILOS[clave][4]:
+        if not any(k == clave for k, _ in _curadas()):
+            raise ValueError("Esa fuente no está en este servidor.")
+        if clave not in a["ocultas"]:
+            return
+        _guardar("fuentes_ocultas", [k for k in a["ocultas"] if k != clave])
+        return
+    if not _del_catalogo(clave):
+        raise ValueError("Esa fuente no está en el catálogo.")
+    if clave in a["activas"]:
+        return
+    if len(a["activas"]) >= MAX_ACTIVAS:
+        raise ValueError(f"Ya hay {MAX_ACTIVAS} fuentes del catálogo en uso: sacá alguna primero.")
+    _guardar("fuentes_activas", a["activas"] + [clave])
+
+
 def mostrar(clave: str) -> None:
-    _existe(str(clave))
-    _guardar("fuentes_ocultas", [k for k in _ajustes()["ocultas"] if k != clave])
+    agregar(clave)
 
 
 @_con_candado
@@ -359,6 +480,32 @@ def renombrar(clave: str, nombre: str) -> None:
 
 def poner_claude(valor: bool) -> None:
     _guardar("fuente_claude", bool(valor))
+
+
+# --- lo que la letra sabe dibujar -----------------------------------------------------------------------------------------
+def dibujable(texto: str, p: Path | None) -> str:
+    """Saca lo que la fuente no tiene (emojis y símbolos raros) para que no salgan cuadraditos en el video.
+    Si la fuente no se puede leer, devuelve el texto tal cual."""
+    texto = str(texto or "")
+    cm = _cmap(Path(p)) if p else None
+    if cm is None:
+        return texto
+    out = "".join(ch for ch in texto if ch in "\n\t " or ord(ch) in cm)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return "\n".join(l.strip() for l in out.split("\n")).strip("\n")
+
+
+def faltan(texto: str, clave: str) -> str:
+    """Los caracteres del texto que esa fuente no va a dibujar (para avisar en el panel)."""
+    p = ruta(clave)
+    cm = _cmap(p) if p else None
+    if cm is None:
+        return ""
+    vistos = []
+    for ch in str(texto or ""):
+        if ch not in "\n\t " and ord(ch) not in cm and ch not in vistos:
+            vistos.append(ch)
+    return "".join(vistos[:20])
 
 
 # --- muestrario para Claude ------------------------------------------------------------------------------------------------

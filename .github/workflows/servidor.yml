@@ -67,3 +67,15 @@ jobs:
             -e HOOKLINE_CLAVE_SESION=ci-clave-de-sesion-123 hookline:ci api
           for i in $(seq 1 30); do curl -sf localhost:8000/api/salud && exit 0; sleep 2; done
           docker logs hl; exit 1
+      - name: Las fuentes del catálogo están instaladas
+        run: |
+          docker run --rm --entrypoint python hookline:ci -c "
+          from hookline import fuentes
+          c = fuentes._catalogo_sistema()
+          nombres = ' '.join(x['nombre'] for x in c)
+          print(len(c), 'fuentes en el catálogo')
+          print('Meme:', fuentes.ruta('meme'), '| Microsoft:', 'Arial' in nombres)
+          assert len(c) >= 150, 'muy pocas fuentes: falló la instalación'
+          for k in ('clasica', 'fuerte', 'moderna', 'meme', 'maquina', 'elegante'):
+              assert fuentes.ruta(k), k
+          "

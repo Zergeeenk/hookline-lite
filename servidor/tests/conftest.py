@@ -31,6 +31,7 @@ def entorno(tmp_path, monkeypatch):
     from hookline import auth, fuentes
     fuentes._indice.cache_clear()
     fuentes._cache.update(v=None, lista=None)
+    fuentes._catalogo_sistema.cache_clear()
     auth._fallidos.clear()
     yield tmp_path
     db.reiniciar_motor()

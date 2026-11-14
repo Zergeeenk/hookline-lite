@@ -38,7 +38,7 @@ def dibujar(mensajes, ancho_px, destino, separador="", fondo=True):
 
     def partir(texto):
         renglones = []
-        for parrafo in str(texto).split("\n"):
+        for parrafo in fuentes.dibujable(str(texto), fuentes.ruta("texto")).split("\n"):
             actual = ""
             for palabra in parrafo.split(" "):
                 prueba = (actual + " " + palabra).strip()
@@ -55,7 +55,7 @@ def dibujar(mensajes, ancho_px, destino, separador="", fondo=True):
     bloques, y = [], pad
     for m in mensajes:
         if m.get("de") == "aviso" or m.get("aviso"):
-            bloques.append(("aviso", m.get("texto") or m.get("aviso"), y))
+            bloques.append(("aviso", fuentes.dibujable(str(m.get("texto") or m.get("aviso") or ""), fuentes.ruta("texto")), y))
             y += int(f_aviso.size * 2.2) + gap
             continue
         lineas = partir(m.get("texto", ""))
@@ -111,7 +111,7 @@ def notificacion(texto, ancho_px, destino, titulo="Instagram", hora="Ahora"):
     medir = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     max_txt = W - pad * 3 - icono
     lineas, actual = [], ""
-    for palabra in str(texto).split():
+    for palabra in fuentes.dibujable(str(texto), fuentes.ruta("texto")).split():
         prueba = (actual + " " + palabra).strip()
         if medir.textlength(prueba, font=f_txt) <= max_txt or not actual:
             actual = prueba

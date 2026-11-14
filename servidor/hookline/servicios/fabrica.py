@@ -74,7 +74,8 @@ def _renglones(texto, fuente_p, tam_px, max_px) -> list[str]:
     except Exception:
         medir = lambda s: len(s) * tam_px * 0.55
     out = []
-    for parrafo in str(texto or "").replace("\r", "").split("\n"):
+    texto = fuentes.dibujable(str(texto or "").replace("\r", ""), fuente_p)   # sin cuadraditos (emojis)
+    for parrafo in texto.split("\n"):
         linea = ""
         for palabra in parrafo.split():
             prueba = f"{linea} {palabra}".strip()
@@ -194,6 +195,7 @@ def listar() -> list[dict]:
                 c[k + "_url"] = almacen.relativa(d / c[k]) if (d / c[k]).exists() else ""
         for v in c["versiones"]:
             v["url"] = almacen.relativa(d / v["archivo"]) if (d / v["archivo"]).exists() else ""
+        c["faltan"] = fuentes.faltan(c.get("texto"), c["fuente"])     # lo que esa letra no dibuja (emojis...)
         out.append(c)
     return out
 
@@ -1045,9 +1047,10 @@ def _render_ya(datos: dict) -> None:
             entradas += ["-loop", "1", "-i", str(d / "_chat.png")]
             base += (f"[cb];[{ni}:v]format=rgba,trim=0:{corte:.2f},setpts=PTS-STARTPTS[chat];"
                      f"[cb][chat]overlay={int(w * cx0)}:{cy0},null")
-        f_cl = _esc_ff(fuentes.ruta_obligatoria("clasica"))
+        p_cl = fuentes.ruta_obligatoria("clasica")
+        f_cl = _esc_ff(p_cl)
         for k, tx in enumerate(t for t in (c.get("textos") or []) if isinstance(t, dict) and t.get("texto")):
-            (d / f"_x{k}.txt").write_text(str(tx["texto"]), encoding="utf-8")
+            (d / f"_x{k}.txt").write_text(fuentes.dibujable(str(tx["texto"]), p_cl), encoding="utf-8")
             tz = int(h * _num(tx.get("tam"), 0.03, 0.015, 0.08) * ESCALA_TEXTO)
             base += (f",drawtext=fontfile='{f_cl}':textfile=_x{k}.txt:expansion=none:fontcolor=white:fontsize={tz}:"
                      f"x='w*{_num(tx.get('x'), 0.5, 0, 1):.4f}-tw/2':y={int(h * _num(tx.get('y'), 0.1, 0, 1)) + int(tz * 0.95)}-ascent")

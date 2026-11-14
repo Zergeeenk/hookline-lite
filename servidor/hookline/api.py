@@ -528,7 +528,14 @@ def publico(rel: str, v: str = "", f: str = ""):
 # --- Fuentes (sección Fuentes) -------------------------------------------------------------------------------------------------
 def _fuentes_estado() -> dict:
     from . import fuentes
-    return {"fuentes": fuentes.lista(), "claude": fuentes.claude_elige(), "predeterminada": fuentes.predeterminada()}
+    return {"fuentes": fuentes.lista(), "claude": fuentes.claude_elige(), "predeterminada": fuentes.predeterminada(),
+            "catalogo_total": fuentes.catalogo(por_pagina=1)["total"]}
+
+
+@app.get("/api/fuentes_catalogo")
+def fuentes_catalogo(q: str = "", pagina: int = 0, q_: Quien = requerir()):
+    from . import fuentes
+    return fuentes.catalogo(q, pagina)
 
 
 @app.get("/api/fuentes")
@@ -540,7 +547,7 @@ def fuentes_get(q: Quien = requerir()):
 def fuente_archivo(k: str, q: Quien = requerir()):
     """El archivo de una fuente, para que el panel la muestre tal cual queda en el video."""
     from . import fuentes
-    if not any(f["clave"] == k for f in fuentes.lista()):
+    if not fuentes.existe_alguna(k):
         raise HTTPException(404, "no existe")
     p = fuentes.ruta(k)
     if not p:
@@ -566,8 +573,8 @@ def fuentes_post(d: dict = Depends(_json), q: Quien = requerir("editor")):
     op, k = d.get("op"), str(d.get("clave") or "")
     if op == "borrar":
         fuentes.borrar(k)
-    elif op == "mostrar":
-        fuentes.mostrar(k)
+    elif op in ("mostrar", "agregar"):
+        fuentes.agregar(k)
     elif op == "predeterminada":
         fuentes.elegir_predeterminada(k)
     elif op == "renombrar":

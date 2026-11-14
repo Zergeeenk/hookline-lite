@@ -206,3 +206,18 @@ def test_reel_armado_con_una_fuente_subida(tmp_path, modelo_con_multi):
     _vaciar_cola(["render"])
     c = next(x for x in fabrica.listar() if x["id"] == cid)
     assert c["fuente"] == "maquina" and c["versiones"][-1]["texto"] == "otra"
+
+
+def test_reel_con_emojis_se_arma_sin_cuadraditos(tmp_path, modelo_con_multi):
+    """El texto con emojis: el reel sale igual (los emojis se sacan) y el panel avisa cuáles."""
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "cuando me dice 😅 ya llego 🔥", "modelo": 1,
+                                                    "textos": [{"texto": "jaja 😂", "x": 0.5, "y": 0.8}]})
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["estado"] == "lista" and c["versiones"]
+    assert c["faltan"] == "😅🔥"
+    assert all("😅" not in l for l in fabrica._renglones(c["texto"], fabrica.fuentes.ruta_obligatoria(c["fuente"]), 40, 600))
+    fabrica.armar(cid, {"texto": "sin emojis"})
+    _vaciar_cola(["render"])
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["faltan"] == "" and c["versiones"][-1]["texto"] == "sin emojis"
