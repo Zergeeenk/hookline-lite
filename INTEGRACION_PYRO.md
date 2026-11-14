@@ -77,6 +77,10 @@ una lista cerrada de rutas al servicio de afuera. La propuesta copia ese patrón
   de Pyro nunca viaja.
 - **Hookline caído no le pega a nada más**: conexiones propias, plazos cortos y 502 `hookline_down`.
 
+Está armada y probada: 4 patches sobre `pyromodels/backend` (migración 136, `hooklinebus`, `hooklineapp`,
+`docs/HOOKLINE.md`), compilados y con sus pruebas en verde contra Postgres. El detalle, cómo aplicarlos y lo que
+falta (la pantalla en el frontend) están en [`propuesta-pyro/README.md`](propuesta-pyro/README.md).
+
 ### ③ Hookline le avisa a Pyro — **hecho** en Hookline, recepción en la propuesta
 
 Hookline manda `POST` JSON firmado (`X-Hookline-Firma: sha256=HMAC(secreto, "<tiempo>.<cuerpo>")`) con reintentos
@@ -100,7 +104,7 @@ Instagram.
 4. En Hookline, crear el token del puente:
    `docker compose run --rm api token pyro --rol editor` (se muestra una sola vez).
 5. En Pyro, sección Hookline → Ajustes: pegar la dirección de Hookline, el token y un secreto para los webhooks
-   → **Probar**.
+   (16 caracteres o más) → **Probar**.
 6. En Hookline, poner `HOOKLINE_WEBHOOK_URL=https://<pyro>/api/hookline/webhook/<id de la agencia>` y
    `HOOKLINE_WEBHOOK_SECRETO=<el mismo secreto>`, y reiniciar.
 7. En Pyro, dar el permiso **Hookline** en Equipo a quien corresponda.
