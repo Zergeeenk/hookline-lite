@@ -1,0 +1,1922 @@
+From c548a8de28ab71524b396047c32cf745b1f455c3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 02:28:11 +0000
+Subject: [PATCH 2/4] The API can talk to Hookline for an agency: its address,
+ token and webhook secret sealed in the database, a closed set of calls on
+ connections of its own with short timeouts and a 5 s rest after a failed
+ connection, each account filtered by the model it is tied to (kept a minute),
+ and its signed webhooks turned into notifications for the admins and the
+ model's people.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ api/services/platform/main.go                 |   8 +
+ app/sdk/apitest/apitest.go                    |   5 +
+ app/sdk/config/config.go                      |   7 +
+ app/sdk/mux/mux.go                            |   4 +
+ business/domain/hooklinebus/content.go        | 491 +++++++++++++++++
+ business/domain/hooklinebus/hooklinebus.go    | 518 ++++++++++++++++++
+ .../domain/hooklinebus/hooklinebus_test.go    | 234 ++++++++
+ business/domain/hooklinebus/model.go          | 121 ++++
+ .../stores/hooklinedb/hooklinedb.go           |  95 ++++
+ .../stores/hooklinedb/hooklinedb_test.go      | 108 ++++
+ business/domain/hooklinebus/webhook.go        | 182 ++++++
+ 11 files changed, 1773 insertions(+)
+ create mode 100644 business/domain/hooklinebus/content.go
+ create mode 100644 business/domain/hooklinebus/hooklinebus.go
+ create mode 100644 business/domain/hooklinebus/hooklinebus_test.go
+ create mode 100644 business/domain/hooklinebus/model.go
+ create mode 100644 business/domain/hooklinebus/stores/hooklinedb/hooklinedb.go
+ create mode 100644 business/domain/hooklinebus/stores/hooklinedb/hooklinedb_test.go
+ create mode 100644 business/domain/hooklinebus/webhook.go
+
+diff --git a/api/services/platform/main.go b/api/services/platform/main.go
+index d32310e..58c0246 100644
+--- a/api/services/platform/main.go
++++ b/api/services/platform/main.go
+@@ -43,6 +43,8 @@ import (
+ 	"modelpro/business/domain/devicebus/stores/devicedb"
+ 	"modelpro/business/domain/fanbus"
+ 	"modelpro/business/domain/fanbus/stores/fandb"
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/business/domain/hooklinebus/stores/hooklinedb"
+ 	"modelpro/business/domain/inboxbus"
+ 	"modelpro/business/domain/inboxbus/stores/inboxdb"
+ 	"modelpro/business/domain/loraxbus"
+@@ -271,6 +273,12 @@ func run(ctx context.Context, log *logger.Logger) error {
+ 	busConfig.SheltonBus = sheltonbus.NewBusiness(sheltonbus.Config{
+ 		Log: log, Storer: sheltondb.NewStore(log, db), Box: box, AllowHTTP: cfg.SheltonAllowHTTP,
+ 	})
++	// Hookline: the same, its connection and its webhooks' secret sealed in
++	// the database; without one the section is off.
++	busConfig.HooklineBus = hooklinebus.NewBusiness(hooklinebus.Config{
++		Log: log, Storer: hooklinedb.NewStore(log, db), Box: box, AllowHTTP: cfg.HooklineAllowHTTP,
++	})
++	busConfig.HooklineBus.SetNotifier(busConfig.NotifBus)
+ 	busConfig.TaskBus.SetNotifier(busConfig.NotifBus)
+ 	busConfig.RequestBus.SetNotifier(busConfig.NotifBus)
+ 	busConfig.RequestBus.SetChatLiner(busConfig.ChatBus)
+diff --git a/app/sdk/apitest/apitest.go b/app/sdk/apitest/apitest.go
+index 73a780d..ab3d4e5 100644
+--- a/app/sdk/apitest/apitest.go
++++ b/app/sdk/apitest/apitest.go
+@@ -48,6 +48,8 @@ import (
+ 	"modelpro/business/domain/devicebus/stores/devicedb"
+ 	"modelpro/business/domain/fanbus"
+ 	"modelpro/business/domain/fanbus/stores/fandb"
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/business/domain/hooklinebus/stores/hooklinedb"
+ 	"modelpro/business/domain/inboxbus"
+ 	"modelpro/business/domain/inboxbus/stores/inboxdb"
+ 	"modelpro/business/domain/loraxbus"
+@@ -323,6 +325,9 @@ func New(t *testing.T, routes func(rt web.Routers, cfg mux.Config), opts ...Opti
+ 	bus.VoiceAIBus = voiceaibus.NewBusiness(voiceaibus.Config{Log: log, Storer: voiceaidb.NewStore(log, db.DB), Box: box, Provider: el})
+ 	// A test's Shelton is an httptest.Server, so http:// is allowed.
+ 	bus.SheltonBus = sheltonbus.NewBusiness(sheltonbus.Config{Log: log, Storer: sheltondb.NewStore(log, db.DB), Box: box, AllowHTTP: true})
++	// And so is a test's Hookline.
++	bus.HooklineBus = hooklinebus.NewBusiness(hooklinebus.Config{Log: log, Storer: hooklinedb.NewStore(log, db.DB), Box: box, AllowHTTP: true})
++	bus.HooklineBus.SetNotifier(bus.NotifBus)
+ 	bus.TaskBus.SetNotifier(bus.NotifBus)
+ 	bus.RequestBus.SetNotifier(bus.NotifBus)
+ 	bus.RequestBus.SetChatLiner(bus.ChatBus)
+diff --git a/app/sdk/config/config.go b/app/sdk/config/config.go
+index a85d06b..d6fca43 100644
+--- a/app/sdk/config/config.go
++++ b/app/sdk/config/config.go
+@@ -141,6 +141,12 @@ type Config struct {
+ 	// Off in production: the address is https, and the connection itself is
+ 	// each agency's, sealed in the database.
+ 	SheltonAllowHTTP bool
++
++	// HooklineAllowHTTP lets Hookline's connection be an http:// address
++	// (HOOKLINE_ALLOW_HTTP=true): a fake Hookline on a developer's machine.
++	// Off in production: the address is https, and the connection itself is
++	// each agency's, sealed in the database.
++	HooklineAllowHTTP bool
+ }
+ 
+ // STT is an OpenAI-compatible speech-to-text provider. An empty BaseURL is
+@@ -390,6 +396,7 @@ func Load() (*Config, error) {
+ 	cfg.STT = sttConfig(os.Getenv("STT_BASE_URL"), os.Getenv("STT_API_KEY"), os.Getenv("STT_MODEL"), cfg.Channels)
+ 
+ 	cfg.SheltonAllowHTTP = os.Getenv("SHELTON_ALLOW_HTTP") == "true"
++	cfg.HooklineAllowHTTP = os.Getenv("HOOKLINE_ALLOW_HTTP") == "true"
+ 	cfg.ElevenLabsURL = strings.TrimRight(strings.TrimSpace(env("ELEVENLABS_BASE_URL", elevenlabs.DefaultBaseURL)), "/")
+ 	if !strings.HasPrefix(cfg.ElevenLabsURL, "https://") && !strings.HasPrefix(cfg.ElevenLabsURL, "http://") {
+ 		return nil, errors.New("ELEVENLABS_BASE_URL must start with https:// (or http:// for a fake one)")
+diff --git a/app/sdk/mux/mux.go b/app/sdk/mux/mux.go
+index f6ce76a..4b009e0 100644
+--- a/app/sdk/mux/mux.go
++++ b/app/sdk/mux/mux.go
+@@ -33,6 +33,7 @@ import (
+ 	"modelpro/business/domain/credentialbus"
+ 	"modelpro/business/domain/devicebus"
+ 	"modelpro/business/domain/fanbus"
++	"modelpro/business/domain/hooklinebus"
+ 	"modelpro/business/domain/inboxbus"
+ 	"modelpro/business/domain/loraxbus"
+ 	"modelpro/business/domain/mediabus"
+@@ -97,6 +98,9 @@ type BusConfig struct {
+ 	LoraxBus *loraxbus.Business
+ 	// SheltonBus is the bridge to Shelton's agents behind Contenido IA.
+ 	SheltonBus *sheltonbus.Business
++	// HooklineBus is the bridge to Hookline, the community manager of the
++	// models' Instagram accounts (docs/HOOKLINE.md).
++	HooklineBus *hooklinebus.Business
+ 	// StoryBus keeps each model's stories, the anecdotes told from the chats.
+ 	StoryBus *storybus.Business
+ 	// ActivityBus keeps each model's activities, her agenda of the week.
+diff --git a/business/domain/hooklinebus/content.go b/business/domain/hooklinebus/content.go
+new file mode 100644
+index 0000000..d4f299e
+--- /dev/null
++++ b/business/domain/hooklinebus/content.go
+@@ -0,0 +1,491 @@
++package hooklinebus
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"mime"
++	"net/http"
++	"net/url"
++	"regexp"
++	"slices"
++	"time"
++	"unicode/utf8"
++
++	"modelpro/business/sdk/validate"
++	"modelpro/business/types/modelscope"
++)
++
++const (
++	// cuentasFor is how long what Hookline says of its accounts' models is
++	// kept: every route of an account asks for it.
++	cuentasFor = time.Minute
++	// minisFor is how long the thumbnails of the pieces read are kept, and
++	// minisEvery the least between two reads of every piece for one that is
++	// not among them: a page of pieces asks for many thumbnails at once.
++	minisFor   = time.Minute
++	minisEvery = 5 * time.Second
++	// maxCaption is the longest caption, what Instagram takes; maxAnswer
++	// the longest answer to a comment.
++	maxCaption = 2200
++	maxAnswer  = 2200
++	// maxMiniPath is the longest path of a thumbnail.
++	maxMiniPath = 1024
++)
++
++// The operations on a piece and on a comment that go through: nothing else
++// Hookline does is reached from here.
++var (
++	PiezaOps      = []string{"jueces", "caption", "programar", "cancelar"}
++	ComentarioOps = []string{"responder", "ocultar", "saltar"}
++)
++
++var (
++	// cuentaPattern is an account's id, as Hookline writes it (its
++	// Instagram user).
++	cuentaPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
++	// idPattern is the id of a piece or of a comment.
++	idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,120}$`)
++	// cuandoPattern is when a piece goes out, in Hookline's local time.
++	cuandoPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$`)
++)
++
++// ValidCuenta reports whether an id can be one of an account.
++func ValidCuenta(id string) bool { return cuentaPattern.MatchString(id) }
++
++// cuentaModels is which model of the CRM each account is (0: none), when it
++// was read.
++type cuentaModels struct {
++	ids map[string]int
++	at  time.Time
++}
++
++// cuenta is what the bridge reads of an account.
++type cuenta struct {
++	ID           string `json:"id"`
++	PyroModeloID *int   `json:"pyro_modelo_id"`
++}
++
++// pieza is what the bridge reads of a piece.
++type pieza struct {
++	ID            string   `json:"id"`
++	Cuenta        string   `json:"cuenta"`
++	Archivos      []string `json:"archivos"`
++	VistasPrevias []string `json:"vistas_previas"`
++}
++
++// paths are the thumbnails a piece may show: its files, and the p of each
++// of its previews.
++func (pc pieza) paths() []string {
++	out := slices.Clone(pc.Archivos)
++	for _, v := range pc.VistasPrevias {
++		u, err := url.Parse(v)
++		if err != nil || u.Path != "/mini" {
++			continue
++		}
++		if p := u.Query().Get("p"); p != "" {
++			out = append(out, p)
++		}
++	}
++	return out
++}
++
++// miniPaths is which account each thumbnail read is of.
++type miniPaths struct {
++	cuentas map[string]string
++	at      map[string]time.Time
++	// full is when every piece was read last.
++	full time.Time
++}
++
++// unreadable is an answer of Hookline the bridge cannot read: what it
++// filters never goes out unfiltered.
++func (b *Business) unreadable(ctx context.Context, what string, err error) error {
++	b.log.Error(ctx, "hookline: an answer that cannot be read", "what", what, "err", err)
++	return ErrDown
++}
++
++// keepCuentas keeps which model each account is from a state just read,
++// and returns the accounts as they came. A state without accounts says
++// nothing: ErrDown.
++func (b *Business) keepCuentas(ctx context.Context, l *link, raw json.RawMessage) ([]json.RawMessage, error) {
++	var doc struct {
++		Cuentas *[]json.RawMessage `json:"cuentas"`
++	}
++	if err := json.Unmarshal(raw, &doc); err != nil {
++		return nil, b.unreadable(ctx, "estado", err)
++	}
++	if doc.Cuentas == nil {
++		return nil, b.unreadable(ctx, "estado", errors.New("a state without accounts"))
++	}
++	ids := make(map[string]int, len(*doc.Cuentas))
++	for _, item := range *doc.Cuentas {
++		var c cuenta
++		if err := json.Unmarshal(item, &c); err != nil {
++			return nil, b.unreadable(ctx, "estado cuentas", err)
++		}
++		if c.ID == "" {
++			continue
++		}
++		ids[c.ID] = 0
++		if c.PyroModeloID != nil && *c.PyroModeloID > 0 {
++			ids[c.ID] = *c.PyroModeloID
++		}
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	b.cuentas[l.sum] = cuentaModels{ids: ids, at: b.now()}
++	return *doc.Cuentas, nil
++}
++
++// sees returns whether the scope reaches an account. An account tied to no
++// model of the CRM is seen by an admin alone; an admin sees them all, known
++// or not (Hookline says what does not exist).
++func (b *Business) sees(ctx context.Context, p Person, scope modelscope.Scope) (func(cuenta string) bool, error) {
++	if scope.All {
++		return func(string) bool { return true }, nil
++	}
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return nil, err
++	}
++	b.mu.Lock()
++	kept, ok := b.cuentas[l.sum]
++	b.mu.Unlock()
++	if !ok || b.now().Sub(kept.at) > cuentasFor {
++		rep, err := b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/estado"})
++		if err != nil {
++			return nil, err
++		}
++		if rep.Status != http.StatusOK {
++			return nil, b.unreadable(ctx, "estado", fmt.Errorf("status %d", rep.Status))
++		}
++		if _, err := b.keepCuentas(ctx, l, rep.Body); err != nil {
++			return nil, err
++		}
++		b.mu.Lock()
++		kept = b.cuentas[l.sum]
++		b.mu.Unlock()
++	}
++	return func(c string) bool {
++		id, ok := kept.ids[c]
++		return ok && id > 0 && scope.Allows(id)
++	}, nil
++}
++
++// visible checks that an account is one the scope reaches; one outside it
++// does not exist.
++func (b *Business) visible(ctx context.Context, p Person, scope modelscope.Scope, c string) error {
++	if !ValidCuenta(c) {
++		return ErrNotFound
++	}
++	sees, err := b.sees(ctx, p, scope)
++	if err != nil {
++		return err
++	}
++	if !sees(c) {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// Cuentas returns Hookline's accounts that the scope reaches, read fresh.
++func (b *Business) Cuentas(ctx context.Context, p Person, scope modelscope.Scope) (Reply, error) {
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return Reply{}, err
++	}
++	rep, err := b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/estado"})
++	if err != nil {
++		return Reply{}, err
++	}
++	if rep.Status != http.StatusOK {
++		return Reply{}, b.unreadable(ctx, "estado", fmt.Errorf("status %d", rep.Status))
++	}
++	list, err := b.keepCuentas(ctx, l, rep.Body)
++	if err != nil {
++		return Reply{}, err
++	}
++	out := make([]json.RawMessage, 0, len(list))
++	for _, item := range list {
++		var c cuenta
++		if err := json.Unmarshal(item, &c); err != nil {
++			return Reply{}, b.unreadable(ctx, "estado cuentas", err)
++		}
++		if scope.All || (c.PyroModeloID != nil && *c.PyroModeloID > 0 && scope.Allows(*c.PyroModeloID)) {
++			out = append(out, item)
++		}
++	}
++	rep.Body, err = json.Marshal(map[string]any{"cuentas": out})
++	return rep, err
++}
++
++// readPiezas reads the piezas of an account, or every one with c empty.
++func (b *Business) readPiezas(ctx context.Context, p Person, c string) ([]json.RawMessage, []pieza, Reply, error) {
++	var q url.Values
++	if c != "" {
++		q = query("cuenta", c)
++	}
++	rep, err := b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/piezas", Query: q})
++	if err != nil || rep.Status != http.StatusOK {
++		return nil, nil, rep, err
++	}
++	var doc struct {
++		Piezas *[]json.RawMessage `json:"piezas"`
++	}
++	if err := json.Unmarshal(rep.Body, &doc); err != nil {
++		return nil, nil, Reply{}, b.unreadable(ctx, "piezas", err)
++	}
++	if doc.Piezas == nil {
++		return nil, nil, Reply{}, b.unreadable(ctx, "piezas", errors.New("an answer without piezas"))
++	}
++	read := make([]pieza, len(*doc.Piezas))
++	for i, item := range *doc.Piezas {
++		if err := json.Unmarshal(item, &read[i]); err != nil {
++			return nil, nil, Reply{}, b.unreadable(ctx, "piezas", err)
++		}
++	}
++	b.keepMinis(ctx, p, read, c == "")
++	return *doc.Piezas, read, rep, nil
++}
++
++// Piezas returns the piezas of an account the scope reaches. What Hookline
++// answers is filtered again by each piece's account: nothing of another
++// model goes out, whatever came.
++func (b *Business) Piezas(ctx context.Context, p Person, scope modelscope.Scope, c string) (Reply, error) {
++	if err := b.visible(ctx, p, scope, c); err != nil {
++		return Reply{}, err
++	}
++	list, read, rep, err := b.readPiezas(ctx, p, c)
++	if err != nil || rep.Status != http.StatusOK {
++		return rep, err
++	}
++	out := make([]json.RawMessage, 0, len(list))
++	for i, item := range list {
++		if read[i].Cuenta == c {
++			out = append(out, item)
++		}
++	}
++	rep.Body, err = json.Marshal(map[string]any{"piezas": out})
++	return rep, err
++}
++
++// findPieza returns a piece the scope reaches; one outside it does not
++// exist.
++func (b *Business) findPieza(ctx context.Context, p Person, scope modelscope.Scope, id string) (pieza, error) {
++	if !idPattern.MatchString(id) {
++		return pieza{}, ErrNotFound
++	}
++	_, read, rep, err := b.readPiezas(ctx, p, "")
++	if err != nil {
++		return pieza{}, err
++	}
++	if rep.Status != http.StatusOK {
++		return pieza{}, b.unreadable(ctx, "piezas", fmt.Errorf("status %d", rep.Status))
++	}
++	i := slices.IndexFunc(read, func(pc pieza) bool { return pc.ID == id })
++	if i < 0 {
++		return pieza{}, ErrNotFound
++	}
++	if err := b.visible(ctx, p, scope, read[i].Cuenta); err != nil {
++		return pieza{}, err
++	}
++	return read[i], nil
++}
++
++// PiezaOp is what a person does with a piece, as the screen sends it.
++type PiezaOp struct {
++	Op      string
++	ID      string
++	Caption *string
++	Cuando  *string
++}
++
++// DoPieza does one of PiezaOps on a piece the scope reaches: the judges,
++// the caption, scheduling it or cancelling it. Only that operation's fields
++// go on.
++func (b *Business) DoPieza(ctx context.Context, p Person, scope modelscope.Scope, in PiezaOp) (Reply, error) {
++	if !slices.Contains(PiezaOps, in.Op) {
++		return Reply{}, validate.Field("op", "one of jueces, caption, programar, cancelar")
++	}
++	body := map[string]string{"op": in.Op, "id": in.ID}
++	switch in.Op {
++	case "caption":
++		if in.Caption == nil || !utf8.ValidString(*in.Caption) || utf8.RuneCountInString(*in.Caption) > maxCaption {
++			return Reply{}, validate.Field("caption", "the caption, up to 2200 characters")
++		}
++		body["caption"] = *in.Caption
++	case "programar":
++		if in.Cuando == nil || !cuandoPattern.MatchString(*in.Cuando) {
++			return Reply{}, validate.Field("cuando", "when it goes out, as 2026-11-20T20:00")
++		}
++		body["cuando"] = *in.Cuando
++	}
++	if _, err := b.findPieza(ctx, p, scope, in.ID); err != nil {
++		return Reply{}, err
++	}
++	raw, err := json.Marshal(body)
++	if err != nil {
++		return Reply{}, err
++	}
++	return b.Ask(ctx, p, Call{Method: http.MethodPost, Path: "/api/pieza", Body: raw})
++}
++
++// Stats returns the figures of an account the scope reaches.
++func (b *Business) Stats(ctx context.Context, p Person, scope modelscope.Scope, c string) (Reply, error) {
++	if err := b.visible(ctx, p, scope, c); err != nil {
++		return Reply{}, err
++	}
++	return b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/stats", Query: query("cuenta", c)})
++}
++
++// Comentarios returns the comments of an account the scope reaches.
++func (b *Business) Comentarios(ctx context.Context, p Person, scope modelscope.Scope, c string) (Reply, error) {
++	if err := b.visible(ctx, p, scope, c); err != nil {
++		return Reply{}, err
++	}
++	return b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/comentarios", Query: query("cuenta", c)})
++}
++
++// ComentarioOp is what a person does with a comment.
++type ComentarioOp struct {
++	Op         string
++	Cuenta     string
++	Comentario string
++	Texto      string
++}
++
++// DoComentario does one of ComentarioOps on a comment of an account the
++// scope reaches: answering it, hiding it or leaving it.
++func (b *Business) DoComentario(ctx context.Context, p Person, scope modelscope.Scope, in ComentarioOp) (Reply, error) {
++	if !slices.Contains(ComentarioOps, in.Op) {
++		return Reply{}, validate.Field("op", "one of responder, ocultar, saltar")
++	}
++	if !idPattern.MatchString(in.Comentario) {
++		return Reply{}, validate.Field("comentario", "the comment's id")
++	}
++	body := map[string]string{"op": in.Op, "cuenta": in.Cuenta, "comentario": in.Comentario}
++	if in.Op == "responder" {
++		if in.Texto == "" || !utf8.ValidString(in.Texto) || utf8.RuneCountInString(in.Texto) > maxAnswer {
++			return Reply{}, validate.Field("texto", "the answer, up to 2200 characters")
++		}
++		body["texto"] = in.Texto
++	}
++	if err := b.visible(ctx, p, scope, in.Cuenta); err != nil {
++		return Reply{}, err
++	}
++	raw, err := json.Marshal(body)
++	if err != nil {
++		return Reply{}, err
++	}
++	return b.Ask(ctx, p, Call{Method: http.MethodPost, Path: "/api/comentario", Body: raw})
++}
++
++// =============================================================================
++// Thumbnails
++
++// keepMinis keeps the account of each thumbnail of the pieces just read;
++// with full, they are every piece, and what was kept before goes.
++func (b *Business) keepMinis(ctx context.Context, p Person, read []pieza, full bool) {
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return
++	}
++	now := b.now()
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	m := b.minis[l.sum]
++	if m == nil || full {
++		m = &miniPaths{cuentas: map[string]string{}, at: map[string]time.Time{}}
++		b.minis[l.sum] = m
++	}
++	if full {
++		m.full = now
++	}
++	keepFresh(m.at, now, minisFor)
++	for path := range m.cuentas {
++		if _, ok := m.at[path]; !ok {
++			delete(m.cuentas, path)
++		}
++	}
++	for _, pc := range read {
++		for _, path := range pc.paths() {
++			m.cuentas[path], m.at[path] = pc.Cuenta, now
++		}
++	}
++}
++
++// miniCuenta returns the account of a thumbnail kept fresh, and whether it
++// was; and whether every piece may be read again to look for it.
++func (b *Business) miniCuenta(l *link, path string) (string, bool, bool) {
++	now := b.now()
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	m := b.minis[l.sum]
++	if m == nil {
++		return "", false, true
++	}
++	if at, ok := m.at[path]; ok && now.Sub(at) <= minisFor {
++		return m.cuentas[path], true, false
++	}
++	return "", false, now.Sub(m.full) > minisEvery
++}
++
++// Mini returns the thumbnail of a file of a piece the scope reaches, a JPEG
++// up to 5 MB: the only way to a file, so a person never reaches one of
++// another model. A path that is not of such a piece does not exist.
++func (b *Business) Mini(ctx context.Context, p Person, scope modelscope.Scope, path string) ([]byte, error) {
++	if path == "" || len(path) > maxMiniPath || !utf8.ValidString(path) {
++		return nil, ErrNotFound
++	}
++	for _, r := range path {
++		if r < 0x20 || r == 0x7f {
++			return nil, ErrNotFound
++		}
++	}
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return nil, err
++	}
++	c, ok, again := b.miniCuenta(l, path)
++	if !ok && again {
++		if _, _, rep, err := b.readPiezas(ctx, p, ""); err != nil {
++			return nil, err
++		} else if rep.Status != http.StatusOK {
++			return nil, b.unreadable(ctx, "piezas", fmt.Errorf("status %d", rep.Status))
++		}
++		c, ok, _ = b.miniCuenta(l, path)
++	}
++	if !ok {
++		return nil, ErrNotFound
++	}
++	if err := b.visible(ctx, p, scope, c); err != nil {
++		return nil, err
++	}
++
++	ctx, cancel := context.WithTimeout(ctx, askFor)
++	defer cancel()
++	res, err := b.send(ctx, l, l.minis, p, Call{Method: http.MethodGet, Path: "/mini", Query: query("p", path)}, "image/jpeg")
++	if err != nil {
++		return nil, err
++	}
++	defer res.Body.Close()
++	if res.StatusCode == http.StatusNotFound {
++		return nil, ErrNotFound
++	}
++	declared, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
++	if res.StatusCode != http.StatusOK || declared != "image/jpeg" || res.ContentLength > maxMini {
++		b.log.Error(ctx, "hookline: a thumbnail that is not what it should be", "status", res.StatusCode, "type", res.Header.Get("Content-Type"), "bytes", res.ContentLength)
++		return nil, ErrDown
++	}
++	raw, err := readAll(res, maxMini)
++	if err != nil {
++		if errors.Is(err, errTooBig) {
++			b.log.Error(ctx, "hookline: a thumbnail too big")
++			return nil, ErrDown
++		}
++		return nil, b.gone(ctx, l, err)
++	}
++	return raw, nil
++}
+diff --git a/business/domain/hooklinebus/hooklinebus.go b/business/domain/hooklinebus/hooklinebus.go
+new file mode 100644
+index 0000000..9e306b4
+--- /dev/null
++++ b/business/domain/hooklinebus/hooklinebus.go
+@@ -0,0 +1,518 @@
++// Package hooklinebus is the bridge to Hookline, the community manager of
++// the models' Instagram accounts: its inbox of pieces ("piezas"), the AI
++// judges, the scheduled publishing, the comments and the stats. The CRM
++// puts the person, the permission and the model scope; Hookline keeps the
++// accounts and publishes, and the API reaches it on a closed list of
++// routes.
++//
++// Each agency's connection (the address, Hookline's token and the secret
++// its webhooks are signed with) is sealed with secretbox and pasted by an
++// admin. Without one the section is off (ErrOff) and nothing else notices.
++//
++// Every request goes with the agency's token of Hookline (a role editor
++// token, "hl_…") and says who it is for (X-Hookline-Actor), so Hookline
++// records who approved what: the CRM's JWT never leaves.
++//
++// Hookline does not know the CRM's scopes: each of its accounts says which
++// model of the CRM it is (pyro_modelo_id), and the bridge filters by it. An
++// account tied to no model is an admin's alone. When the accounts cannot be
++// read, nothing opens.
++//
++// A Hookline that is down must touch nothing else: the bridge has
++// connections of its own, with a cap, and short times; and after a
++// connection that failed nobody tries again for a few seconds.
++package hooklinebus
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"maps"
++	"mime"
++	"net"
++	"net/http"
++	"net/netip"
++	"net/url"
++	"regexp"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"modelpro/business/sdk/httpclient"
++	"modelpro/business/sdk/secretbox"
++	"modelpro/business/sdk/validate"
++	"modelpro/foundation/logger"
++)
++
++const (
++	// askFor bounds a read or a change.
++	askFor = 20 * time.Second
++	// restFor is how long nobody tries after a connection that failed.
++	restFor = 5 * time.Second
++	// maxReply is the most of an answer the bridge reads.
++	maxReply = 8 << 20
++	// maxMini is the most of a thumbnail the bridge reads.
++	maxMini = 5 << 20
++	// apiConns and miniConns cap the connections to one Hookline, each its
++	// own pool: reads and changes, and the thumbnails a page asks for many
++	// at once.
++	apiConns  = 16
++	miniConns = 8
++	// maxAddress is the longest address of a connection.
++	maxAddress = 512
++)
++
++// connection is what is sealed in the database.
++type connection struct {
++	URL           string `json:"url"`
++	Token         string `json:"token"`
++	WebhookSecret string `json:"webhookSecret"`
++}
++
++// link is an agency's connection, with its clients.
++type link struct {
++	sum       [32]byte
++	conn      connection
++	api       *http.Client
++	minis     *http.Client
++	restUntil atomic.Int64
++}
++
++// resting reports whether a connection failed moments ago.
++func (l *link) resting() bool { return time.Now().UnixNano() < l.restUntil.Load() }
++
++func (l *link) rest() { l.restUntil.Store(time.Now().Add(restFor).UnixNano()) }
++
++func (l *link) close() {
++	l.api.CloseIdleConnections()
++	l.minis.CloseIdleConnections()
++}
++
++// Config is what the business needs.
++type Config struct {
++	Log    *logger.Logger
++	Storer Storer
++	Box    *secretbox.Box
++	// AllowHTTP accepts an http:// address: a fake Hookline in the tests
++	// and in a machine of a developer (HOOKLINE_ALLOW_HTTP). In production
++	// the address is always https.
++	AllowHTTP bool
++	// RootCAs replaces the system's authorities: a test's server.
++	RootCAs *x509.CertPool
++}
++
++// Business is the bridge.
++type Business struct {
++	log       *logger.Logger
++	storer    Storer
++	box       *secretbox.Box
++	allowHTTP bool
++	roots     *x509.CertPool
++	notify    Notifier
++	now       func() time.Time
++
++	mu      sync.Mutex
++	links   map[int]*link
++	cuentas map[[32]byte]cuentaModels
++	minis   map[[32]byte]*miniPaths
++	events  map[eventKey]time.Time
++}
++
++// NewBusiness constructs the business.
++func NewBusiness(cfg Config) *Business {
++	return &Business{
++		log: cfg.Log, storer: cfg.Storer, box: cfg.Box, allowHTTP: cfg.AllowHTTP, roots: cfg.RootCAs, now: time.Now,
++		links: map[int]*link{}, cuentas: map[[32]byte]cuentaModels{}, minis: map[[32]byte]*miniPaths{}, events: map[eventKey]time.Time{},
++	}
++}
++
++// SetNotifier has the bridge tell people what Hookline's webhooks say.
++func (b *Business) SetNotifier(n Notifier) { b.notify = n }
++
++// =============================================================================
++// The connection
++
++// secretPattern is a token or a webhook secret: printable, no spaces.
++var secretPattern = regexp.MustCompile(`^[\x21-\x7e]{16,512}$`)
++
++// Settings returns what an admin sees of the connection.
++func (b *Business) Settings(ctx context.Context, agencyID int) (Settings, error) {
++	s, err := b.storer.Connection(ctx, agencyID)
++	if errors.Is(err, ErrOff) {
++		return Settings{}, nil
++	}
++	if err != nil {
++		return Settings{}, err
++	}
++	c, err := b.open(ctx, s)
++	if errors.Is(err, ErrOff) {
++		return Settings{}, nil
++	}
++	if err != nil {
++		return Settings{}, err
++	}
++	at := s.UpdatedAt
++	return Settings{Connected: true, URL: c.URL, TokenHint: s.TokenHint, HasWebhookSecret: c.WebhookSecret != "", UpdatedAt: &at}, nil
++}
++
++// open unseals a connection. One that cannot be opened (the server's key
++// changed) is a section that is off, and an admin pastes it again.
++func (b *Business) open(ctx context.Context, s Sealed) (connection, error) {
++	plain, err := b.box.Open(s.Connection)
++	if err != nil {
++		b.log.Error(ctx, "hookline: open the connection", "err", err)
++		return connection{}, ErrOff
++	}
++	var c connection
++	if err := json.Unmarshal([]byte(plain), &c); err != nil {
++		return connection{}, fmt.Errorf("read the connection: %w", err)
++	}
++	return c, nil
++}
++
++// current returns the connection saved, ErrOff when there is none or it
++// cannot be opened.
++func (b *Business) current(ctx context.Context, agencyID int) (connection, error) {
++	s, err := b.storer.Connection(ctx, agencyID)
++	if err != nil {
++		return connection{}, err
++	}
++	return b.open(ctx, s)
++}
++
++// Save keeps the agency's connection. It does not call Hookline: Probar
++// tells whether it works.
++func (b *Business) Save(ctx context.Context, agencyID, userID int, in SaveSettings) (Settings, error) {
++	address, err := b.address(in.URL)
++	if err != nil {
++		return Settings{}, err
++	}
++	tok := strings.TrimSpace(in.Token)
++	secret := strings.TrimSpace(in.WebhookSecret)
++	if tok != "" && !secretPattern.MatchString(tok) {
++		return Settings{}, validate.Field("token", "Hookline's token, 16 characters or more")
++	}
++	if secret != "" && !secretPattern.MatchString(secret) {
++		return Settings{}, validate.Field("webhookSecret", "the webhooks' secret, 16 characters or more")
++	}
++	if tok == "" || secret == "" {
++		cur, err := b.current(ctx, agencyID)
++		switch {
++		case errors.Is(err, ErrOff):
++			if tok == "" {
++				return Settings{}, validate.Field("token", "Hookline's token, 16 characters or more")
++			}
++		case err != nil:
++			return Settings{}, err
++		default:
++			if tok == "" {
++				// The saved token goes only where it was pasted for:
++				// whoever sends the connection somewhere else has to know
++				// it.
++				if cur.URL != address {
++					return Settings{}, validate.Field("token", "Hookline's token again: the address changed")
++				}
++				tok = cur.Token
++			}
++			if secret == "" {
++				secret = cur.WebhookSecret
++			}
++		}
++	}
++	plain, err := json.Marshal(connection{URL: address, Token: tok, WebhookSecret: secret})
++	if err != nil {
++		return Settings{}, err
++	}
++	sealed, err := b.box.Seal(string(plain))
++	if err != nil {
++		return Settings{}, fmt.Errorf("seal the connection: %w", err)
++	}
++	if err := b.storer.SaveConnection(ctx, agencyID, userID, sealed, tok[len(tok)-4:]); err != nil {
++		return Settings{}, err
++	}
++	return b.Settings(ctx, agencyID)
++}
++
++// address checks the connection's address and leaves it as origin only.
++func (b *Business) address(raw string) (string, error) {
++	bad := validate.Field("url", "an https address, with nothing after the name")
++	u, err := url.Parse(strings.TrimSpace(raw))
++	if err != nil || len(raw) > maxAddress || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
++		return "", bad
++	}
++	// url.Parse takes "name:1:2" as a host: only an IPv6 has colons in it.
++	if strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[") {
++		return "", bad
++	}
++	if u.Scheme != "https" && !(u.Scheme == "http" && b.allowHTTP) {
++		return "", bad
++	}
++	if a, err := netip.ParseAddr(u.Hostname()); err == nil && b.nowhere(a) {
++		return "", bad
++	}
++	if strings.EqualFold(u.Hostname(), "localhost") && !b.allowHTTP {
++		return "", bad
++	}
++	return u.Scheme + "://" + u.Host, nil
++}
++
++// nowhere reports whether an address cannot be a Hookline: no machine at
++// all, the API's own, or link-local, where a cloud keeps its metadata. A
++// fake Hookline on the machine itself takes the same switch as http.
++func (b *Business) nowhere(a netip.Addr) bool {
++	a = a.Unmap()
++	if a.IsLoopback() {
++		return !b.allowHTTP
++	}
++	return a.IsUnspecified() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast()
++}
++
++// Remove takes the connection off: the section is off again.
++func (b *Business) Remove(ctx context.Context, agencyID int) error {
++	if err := b.storer.RemoveConnection(ctx, agencyID); err != nil {
++		return err
++	}
++	b.drop(agencyID)
++	return nil
++}
++
++// drop forgets an agency's link and what was kept for it.
++func (b *Business) drop(agencyID int) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if l := b.links[agencyID]; l != nil {
++		delete(b.links, agencyID)
++		b.forgetLink(l)
++	}
++}
++
++// forgetLink closes a link and forgets what was kept for it. b.mu is held.
++func (b *Business) forgetLink(l *link) {
++	delete(b.cuentas, l.sum)
++	delete(b.minis, l.sum)
++	l.close()
++}
++
++// linkOf returns the agency's link, as the database says it is now: a
++// connection saved again takes the next request.
++func (b *Business) linkOf(ctx context.Context, agencyID int) (*link, error) {
++	s, err := b.storer.Connection(ctx, agencyID)
++	if errors.Is(err, ErrOff) {
++		b.drop(agencyID)
++		return nil, ErrOff
++	}
++	if err != nil {
++		return nil, err
++	}
++	sum := sha256.Sum256(s.Connection)
++	b.mu.Lock()
++	if l := b.links[agencyID]; l != nil && l.sum == sum {
++		b.mu.Unlock()
++		return l, nil
++	}
++	b.mu.Unlock()
++
++	c, err := b.open(ctx, s)
++	if err != nil {
++		return nil, err
++	}
++	l := &link{
++		sum: sum, conn: c,
++		api:   httpclient.Service(httpclient.ServiceOptions{MaxConns: apiConns, RootCAs: b.roots}),
++		minis: httpclient.Service(httpclient.ServiceOptions{MaxConns: miniConns, RootCAs: b.roots}),
++	}
++
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	if cur := b.links[agencyID]; cur != nil {
++		if cur.sum == sum {
++			l.close()
++			return cur, nil
++		}
++		b.forgetLink(cur)
++	}
++	b.links[agencyID] = l
++	return l, nil
++}
++
++// =============================================================================
++// Talking to Hookline
++
++// gone turns a failure to talk to Hookline into ErrDown; a connection that
++// could not even be made rests the link. A person who left is no failure.
++func (b *Business) gone(ctx context.Context, l *link, err error) error {
++	if errors.Is(ctx.Err(), context.Canceled) {
++		return ctx.Err()
++	}
++	var op *net.OpError
++	var cert *tls.CertificateVerificationError
++	if (errors.As(err, &op) && op.Op == "dial") || errors.As(err, &cert) {
++		l.rest()
++	}
++	b.log.Error(ctx, "hookline: request", "err", err)
++	return ErrDown
++}
++
++// actor is who a request is for, as Hookline records it: the person's name
++// and their id here. A header carries ASCII alone, so the accents go and
++// anything else that is not printable is a space.
++func (b *Business) actor(ctx context.Context, p Person) (string, error) {
++	name, err := b.storer.PersonName(ctx, p.AgencyID, p.UserID)
++	if err != nil {
++		return "", fmt.Errorf("the person's name: %w", err)
++	}
++	return fmt.Sprintf("%s (pyro:%d)", ascii(name), p.UserID), nil
++}
++
++// folds are the letters with accents of the team's names, without them.
++var folds = strings.NewReplacer(
++	"á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u", "ü", "u", "ñ", "n",
++	"Á", "A", "É", "E", "Í", "I", "Ó", "O", "Ú", "U", "Ü", "U", "Ñ", "N",
++)
++
++// ascii leaves a name as printable ASCII, at most 80 characters.
++func ascii(s string) string {
++	s = folds.Replace(s)
++	var out strings.Builder
++	for _, r := range s {
++		if r < 0x20 || r > 0x7e {
++			r = ' '
++		}
++		out.WriteRune(r)
++		if out.Len() >= 80 {
++			break
++		}
++	}
++	return strings.Join(strings.Fields(out.String()), " ")
++}
++
++// send sends a call on the client, with the agency's token and the person
++// it is for.
++func (b *Business) send(ctx context.Context, l *link, client *http.Client, p Person, c Call, accept string) (*http.Response, error) {
++	if l.resting() {
++		return nil, ErrDown
++	}
++	actor, err := b.actor(ctx, p)
++	if err != nil {
++		return nil, err
++	}
++	target := l.conn.URL + c.Path
++	if len(c.Query) > 0 {
++		target += "?" + c.Query.Encode()
++	}
++	var body io.Reader = http.NoBody
++	if c.Body != nil {
++		body = bytes.NewReader(c.Body)
++	}
++	req, err := http.NewRequestWithContext(ctx, c.Method, target, body)
++	if err != nil {
++		return nil, err
++	}
++	req.Header.Set("Authorization", "Bearer "+l.conn.Token)
++	req.Header.Set("X-Hookline-Actor", actor)
++	req.Header.Set("Accept", accept)
++	if c.Body != nil {
++		req.Header.Set("Content-Type", "application/json")
++	}
++	res, err := client.Do(req)
++	if err != nil {
++		return nil, b.gone(ctx, l, err)
++	}
++	if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
++		res.Body.Close()
++		b.log.Error(ctx, "hookline: refused", "path", c.Path, "status", res.StatusCode)
++		return nil, ErrRefused
++	}
++	return res, nil
++}
++
++// Ask makes a call and reads its answer, a JSON one. A failure of Hookline
++// is ErrDown, and so is an answer that is not JSON; what it refuses (a 400
++// or a 404) comes back as it is.
++func (b *Business) Ask(ctx context.Context, p Person, c Call) (Reply, error) {
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return Reply{}, err
++	}
++	ctx, cancel := context.WithTimeout(ctx, askFor)
++	defer cancel()
++	res, err := b.send(ctx, l, l.api, p, c, "application/json")
++	if err != nil {
++		return Reply{}, err
++	}
++	defer res.Body.Close()
++	raw, err := io.ReadAll(io.LimitReader(res.Body, maxReply+1))
++	switch {
++	case err != nil:
++		return Reply{}, b.gone(ctx, l, err)
++	case res.StatusCode >= http.StatusInternalServerError, res.StatusCode < http.StatusOK, res.StatusCode >= http.StatusMultipleChoices && res.StatusCode < http.StatusBadRequest,
++		len(raw) > maxReply, !IsJSON(res.Header), !json.Valid(raw):
++		b.log.Error(ctx, "hookline: answer", "path", c.Path, "status", res.StatusCode, "bytes", len(raw), "type", res.Header.Get("Content-Type"))
++		return Reply{}, ErrDown
++	}
++	return Reply{Status: res.StatusCode, Body: raw}, nil
++}
++
++// IsJSON reports whether an answer says it is JSON.
++func IsJSON(h http.Header) bool {
++	t, _, err := mime.ParseMediaType(h.Get("Content-Type"))
++	return err == nil && t == "application/json"
++}
++
++// Check tries the connection for Ajustes' Probar, without waiting for a rest.
++func (b *Business) Check(ctx context.Context, p Person) (Check, error) {
++	l, err := b.linkOf(ctx, p.AgencyID)
++	if err != nil {
++		return Check{}, err
++	}
++	l.restUntil.Store(0)
++	rep, err := b.Ask(ctx, p, Call{Method: http.MethodGet, Path: "/api/estado"})
++	switch {
++	case errors.Is(err, ErrRefused):
++		return Check{Reason: "refused"}, nil
++	case errors.Is(err, ErrDown):
++		return Check{Reason: "down"}, nil
++	case err != nil:
++		return Check{}, err
++	case rep.Status != http.StatusOK:
++		return Check{Reason: "down"}, nil
++	}
++	list, err := b.keepCuentas(ctx, l, rep.Body)
++	if err != nil {
++		return Check{Reason: "down"}, nil
++	}
++	return Check{OK: true, Cuentas: len(list)}, nil
++}
++
++// =============================================================================
++// Small helpers
++
++// keepFresh drops what was kept longer ago than d. b.mu is held.
++func keepFresh[K comparable](m map[K]time.Time, now time.Time, d time.Duration) {
++	maps.DeleteFunc(m, func(_ K, at time.Time) bool { return now.Sub(at) > d })
++}
++
++// query is one key and value of a query to Hookline.
++func query(key, value string) url.Values { return url.Values{key: {value}} }
++
++// errTooBig is an answer longer than what is read of it.
++var errTooBig = errors.New("an answer too big")
++
++// readAll reads an answer's body, up to limit bytes.
++func readAll(res *http.Response, limit int64) ([]byte, error) {
++	raw, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
++	if err != nil {
++		return nil, err
++	}
++	if int64(len(raw)) > limit {
++		return nil, errTooBig
++	}
++	return raw, nil
++}
+diff --git a/business/domain/hooklinebus/hooklinebus_test.go b/business/domain/hooklinebus/hooklinebus_test.go
+new file mode 100644
+index 0000000..8322429
+--- /dev/null
++++ b/business/domain/hooklinebus/hooklinebus_test.go
+@@ -0,0 +1,234 @@
++package hooklinebus
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/json"
++	"errors"
++	"io"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"modelpro/business/sdk/secretbox"
++	"modelpro/business/sdk/validate"
++	"modelpro/foundation/logger"
++)
++
++// memory is a Storer in memory: these tests are about the connection, the
++// handler tests run on the real store.
++type memory struct {
++	sealed Sealed
++	saved  bool
++}
++
++func (m *memory) Connection(context.Context, int) (Sealed, error) {
++	if !m.saved {
++		return Sealed{}, ErrOff
++	}
++	return m.sealed, nil
++}
++
++func (m *memory) SaveConnection(_ context.Context, _, _ int, sealed []byte, hint string) error {
++	m.sealed, m.saved = Sealed{Connection: sealed, TokenHint: hint, UpdatedAt: time.Now()}, true
++	return nil
++}
++
++func (m *memory) RemoveConnection(context.Context, int) error {
++	m.saved = false
++	return nil
++}
++
++func (m *memory) PersonName(context.Context, int, int) (string, error) { return "Ana", nil }
++
++func (m *memory) Recipients(context.Context, int, int) ([]int, error) { return nil, nil }
++
++func newBus(t *testing.T, cfg Config) *Business {
++	t.Helper()
++	key := make([]byte, 32)
++	if _, err := rand.Read(key); err != nil {
++		t.Fatal(err)
++	}
++	box, err := secretbox.New(key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cfg.Box = box
++	cfg.Log = logger.New(io.Discard, logger.LevelInfo, "TEST", nil)
++	if cfg.Storer == nil {
++		cfg.Storer = &memory{}
++	}
++	return NewBusiness(cfg)
++}
++
++const testToken = "hl_a-token-of-the-tests-0123456789"
++
++func fieldOf(err error) string {
++	var ferr *validate.FieldError
++	if errors.As(err, &ferr) {
++		return ferr.Field
++	}
++	return ""
++}
++
++// In production the address is https, of another machine: an http one, the
++// API's own or a cloud's metadata do not even get saved.
++func TestAddressIsHTTPSOfAnotherMachine(t *testing.T) {
++	b := newBus(t, Config{})
++	ctx := context.Background()
++	for _, raw := range []string{
++		"http://hookline.example.net", "ftp://hookline.example.net", "hookline.example.net", "https://", "https://hookline.example.net/api",
++		"https://hookline:1:2", "https://:443", "https://localhost", "https://LOCALHOST:8791", "https://127.0.0.1", "https://127.1.2.3:8443",
++		"https://[::1]", "https://[::ffff:127.0.0.1]", "https://169.254.169.254", "https://[fe80::1]", "https://0.0.0.0", "https://[::]",
++		"https://224.0.0.1", "https://hookline.example.net?x=1", "https://hookline.example.net#a", "https://u:p@hookline.example.net",
++		"https://hookline.example.net?",
++	} {
++		if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: raw, Token: testToken}); fieldOf(err) != "url" {
++			t.Errorf("%s: %v", raw, err)
++		}
++	}
++	for raw, want := range map[string]string{
++		"https://hookline.example.net":       "https://hookline.example.net",
++		" https://hookline.example.net/ ":    "https://hookline.example.net",
++		"https://hookline.example.net:8443":  "https://hookline.example.net:8443",
++		"https://100.86.160.11":              "https://100.86.160.11",
++		"https://[2001:db8::1]:443":          "https://[2001:db8::1]:443",
++		"https://hookline.tail1234.ts.net/":  "https://hookline.tail1234.ts.net",
++		"https://HOOKLINE.example.net":       "https://HOOKLINE.example.net",
++		"https://10.0.0.5":                   "https://10.0.0.5",
++		"https://hookline.example.net:443/":  "https://hookline.example.net:443",
++		"https://xn--hokline-9ya.example.ar": "https://xn--hokline-9ya.example.ar",
++	} {
++		s, err := b.Save(ctx, 1, 1, SaveSettings{URL: raw, Token: testToken})
++		if err != nil || s.URL != want {
++			t.Errorf("%s: %+v %v", raw, s, err)
++		}
++	}
++	// A fake Hookline on the machine itself takes the switch of the tests.
++	b = newBus(t, Config{AllowHTTP: true})
++	for _, raw := range []string{"http://127.0.0.1:8791", "http://localhost:8791", "https://[::1]:8443"} {
++		if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: raw, Token: testToken}); err != nil {
++			t.Errorf("%s: %v", raw, err)
++		}
++	}
++	if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: "http://169.254.169.254", Token: testToken}); fieldOf(err) != "url" {
++		t.Errorf("metadata with the switch: %v", err)
++	}
++}
++
++// The token goes only where it was pasted for, and neither it nor the
++// secret come back; an empty secret keeps the one saved.
++func TestTokenFollowsNoAddress(t *testing.T) {
++	b := newBus(t, Config{})
++	ctx := context.Background()
++	if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: "https://hookline.example.net"}); fieldOf(err) != "token" {
++		t.Fatalf("first save without a token: %v", err)
++	}
++	s, err := b.Save(ctx, 1, 1, SaveSettings{URL: "https://hookline.example.net", Token: testToken, WebhookSecret: "a-webhook-secret-of-the-tests"})
++	if err != nil || s.TokenHint != "6789" || !s.HasWebhookSecret {
++		t.Fatalf("%+v %v", s, err)
++	}
++	if raw, _ := json.Marshal(s); strings.Contains(string(raw), testToken) || strings.Contains(string(raw), "a-webhook-secret") {
++		t.Fatalf("a secret came back: %s", raw)
++	}
++	if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: "https://otro.example.net"}); fieldOf(err) != "token" {
++		t.Fatalf("another address: %v", err)
++	}
++	if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: "https://hookline.example.net:8443"}); fieldOf(err) != "token" {
++		t.Fatalf("another port: %v", err)
++	}
++	s, err = b.Save(ctx, 1, 1, SaveSettings{URL: "https://hookline.example.net/"})
++	if err != nil || s.TokenHint != "6789" || !s.HasWebhookSecret {
++		t.Fatalf("the same place: %+v %v", s, err)
++	}
++	c, err := b.current(ctx, 1)
++	if err != nil || c.Token != testToken || c.WebhookSecret != "a-webhook-secret-of-the-tests" {
++		t.Fatalf("%+v %v", c, err)
++	}
++}
++
++// A connection sealed with another key is a section that is off, until an
++// admin pastes it again.
++func TestAnotherKeyIsOff(t *testing.T) {
++	store := &memory{}
++	b := newBus(t, Config{Storer: store})
++	ctx := context.Background()
++	if _, err := b.Save(ctx, 1, 1, SaveSettings{URL: "https://hookline.example.net", Token: testToken}); err != nil {
++		t.Fatal(err)
++	}
++	other := newBus(t, Config{Storer: store})
++	if s, err := other.Settings(ctx, 1); err != nil || s.Connected {
++		t.Fatalf("%+v %v", s, err)
++	}
++	if _, err := other.Ask(ctx, Person{AgencyID: 1, UserID: 1}, Call{Method: "GET", Path: "/api/estado"}); !errors.Is(err, ErrOff) {
++		t.Fatalf("%v", err)
++	}
++}
++
++// The signature is of the time and the body, with the secret, and the time
++// is near now.
++func TestSigned(t *testing.T) {
++	now := time.Unix(1_800_000_000, 0)
++	at := strconv.FormatInt(now.Unix(), 10)
++	body := []byte(`{"id":1,"tipo":"pieza.error"}`)
++	good := Sign("secret-of-the-tests", at, body)
++	if !signed("secret-of-the-tests", at, good, body, now) {
++		t.Fatal("a good one")
++	}
++	for name, ok := range map[string]bool{
++		"other secret": signed("another-secret", at, good, body, now),
++		"other body":   signed("secret-of-the-tests", at, good, []byte(`{"id":2}`), now),
++		"other time":   signed("secret-of-the-tests", strconv.FormatInt(now.Unix()+1, 10), good, body, now),
++		"old":          signed("secret-of-the-tests", at, good, body, now.Add(5*time.Minute+time.Second)),
++		"future":       signed("secret-of-the-tests", at, good, body, now.Add(-5*time.Minute-time.Second)),
++		"no prefix":    signed("secret-of-the-tests", at, good[len("sha256="):], body, now),
++		"not hex":      signed("secret-of-the-tests", at, "sha256=xyz", body, now),
++		"short":        signed("secret-of-the-tests", at, good[:20], body, now),
++		"no time":      signed("secret-of-the-tests", "", good, body, now),
++	} {
++		if ok {
++			t.Errorf("%s was taken", name)
++		}
++	}
++	if !signed("secret-of-the-tests", at, good, body, now.Add(4*time.Minute)) {
++		t.Error("four minutes late is still on time")
++	}
++}
++
++// A name goes as printable ASCII, so no header is ever made of it.
++func TestASCII(t *testing.T) {
++	for in, want := range map[string]string{
++		"Ana":                          "Ana",
++		"Begoña Pérez":                 "Begona Perez",
++		"Ágata\r\nX-Evil: 1":           "Agata X-Evil: 1",
++		"  Ana   María ":               "Ana Maria",
++		"李":                            "",
++		"Zoë 🔥":                        "Zo",
++		string(make([]byte, 200)):      "",
++		"a" + string(rune(0x7f)) + "b": "a b",
++	} {
++		if got := ascii(in); got != want {
++			t.Errorf("%q: %q, want %q", in, got, want)
++		}
++	}
++	long := ascii(strings.Repeat("a", 300))
++	if len(long) != 80 {
++		t.Errorf("a long name is %d long", len(long))
++	}
++}
++
++// The events that tell somebody are four; the rest tell nobody.
++func TestNotes(t *testing.T) {
++	for _, tipo := range []string{"pieza.error", "pieza.vencida", "cuenta.token_vencido", "cuenta.token_por_vencer"} {
++		n, ok := noteOf(Event{Tipo: tipo, Datos: EventDatos{Pieza: "p1", Cuenta: "pamela"}})
++		if !ok || n.Kind != NotifKind || n.Title == "" || n.Body == "" {
++			t.Errorf("%s: %+v %v", tipo, n, ok)
++		}
++	}
++	for _, tipo := range []string{"pieza.publicada", "pieza.juzgada", "cuenta.conectada", "", "PIEZA.ERROR"} {
++		if _, ok := noteOf(Event{Tipo: tipo}); ok {
++			t.Errorf("%s told somebody", tipo)
++		}
++	}
++}
+diff --git a/business/domain/hooklinebus/model.go b/business/domain/hooklinebus/model.go
+new file mode 100644
+index 0000000..9fe671f
+--- /dev/null
++++ b/business/domain/hooklinebus/model.go
+@@ -0,0 +1,121 @@
++package hooklinebus
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/url"
++	"time"
++
++	"modelpro/business/domain/notifbus"
++)
++
++// Person is who a request to Hookline goes for: Hookline records them as
++// the one who did it (X-Hookline-Actor).
++type Person struct {
++	AgencyID int
++	UserID   int
++}
++
++// Settings is what an admin sees of the connection: neither the token nor
++// the webhooks' secret ever comes back, only the token's last four
++// characters and whether a secret is saved.
++type Settings struct {
++	Connected        bool       `json:"connected"`
++	URL              string     `json:"url"`
++	TokenHint        string     `json:"tokenHint"`
++	HasWebhookSecret bool       `json:"hasWebhookSecret"`
++	UpdatedAt        *time.Time `json:"updatedAt"`
++}
++
++// SaveSettings is what an admin changes of the connection. An empty token
++// keeps the one saved (only to the same address); an empty webhook secret
++// keeps the one saved.
++type SaveSettings struct {
++	URL           string
++	Token         string
++	WebhookSecret string
++}
++
++// Sealed is the connection as the store keeps it.
++type Sealed struct {
++	Connection []byte
++	TokenHint  string
++	UpdatedAt  time.Time
++}
++
++// Call is one request to Hookline.
++type Call struct {
++	Method string
++	Path   string
++	Query  url.Values
++	Body   []byte
++}
++
++// Reply is what Hookline answered: always a JSON body.
++type Reply struct {
++	Status int
++	Body   json.RawMessage
++}
++
++// Check says whether the connection works, for Ajustes' Probar.
++type Check struct {
++	OK bool `json:"ok"`
++	// Reason is why not: down or refused.
++	Reason string `json:"reason"`
++	// Cuentas is how many accounts Hookline has.
++	Cuentas int `json:"cuentas"`
++}
++
++// Event is one of Hookline's webhooks, as it signs it.
++type Event struct {
++	ID     int64      `json:"id"`
++	Tipo   string     `json:"tipo"`
++	Creado string     `json:"creado"`
++	Datos  EventDatos `json:"datos"`
++}
++
++// EventDatos is what the bridge reads of an event's data. Dias is a number
++// of days with decimals: it is kept as Hookline wrote it.
++type EventDatos struct {
++	Pieza        string      `json:"pieza"`
++	Cuenta       string      `json:"cuenta"`
++	PyroModeloID *int        `json:"pyro_modelo_id"`
++	Error        string      `json:"error"`
++	Dias         json.Number `json:"dias"`
++}
++
++// Storer is the persistence the business needs. It only ever sees the
++// connection already sealed.
++type Storer interface {
++	// Connection returns the agency's connection, ErrOff when it has none.
++	Connection(ctx context.Context, agencyID int) (Sealed, error)
++	SaveConnection(ctx context.Context, agencyID, userID int, sealed []byte, hint string) error
++	RemoveConnection(ctx context.Context, agencyID int) error
++	// PersonName returns the name of an active person of the agency.
++	PersonName(ctx context.Context, agencyID, userID int) (string, error)
++	// Recipients returns who is told of an event: the agency's active
++	// admins and, with modelID not 0, the active people assigned to that
++	// model of the agency who hold the Hookline permission.
++	Recipients(ctx context.Context, agencyID, modelID int) ([]int, error)
++}
++
++// Notifier is how the bridge tells people what Hookline's webhooks say.
++type Notifier interface {
++	Notify(ctx context.Context, agencyID int, n notifbus.Note)
++}
++
++var (
++	// ErrOff is a section with no connection saved: Hookline is off.
++	ErrOff = errors.New("hookline is off")
++	// ErrDown is a Hookline that does not answer, or does not answer well.
++	ErrDown = errors.New("hookline is not available")
++	// ErrRefused is a Hookline that does not take the token (401 or 403).
++	ErrRefused = errors.New("hookline refused the token")
++	// ErrNotFound is what does not exist, or is outside the person's
++	// models.
++	ErrNotFound = errors.New("not found")
++	// ErrSignature is a webhook that is not Hookline's: no secret saved, a
++	// signature that does not match or a time too far from now.
++	ErrSignature = errors.New("invalid signature")
++)
+diff --git a/business/domain/hooklinebus/stores/hooklinedb/hooklinedb.go b/business/domain/hooklinebus/stores/hooklinedb/hooklinedb.go
+new file mode 100644
+index 0000000..9b12e21
+--- /dev/null
++++ b/business/domain/hooklinebus/stores/hooklinedb/hooklinedb.go
+@@ -0,0 +1,95 @@
++// Package hooklinedb contains the PostgreSQL implementation of Hookline's
++// store. It only ever sees the connection already sealed.
++package hooklinedb
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/foundation/logger"
++)
++
++// Store manages the set of APIs for Hookline's database access.
++type Store struct {
++	log *logger.Logger
++	db  *sql.DB
++}
++
++// NewStore constructs the api for data access.
++func NewStore(log *logger.Logger, db *sql.DB) *Store {
++	return &Store{log: log, db: db}
++}
++
++var _ hooklinebus.Storer = (*Store)(nil)
++
++// Connection returns the agency's connection, ErrOff when it has none.
++func (s *Store) Connection(ctx context.Context, agencyID int) (hooklinebus.Sealed, error) {
++	var out hooklinebus.Sealed
++	err := s.db.QueryRowContext(ctx,
++		`SELECT connection, token_hint, updated_at FROM hookline_settings WHERE agency_id = $1`, agencyID).
++		Scan(&out.Connection, &out.TokenHint, &out.UpdatedAt)
++	if errors.Is(err, sql.ErrNoRows) {
++		return hooklinebus.Sealed{}, hooklinebus.ErrOff
++	}
++	return out, err
++}
++
++// SaveConnection keeps the agency's connection.
++func (s *Store) SaveConnection(ctx context.Context, agencyID, userID int, sealed []byte, hint string) error {
++	_, err := s.db.ExecContext(ctx, `
++		INSERT INTO hookline_settings (agency_id, connection, token_hint, updated_by)
++		VALUES ($1, $2, $3, $4)
++		ON CONFLICT (agency_id) DO UPDATE SET
++			connection = $2, token_hint = $3, updated_by = $4, updated_at = now()`,
++		agencyID, sealed, hint, userID)
++	return err
++}
++
++// RemoveConnection takes the agency's connection off: the section is off.
++func (s *Store) RemoveConnection(ctx context.Context, agencyID int) error {
++	_, err := s.db.ExecContext(ctx, `DELETE FROM hookline_settings WHERE agency_id = $1`, agencyID)
++	return err
++}
++
++// PersonName returns the name of an active person of the agency.
++func (s *Store) PersonName(ctx context.Context, agencyID, userID int) (string, error) {
++	var name string
++	err := s.db.QueryRowContext(ctx,
++		`SELECT name FROM users WHERE id = $1 AND agency_id = $2 AND active`, userID, agencyID).Scan(&name)
++	if errors.Is(err, sql.ErrNoRows) {
++		return "", hooklinebus.ErrNotFound
++	}
++	return name, err
++}
++
++// Recipients returns who is told of an event: the agency's active admins
++// and, with modelID not 0, the active people assigned to that model of the
++// agency who hold the Hookline permission (userbus.SectionHookline, at
++// either level).
++func (s *Store) Recipients(ctx context.Context, agencyID, modelID int) ([]int, error) {
++	rows, err := s.db.QueryContext(ctx, `
++		SELECT u.id FROM users u
++		WHERE u.agency_id = $1 AND u.active AND u.role = 'admin'
++		UNION
++		SELECT u.id FROM users u
++		JOIN model_members mm ON mm.user_id = u.id
++		JOIN models m ON m.id = mm.model_id AND m.agency_id = u.agency_id
++		JOIN user_permissions p ON p.user_id = u.id AND p.section = 'hookline'
++		WHERE u.agency_id = $1 AND u.active AND $2 <> 0 AND mm.model_id = $2
++		ORDER BY 1`, agencyID, modelID)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
++	var out []int
++	for rows.Next() {
++		var id int
++		if err := rows.Scan(&id); err != nil {
++			return nil, err
++		}
++		out = append(out, id)
++	}
++	return out, rows.Err()
++}
+diff --git a/business/domain/hooklinebus/stores/hooklinedb/hooklinedb_test.go b/business/domain/hooklinebus/stores/hooklinedb/hooklinedb_test.go
+new file mode 100644
+index 0000000..9ae2a8f
+--- /dev/null
++++ b/business/domain/hooklinebus/stores/hooklinedb/hooklinedb_test.go
+@@ -0,0 +1,108 @@
++package hooklinedb_test
++
++import (
++	"context"
++	"errors"
++	"io"
++	"slices"
++	"testing"
++
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/business/domain/hooklinebus/stores/hooklinedb"
++	"modelpro/business/sdk/dbtest"
++	"modelpro/foundation/logger"
++)
++
++const agency = 1
++
++func newStore(t *testing.T) (*hooklinedb.Store, *dbtest.Database) {
++	t.Helper()
++	db := dbtest.NewSeeded(t)
++	return hooklinedb.NewStore(logger.New(io.Discard, logger.LevelInfo, "TEST", nil), db.DB), db
++}
++
++func TestConnection(t *testing.T) {
++	t.Parallel()
++	s, db := newStore(t)
++	ctx := context.Background()
++	user := dbtest.CreateUser(t, db.DB, agency, "ana", "chatter")
++
++	if _, err := s.Connection(ctx, agency); !errors.Is(err, hooklinebus.ErrOff) {
++		t.Fatalf("%v", err)
++	}
++	if err := s.SaveConnection(ctx, agency, user, []byte("sealed"), "1234"); err != nil {
++		t.Fatal(err)
++	}
++	got, err := s.Connection(ctx, agency)
++	if err != nil || string(got.Connection) != "sealed" || got.TokenHint != "1234" {
++		t.Fatalf("%+v %v", got, err)
++	}
++	if err := s.SaveConnection(ctx, agency, user, []byte("again"), "5678"); err != nil {
++		t.Fatal(err)
++	}
++	if got, _ = s.Connection(ctx, agency); string(got.Connection) != "again" || got.TokenHint != "5678" {
++		t.Fatalf("%+v", got)
++	}
++	if err := s.RemoveConnection(ctx, agency); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := s.Connection(ctx, agency); !errors.Is(err, hooklinebus.ErrOff) {
++		t.Fatalf("%v", err)
++	}
++}
++
++func TestPersonName(t *testing.T) {
++	t.Parallel()
++	s, db := newStore(t)
++	ctx := context.Background()
++	ana := dbtest.CreateUser(t, db.DB, agency, "ana", "chatter")
++	if name, err := s.PersonName(ctx, agency, ana); err != nil || name == "" {
++		t.Fatalf("%q %v", name, err)
++	}
++	if _, err := s.PersonName(ctx, agency+1, ana); !errors.Is(err, hooklinebus.ErrNotFound) {
++		t.Fatalf("%v", err)
++	}
++}
++
++// The admins are always told; of a model, only who works with her and holds
++// the permission, and only of the agency.
++func TestRecipients(t *testing.T) {
++	t.Parallel()
++	s, db := newStore(t)
++	ctx := context.Background()
++	maite := dbtest.CreateModel(t, db.DB, agency, "Maite")
++	otra := dbtest.CreateModel(t, db.DB, agency, "Otra")
++	jefa := dbtest.CreateUser(t, db.DB, agency, "jefa", "admin")
++	con := dbtest.CreateUser(t, db.DB, agency, "con", "creator")
++	sin := dbtest.CreateUser(t, db.DB, agency, "sin", "creator")
++	fuera := dbtest.CreateUser(t, db.DB, agency, "fuera", "creator")
++	baja := dbtest.CreateUser(t, db.DB, agency, "baja", "creator")
++	dbtest.Assign(t, db.DB, maite, con, "creator")
++	dbtest.Assign(t, db.DB, maite, sin, "creator")
++	dbtest.Assign(t, db.DB, otra, fuera, "creator")
++	dbtest.Assign(t, db.DB, maite, baja, "creator")
++	for _, u := range []int{con, fuera, baja} {
++		if _, err := db.DB.Exec(`INSERT INTO user_permissions (user_id, section, level) VALUES ($1, 'hookline', 'view')`, u); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err := db.DB.Exec(`UPDATE users SET active = FALSE WHERE id = $1`, baja); err != nil {
++		t.Fatal(err)
++	}
++
++	admins, err := s.Recipients(ctx, agency, 0)
++	if err != nil || !slices.Contains(admins, jefa) || slices.Contains(admins, con) {
++		t.Fatalf("admins %v %v", admins, err)
++	}
++	got, err := s.Recipients(ctx, agency, maite)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !slices.Contains(got, jefa) || !slices.Contains(got, con) || slices.Contains(got, sin) || slices.Contains(got, fuera) || slices.Contains(got, baja) {
++		t.Fatalf("of Maite %v (jefa %d con %d sin %d fuera %d baja %d)", got, jefa, con, sin, fuera, baja)
++	}
++	other := dbtest.CreateAgency(t, db.DB, "Otra agencia")
++	if got, err := s.Recipients(ctx, other, maite); err != nil || slices.Contains(got, con) || slices.Contains(got, jefa) {
++		t.Fatalf("another agency %v %v", got, err)
++	}
++}
+diff --git a/business/domain/hooklinebus/webhook.go b/business/domain/hooklinebus/webhook.go
+new file mode 100644
+index 0000000..1793bd9
+--- /dev/null
++++ b/business/domain/hooklinebus/webhook.go
+@@ -0,0 +1,182 @@
++package hooklinebus
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strconv"
++	"strings"
++	"time"
++
++	"modelpro/business/domain/notifbus"
++	"modelpro/business/sdk/validate"
++)
++
++const (
++	// MaxWebhook is the longest webhook taken.
++	MaxWebhook = 64 << 10
++	// webhookWithin is how far from now a webhook's time may be: an older
++	// one is a webhook played again.
++	webhookWithin = 5 * time.Minute
++	// NotifKind is the kind of the notifications of Hookline.
++	NotifKind = "hookline"
++	// notifLink is where the notifications take a person: the section's
++	// page.
++	notifLink = "/hookline"
++)
++
++// eventKey is a webhook taken, kept while its time is valid: the same one
++// twice tells nobody twice.
++type eventKey struct {
++	agency int
++	id     int64
++}
++
++// Webhook takes one of Hookline's webhooks for the agency: it checks the
++// signature (sha256=<hex of HMAC-SHA256(secret, "<time>.<body>")>) against
++// the agency's webhook secret in constant time, and a time within five
++// minutes of now. ErrSignature is every way of not being Hookline's, the
++// same for all, so nobody learns which agencies have one.
++//
++// pieza.error, pieza.vencida, cuenta.token_vencido and
++// cuenta.token_por_vencer tell the agency's admins and, when the account is
++// tied to a model, the people of that model who hold the Hookline
++// permission. Every other event is taken and nothing happens.
++func (b *Business) Webhook(ctx context.Context, agencyID int, tiempo, firma string, body []byte) error {
++	if len(body) > MaxWebhook {
++		return ErrSignature
++	}
++	c, err := b.current(ctx, agencyID)
++	if errors.Is(err, ErrOff) {
++		return ErrSignature
++	}
++	if err != nil {
++		return err
++	}
++	if c.WebhookSecret == "" || !signed(c.WebhookSecret, tiempo, firma, body, b.now()) {
++		return ErrSignature
++	}
++
++	var ev Event
++	if err := json.Unmarshal(body, &ev); err != nil {
++		return validate.Field("body", "an event of Hookline")
++	}
++	note, ok := noteOf(ev)
++	if !ok {
++		return nil
++	}
++	if !b.firstTime(agencyID, ev.ID) {
++		return nil
++	}
++	if b.notify == nil {
++		b.log.Info(ctx, "hookline: an event with nobody to tell", "tipo", ev.Tipo)
++		return nil
++	}
++	model := 0
++	if ev.Datos.PyroModeloID != nil && *ev.Datos.PyroModeloID > 0 {
++		model = *ev.Datos.PyroModeloID
++	}
++	who, err := b.storer.Recipients(ctx, agencyID, model)
++	if err != nil {
++		return fmt.Errorf("who to tell: %w", err)
++	}
++	for _, id := range who {
++		n := note
++		n.UserID = id
++		b.notify.Notify(ctx, agencyID, n)
++	}
++	return nil
++}
++
++// signed reports whether firma is the signature of the body at tiempo, and
++// tiempo is near now.
++func signed(secret, tiempo, firma string, body []byte, now time.Time) bool {
++	at, err := strconv.ParseInt(tiempo, 10, 64)
++	if err != nil {
++		return false
++	}
++	if d := now.Sub(time.Unix(at, 0)); d > webhookWithin || d < -webhookWithin {
++		return false
++	}
++	hexSum, ok := strings.CutPrefix(firma, "sha256=")
++	if !ok {
++		return false
++	}
++	got, err := hex.DecodeString(hexSum)
++	if err != nil {
++		return false
++	}
++	mac := hmac.New(sha256.New, []byte(secret))
++	mac.Write([]byte(tiempo + "."))
++	mac.Write(body)
++	return hmac.Equal(got, mac.Sum(nil))
++}
++
++// Sign is the signature Hookline puts on a webhook, for a test's Hookline.
++func Sign(secret, tiempo string, body []byte) string {
++	mac := hmac.New(sha256.New, []byte(secret))
++	mac.Write([]byte(tiempo + "."))
++	mac.Write(body)
++	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
++}
++
++// firstTime reports whether a webhook was not taken before, while its time
++// is valid. An event without an id is always new.
++func (b *Business) firstTime(agencyID int, id int64) bool {
++	if id == 0 {
++		return true
++	}
++	now := b.now()
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	keepFresh(b.events, now, 2*webhookWithin)
++	k := eventKey{agency: agencyID, id: id}
++	if _, seen := b.events[k]; seen {
++		return false
++	}
++	b.events[k] = now
++	return true
++}
++
++// noteOf is what an event tells people, in Spanish; false for an event
++// that tells nobody.
++func noteOf(ev Event) (notifbus.Note, bool) {
++	d := ev.Datos
++	cuenta := "una cuenta"
++	if d.Cuenta != "" {
++		cuenta = "@" + d.Cuenta
++	}
++	pieza := "Una pieza"
++	if d.Pieza != "" {
++		pieza = "La pieza " + d.Pieza
++	}
++	n := notifbus.Note{Kind: NotifKind, Link: notifLink}
++	switch ev.Tipo {
++	case "pieza.error":
++		n.Title = "Hookline: una pieza no se pudo publicar"
++		n.Body = fmt.Sprintf("%s de %s no salió.", pieza, cuenta)
++		if d.Error != "" {
++			n.Body = fmt.Sprintf("%s de %s no salió: %s.", pieza, cuenta, strings.TrimRight(d.Error, ". "))
++		}
++		n.Body += " Fijate en Hookline y probá de nuevo."
++	case "pieza.vencida":
++		n.Title = "Hookline: una pieza se quedó sin salir"
++		n.Body = fmt.Sprintf("%s de %s se pasó de su hora sin publicarse. Reprogramala o cancelala en Hookline.", pieza, cuenta)
++	case "cuenta.token_vencido":
++		n.Title = "Hookline: hay que reconectar " + cuenta
++		n.Body = fmt.Sprintf("Se venció el permiso de Instagram de %s: hasta que la conectes de nuevo en Hookline no se publica nada.", cuenta)
++	case "cuenta.token_por_vencer":
++		n.Title = "Hookline: el permiso de " + cuenta + " está por vencer"
++		n.Body = fmt.Sprintf("El permiso de Instagram de %s vence pronto. Reconectala en Hookline antes de que se corte.", cuenta)
++		if days := d.Dias.String(); days != "" {
++			n.Body = fmt.Sprintf("El permiso de Instagram de %s vence en %s días. Reconectala en Hookline antes de que se corte.", cuenta, days)
++		}
++	default:
++		return notifbus.Note{}, false
++	}
++	return n, true
++}
+-- 
+2.43.0
+
