@@ -45,6 +45,31 @@ def cliente():
     return _cliente
 
 
+def probar_conexion() -> dict:
+    """Botón 'Probar conexión' de Ajustes: un pedido mínimo al modelo rápido (fracción de centavo)."""
+    import time
+    import anthropic
+    cfg = config()
+    t0 = time.time()
+    try:
+        r = cliente().messages.create(model=cfg.modelo_rapido, max_tokens=64, output_config={"effort": "low"},
+                                      messages=[{"role": "user", "content": "Respondé solo con la palabra: listo"}])
+    except ErrorIA:
+        raise ValueError("Falta la API key de Claude: pegala primero.")
+    except anthropic.AuthenticationError:
+        raise ValueError("Anthropic rechazó la clave guardada: fijate si la borraste en la consola.")
+    except anthropic.PermissionDeniedError:
+        raise ValueError("La clave no tiene permiso para usar la API.")
+    except anthropic.RateLimitError:
+        raise ValueError("Anthropic está limitando los pedidos (o no hay saldo): revisá Gasto y uso en la consola.")
+    except anthropic.APIConnectionError:
+        raise ValueError("No hay conexión con Anthropic desde el servidor.")
+    except anthropic.APIStatusError as ex:
+        raise ValueError(f"Anthropic respondió {ex.status_code}: {str(ex.message)[:150]}")
+    texto = "".join(b.text for b in r.content if getattr(b, "type", "") == "text").strip()
+    return {"ok": True, "modelo": r.model, "ms": int((time.time() - t0) * 1000), "respuesta": texto[:60]}
+
+
 def probar_clave(clave: str) -> None:
     """Antes de guardar una clave: ¿Anthropic la acepta? ValueError si la rechaza. Si no hay red, no frena."""
     import anthropic

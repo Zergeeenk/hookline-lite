@@ -562,6 +562,78 @@ table.tabla { width: 100%; border-collapse: collapse; }
   .barra .sub { display: none; }
 }
 @media (max-width: 520px) { .grid-kpi { grid-template-columns: 1fr 1fr; } .kpi .n { font-size: 22px; } .cal { grid-template-columns: 1fr; } .piezas { grid-template-columns: 1fr 1fr; gap: 10px; } .cu-datos { grid-template-columns: 1fr 1fr; } .seg { flex-wrap: nowrap; overflow-x: auto; } .seg button { flex: none; } }
+
+/* ---------- login (pantalla completa, con movimiento) ---------- */
+.lg { position: fixed; inset: 0; z-index: 200; display: grid; grid-template-columns: 1.1fr 1fr; background: var(--bg); overflow: auto; animation: lgIn .45s ease both; }
+.lg.sale { animation: lgOut .5s ease forwards; }
+.lg-arte { position: relative; overflow: hidden; display: grid; place-items: center; padding: 48px;
+  background: linear-gradient(135deg, var(--ac2), var(--ac) 55%, #b4235f); background-size: 200% 200%; animation: lgGrad 14s ease infinite; color: #fff; }
+.lg-blob { position: absolute; border-radius: 50%; filter: blur(46px); opacity: .45; background: #fff; animation: lgFlota 16s ease-in-out infinite; }
+.lg-blob.b1 { width: 320px; height: 320px; top: -80px; left: -60px; }
+.lg-blob.b2 { width: 260px; height: 260px; bottom: -70px; right: -40px; background: #ffd1e1; animation-delay: -5s; animation-duration: 19s; }
+.lg-blob.b3 { width: 180px; height: 180px; top: 45%; left: 55%; background: #ffe6a8; opacity: .3; animation-delay: -9s; }
+.lg-vitrina { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 28px; max-width: 460px; text-align: center; }
+.lg-vitrina h1 { margin: 0; font-size: clamp(26px, 3vw, 38px); line-height: 1.12; letter-spacing: -.02em; }
+.lg-vitrina p { margin: 0; opacity: .9; font-size: 16px; line-height: 1.5; }
+.lg-reels { display: flex; gap: 14px; align-items: flex-end; height: 250px; }
+.lg-reel { width: 104px; border-radius: 18px; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.4); backdrop-filter: blur(6px);
+  box-shadow: 0 18px 40px rgba(80, 0, 30, .25); padding: 10px; display: flex; flex-direction: column; gap: 8px; animation: lgReel 6s ease-in-out infinite; }
+.lg-reel:nth-child(1) { height: 180px; animation-delay: -1s; }
+.lg-reel:nth-child(2) { height: 236px; animation-delay: -3s; }
+.lg-reel:nth-child(3) { height: 196px; animation-delay: -5s; }
+.lg-reel i { display: block; border-radius: 10px; background: rgba(255,255,255,.55); }
+.lg-reel i.f { flex: 1; background: linear-gradient(160deg, rgba(255,255,255,.7), rgba(255,255,255,.25)); }
+.lg-reel i.l { height: 8px; width: 80%; } .lg-reel i.l2 { height: 8px; width: 55%; }
+.lg-reel .nota { align-self: flex-end; font-size: 11px; font-weight: 800; background: #fff; color: var(--ac); border-radius: 99px; padding: 2px 8px; animation: lgPop 3s ease-in-out infinite; }
+.lg-pills { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.lg-pills span { font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 99px; background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.35);
+  opacity: 0; animation: lgSube .6s ease forwards; }
+.lg-pills span:nth-child(1) { animation-delay: .5s } .lg-pills span:nth-child(2) { animation-delay: .65s } .lg-pills span:nth-child(3) { animation-delay: .8s } .lg-pills span:nth-child(4) { animation-delay: .95s }
+.lg-lado { display: grid; place-items: center; padding: 40px 20px; }
+.lg-card { width: 100%; max-width: 400px; background: var(--sf); border: 1px solid var(--bd); border-radius: 24px; padding: 34px 30px;
+  box-shadow: 0 30px 60px -20px rgba(120, 20, 60, .25); animation: lgSube .6s cubic-bezier(.2, .9, .3, 1.2) .1s both; }
+.lg-card.mal { animation: lgShake .45s ease; }
+.lg-logo { width: 54px; height: 54px; border-radius: 16px; overflow: hidden; animation: lgLogo .8s cubic-bezier(.2, 1.4, .4, 1) .2s both; }
+.lg-logo svg { width: 100%; height: 100%; display: block; }
+.lg-card h2 { margin: 18px 0 4px; font-size: 24px; letter-spacing: -.01em; }
+.lg-card .sub { margin: 0 0 22px; color: var(--tx2); font-size: 14.5px; }
+.lg-campo { display: block; margin-bottom: 14px; opacity: 0; animation: lgSube .5s ease forwards; }
+.lg-campo:nth-of-type(1) { animation-delay: .3s } .lg-campo:nth-of-type(2) { animation-delay: .4s }
+.lg-campo span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.lg-in { position: relative; }
+.lg-in .in { width: 100%; padding-right: 44px; transition: border-color .2s, box-shadow .2s, transform .2s; }
+.lg-in .in:focus { transform: translateY(-1px); }
+.lg-ojo { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: var(--tx2); cursor: pointer; padding: 6px; border-radius: 8px; display: grid; }
+.lg-ojo:hover { color: var(--ac); background: var(--acs); }
+.lg-err { display: none; margin: 4px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--errs); color: var(--err); font-size: 13.5px; }
+.lg-err.on { display: block; animation: lgSube .3s ease; }
+.lg-btn { width: 100%; position: relative; overflow: hidden; justify-content: center; padding: 13px; font-size: 15px; opacity: 0; animation: lgSube .5s ease .5s forwards; }
+.lg-btn::after { content: ""; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.45) 50%, transparent 70%); transform: translateX(-100%); animation: lgBrillo 3.2s ease-in-out 1.4s infinite; }
+.lg-btn[disabled] { cursor: progress; }
+.lg-btn .gira { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.5); border-top-color: #fff; border-radius: 50%; animation: lgGira .7s linear infinite; }
+.lg-ok { display: none; place-items: center; text-align: center; padding: 20px 0 6px; }
+.lg-ok.on { display: grid; }
+.lg-ok .chk { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, var(--ac2), var(--ac)); color: #fff; animation: lgLogo .5s cubic-bezier(.2, 1.4, .4, 1) both; }
+.lg-ok .chk svg { width: 32px; height: 32px; stroke-dasharray: 30; stroke-dashoffset: 30; animation: lgTilde .4s ease .25s forwards; }
+.lg-pie { margin-top: 18px; text-align: center; font-size: 12.5px; color: var(--tx2); }
+@keyframes lgIn { from { opacity: 0 } }
+@keyframes lgOut { to { opacity: 0; transform: scale(1.02); visibility: hidden } }
+@keyframes lgGrad { 0%, 100% { background-position: 0% 50% } 50% { background-position: 100% 50% } }
+@keyframes lgFlota { 0%, 100% { transform: translate(0, 0) scale(1) } 33% { transform: translate(40px, 30px) scale(1.1) } 66% { transform: translate(-30px, 20px) scale(.95) } }
+@keyframes lgReel { 0%, 100% { transform: translateY(0) rotate(-1deg) } 50% { transform: translateY(-14px) rotate(1deg) } }
+@keyframes lgPop { 0%, 70%, 100% { transform: scale(1) } 80% { transform: scale(1.25) } }
+@keyframes lgSube { from { opacity: 0; transform: translateY(14px) } to { opacity: 1; transform: none } }
+@keyframes lgLogo { from { opacity: 0; transform: scale(.4) rotate(-12deg) } to { opacity: 1; transform: none } }
+@keyframes lgShake { 0%, 100% { transform: none } 20%, 60% { transform: translateX(-9px) } 40%, 80% { transform: translateX(9px) } }
+@keyframes lgBrillo { 0% { transform: translateX(-100%) } 40%, 100% { transform: translateX(100%) } }
+@keyframes lgGira { to { transform: rotate(360deg) } }
+@keyframes lgTilde { to { stroke-dashoffset: 0 } }
+@media (max-width: 860px) { .lg { display: block; }
+  .lg-arte { padding: 28px 20px 24px; } .lg-vitrina { gap: 14px; } .lg-vitrina h1 { font-size: 22px; } .lg-vitrina p, .lg-pills { display: none }
+  .lg-reels { height: 112px; gap: 10px; } .lg-reel { width: 60px; padding: 7px; border-radius: 14px; gap: 6px; }
+  .lg-reel:nth-child(1) { height: 84px } .lg-reel:nth-child(2) { height: 108px } .lg-reel:nth-child(3) { height: 92px }
+  .lg-reel .nota { font-size: 10px; padding: 1px 6px; } .lg-lado { padding: 20px 16px 40px; } .lg-card { padding: 28px 22px; } }
+@media (prefers-reduced-motion: reduce) { .lg *, .lg { animation-duration: .01ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important; } .lg-btn::after { display: none; } }
 </style>
 </head>
 <body>
@@ -732,25 +804,49 @@ async function subirBytes(ruta, f) {
 let loginAbierto = false;
 function mostrarLogin(msg) {
   if (loginAbierto) return; loginAbierto = true;
-  const f = document.createElement("div"); f.className = "dlg-fondo"; f.id = "login";
-  f.innerHTML = `<form class="dlg" role="dialog" aria-modal="true" aria-labelledby="loginT" autocomplete="on">
-    <div class="dlg-cab"><span class="dlg-ic">${LOGO}</span><h2 id="loginT">Entrar a Hookline</h2></div>
-    <div class="dlg-tx">${esc(msg || "Escribí tu email y tu contraseña.")}</div>
-    <label class="campo"><span>Email</span><input class="in" id="lgEmail" type="email" autocomplete="username" required></label>
-    <label class="campo"><span>Contraseña</span><input class="in" id="lgClave" type="password" autocomplete="current-password" required></label>
-    <div class="chip err" id="lgErr" style="display:none;white-space:normal"></div>
-    <div class="dlg-pie"><button type="submit" class="btn prim">${icn("log-out")}Entrar</button></div></form>`;
+  const f = document.createElement("div"); f.className = "lg"; f.id = "login";
+  f.innerHTML = `<aside class="lg-arte" aria-hidden="true"><span class="lg-blob b1"></span><span class="lg-blob b2"></span><span class="lg-blob b3"></span>
+      <div class="lg-vitrina">
+        <div class="lg-reels"><div class="lg-reel"><i class="f"></i><i class="l"></i><i class="l2"></i></div>
+          <div class="lg-reel"><span class="nota">9/10</span><i class="f"></i><i class="l"></i><i class="l2"></i></div>
+          <div class="lg-reel"><i class="f"></i><i class="l"></i><i class="l2"></i></div></div>
+        <h1>Tus cuentas de Instagram, en piloto automático</h1>
+        <p>Subís el contenido, los jueces opinan, vos aprobás y Hookline publica a la hora justa.</p>
+        <div class="lg-pills"><span>Jueces con IA</span><span>Fábrica de reels</span><span>Calendario</span><span>Estadísticas</span></div>
+      </div></aside>
+    <main class="lg-lado"><form class="lg-card" role="dialog" aria-modal="true" aria-labelledby="loginT" autocomplete="on" novalidate>
+      <div class="lg-logo">${LOGO}</div>
+      <div id="lgForm"><h2 id="loginT">Entrar a Hookline</h2><p class="sub">${esc(msg || "Escribí tu email y tu contraseña.")}</p>
+        <label class="lg-campo"><span>Email</span><div class="lg-in"><input class="in" id="lgEmail" type="email" autocomplete="username" required placeholder="vos@ejemplo.com"></div></label>
+        <label class="lg-campo"><span>Contraseña</span><div class="lg-in"><input class="in" id="lgClave" type="password" autocomplete="current-password" required placeholder="••••••••••">
+          <button type="button" class="lg-ojo" id="lgOjo" aria-label="Mostrar la contraseña" aria-pressed="false">${icn("eye")}</button></div></label>
+        <div class="lg-err" id="lgErr" role="alert"></div>
+        <button type="submit" class="btn prim lg-btn" id="lgBtn">${icn("log-out")}<span>Entrar</span></button>
+        <div class="lg-pie">Community manager · Hookline</div></div>
+      <div class="lg-ok" id="lgOk"><div class="chk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+        <h2 style="margin:16px 0 0">¡Hola de nuevo!</h2></div>
+    </form></main>`;
   document.body.appendChild(f);
-  setTimeout(() => f.querySelector("#lgEmail").focus(), 50);
-  f.querySelector("form").addEventListener("submit", async ev => {
+  const card = f.querySelector(".lg-card"), btn = f.querySelector("#lgBtn"), err = f.querySelector("#lgErr");
+  const email = f.querySelector("#lgEmail"), clave = f.querySelector("#lgClave"), ojo = f.querySelector("#lgOjo");
+  setTimeout(() => email.focus(), 350);
+  ojo.addEventListener("click", () => { const ver = clave.type === "password"; clave.type = ver ? "text" : "password";
+    ojo.setAttribute("aria-pressed", String(ver)); ojo.setAttribute("aria-label", ver ? "Ocultar la contraseña" : "Mostrar la contraseña");
+    ojo.innerHTML = icn(ver ? "eye-off" : "eye"); clave.focus(); });
+  const malo = t => { err.textContent = t; err.classList.add("on"); card.classList.remove("mal"); void card.offsetWidth; card.classList.add("mal"); };
+  card.addEventListener("submit", async ev => {
     ev.preventDefault();
-    const err = f.querySelector("#lgErr"); err.style.display = "none";
+    err.classList.remove("on");
+    if (!email.value.trim() || !clave.value) return malo("Completá el email y la contraseña.");
+    btn.disabled = true; const antes = btn.innerHTML; btn.innerHTML = `<span class="gira"></span><span>Entrando…</span>`;
     try {
-      const r = await fetch("/api/login", { method: "POST", credentials: "same-origin", headers: cabCSRF({ "Content-Type": "application/json" }), body: JSON.stringify({ email: f.querySelector("#lgEmail").value.trim(), clave: f.querySelector("#lgClave").value }) });
+      const r = await fetch("/api/login", { method: "POST", credentials: "same-origin", headers: cabCSRF({ "Content-Type": "application/json" }), body: JSON.stringify({ email: email.value.trim(), clave: clave.value }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || d.detail || "No se pudo entrar");
-      f.remove(); loginAbierto = false; AJ = null; firma = ""; refrescar(true);
-    } catch (e) { err.textContent = e.message; err.style.display = ""; }
+      f.querySelector("#lgForm").style.display = "none"; f.querySelector("#lgOk").classList.add("on");
+      AJ = null; firma = ""; refrescar(true);
+      setTimeout(() => { f.classList.add("sale"); setTimeout(() => { f.remove(); loginAbierto = false; }, 480); }, 750);
+    } catch (e) { btn.disabled = false; btn.innerHTML = antes; malo(e.message); clave.select(); }
   });
 }
 async function salir() {
@@ -1777,10 +1873,10 @@ function pAjustes() {
       <div class="fila" style="margin-top:8px"><button class="btn prim" id="ajGuardar">${icn("check")}Guardar</button>${AJ.app_id && AJ.tiene_secret ? `<span class="chip ok">${icn("check")}Configurada</span>` : `<span class="chip warn">${icn("alert")}Falta completar</span>`}</div></div>
     <div class="card pad" style="margin-top:14px"><div class="fila" style="margin-bottom:6px"><span class="dlg-ic">${icn("sparkles")}</span><div><b>Cómo trabaja Claude</b><div class="muted" style="font-size:13px">Jueces, tendencias, fábrica de reels, respuestas y chat.${AJ.modelo ? " Modelo: " + esc(AJ.modelo) + "." : ""}</div></div></div>
       <div class="lista">${opMotor("api", "API de Claude", "Funciona solo, las 24 horas, sin ninguna compu prendida. Se paga por uso (centavos por pedido).")}${opMotor("claude_code", "Claude Code", "Sin costo extra, pero hace falta una PC con Claude Code (VS Code) abierto y escribirle «arrancá». Si se cierra, los pedidos quedan esperando.")}</div>
-      ${motor === "api" ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--borde, #f0dbe4)">
+      ${motor === "api" ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--bd)">
         <label class="campo"><span>API key de Claude</span><input class="in" id="ajClave" type="password" autocomplete="off" spellcheck="false" placeholder="${AJ.tiene_clave_claude ? "Guardada (termina en …" + esc(AJ.clave_claude_fin || "") + "). Pegá una nueva solo para cambiarla." : "Pegala acá: empieza con sk-ant-"}" ${AJ.clave_claude_por_entorno ? "disabled" : ""}></label>
         <small class="muted" style="display:block;font-size:12.5px;margin:4px 0 8px">${AJ.clave_claude_por_entorno ? "La clave está puesta en el servidor (ANTHROPIC_API_KEY): para cambiarla, hay que cambiarla ahí." : "La sacás en console.anthropic.com → Claves. Se guarda cifrada y nunca se vuelve a mostrar. Antes de guardarla se prueba con Anthropic."}</small>
-        <div class="fila">${AJ.clave_claude_por_entorno ? "" : `<button class="btn prim" id="ajGuardarClave">${icn("key")}Guardar clave</button>`}${AJ.tiene_clave_claude ? `<span class="chip ok">${icn("check")}Conectada</span>${AJ.clave_claude_por_entorno ? "" : `<button class="btn sm fant" id="ajBorrarClave">${icn("trash", "sm")}Quitar</button>`}` : `<span class="chip warn">${icn("alert")}Falta la clave</span>`}</div></div>` : ""}</div>
+        <div class="fila">${AJ.clave_claude_por_entorno ? "" : `<button class="btn prim" id="ajGuardarClave">${icn("key")}Guardar clave</button>`}${AJ.tiene_clave_claude ? `<span class="chip ok">${icn("check")}Conectada</span><button class="btn sm" id="ajProbarClaude">${icn("zap", "sm")}Probar conexión</button>${AJ.clave_claude_por_entorno ? "" : `<button class="btn sm fant" id="ajBorrarClave">${icn("trash", "sm")}Quitar</button>`}` : `<span class="chip warn">${icn("alert")}Falta la clave</span>`}</div></div>` : ""}</div>
     <div class="card pad" style="margin-top:14px"><b>Mandar a trabajar</b>
       <div class="fila" style="margin-top:10px;align-items:flex-start"><span style="flex:1"><span>Lo que arma «Mandar a trabajar» se programa solo (sin aprobar una por una)</span><small class="muted" style="display:block;font-size:12.5px;margin-top:2px">${AJ.encargo_aprueba ? "Activado: los reels y las historias repartidos quedan programados directo." : "Apagado (recomendado): quedan en la Bandeja como «Para aprobar», con la hora ya sugerida."}</small></span>
       <div class="seg" role="group" aria-label="Programar solo"><button class="${AJ.encargo_aprueba ? "" : "on"}" data-ajencargo="0">No</button><button class="${AJ.encargo_aprueba ? "on" : ""}" data-ajencargo="1">Sí</button></div></div></div>
@@ -1955,6 +2051,12 @@ document.addEventListener("click", async e => {
     if (!v.trim()) return toast("Pegá la clave primero", true);
     t.disabled = true;
     try { AJ = await api("/api/ajustes", { anthropic_api_key: v }); toast("Clave guardada: Claude conectado"); refrescar(true); render(true); } catch (er) { fallo(er); t.disabled = false; }
+    return;
+  }
+  if (t.id === "ajProbarClaude") {
+    const antes = t.innerHTML; t.disabled = true; t.innerHTML = `${icn("loader", "sm")}Probando…`;
+    try { const r = await api("/api/probar_claude", {}); toast(`Claude respondió en ${(r.ms / 1000).toFixed(1)} s (${r.modelo}). Todo bien.`); }
+    catch (er) { fallo(er); } finally { t.disabled = false; t.innerHTML = antes; }
     return;
   }
   if (t.id === "ajBorrarClave") {

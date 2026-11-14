@@ -241,3 +241,22 @@ def test_solo_admin_carga_la_clave(cliente_api):
     ed = TestClient(api.app)
     ed.headers["X-CSRF-Token"] = ed.post("/api/login", json={"email": "ed@x.com", "clave": "clave-larga-123"}).json()["csrf"]
     assert ed.post("/api/ajustes", json={"anthropic_api_key": "sk-ant-api03-" + "z" * 60}).status_code == 403
+
+
+def test_probar_conexion_con_claude(cliente_api, monkeypatch):
+    from types import SimpleNamespace
+    from hookline.ia import motor_api
+    llamadas = []
+
+    def create(**kw):
+        llamadas.append(kw)
+        return SimpleNamespace(model=kw["model"], content=[SimpleNamespace(type="text", text="listo")])
+    monkeypatch.setattr(motor_api, "cliente", lambda: SimpleNamespace(messages=SimpleNamespace(create=create)))
+    r = cliente_api.post("/api/probar_claude", json={})
+    assert r.status_code == 200 and r.json()["ok"] and r.json()["respuesta"] == "listo"
+    assert llamadas[0]["model"] == "claude-haiku-5-5" and llamadas[0]["max_tokens"] <= 64
+
+
+def test_probar_conexion_sin_clave_avisa(cliente_api):
+    r = cliente_api.post("/api/probar_claude", json={})
+    assert r.status_code == 400 and "API key" in r.json()["error"]
