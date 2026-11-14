@@ -185,11 +185,16 @@ def estado(q: Quien = requerir()):
 def _ajustes() -> dict:
     cfg = config()
     app_id, secret = comun.app_meta()
-    return {"app_id": app_id, "tiene_secret": bool(secret), "app_por_entorno": bool(cfg.meta_app_id),
+    import os
+    clave = comun.clave_anthropic()
+    problemas = [p for p in cfg.problemas() if not ("ANTHROPIC_API_KEY" in p and clave)]
+    return {"tiene_clave_claude": bool(clave), "clave_claude_fin": clave[-4:] if len(clave) > 12 else "",
+            "clave_claude_por_entorno": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+            "app_id": app_id, "tiene_secret": bool(secret), "app_por_entorno": bool(cfg.meta_app_id),
             "redirect": cfg.redirect_instagram, "redirect_defecto": cfg.redirect_instagram, "cloudflared": "",
             "ffmpeg": bool(medios.ffmpeg()), "carpeta": "", "version": cfg.ig_version, "url_publica": cfg.url_publica,
             "motor_ia": tareas.motor_actual(), "modelo": cfg.modelo, "modelo_rapido": cfg.modelo_rapido,
-            "encargo_aprueba": bool(comun.ajuste("encargo_aprueba", False)), "problemas": cfg.problemas()}
+            "encargo_aprueba": bool(comun.ajuste("encargo_aprueba", False)), "problemas": problemas}
 
 
 @app.get("/api/ajustes")
@@ -209,6 +214,16 @@ def ajustes_set(d: dict = Depends(_json), q: Quien = requerir("admin")):
         comun.guardar_ajuste("motor_ia", d["motor_ia"])
     if "encargo_aprueba" in d:
         comun.guardar_ajuste("encargo_aprueba", bool(d["encargo_aprueba"]))
+    if d.get("borrar_clave_claude") is True:
+        comun.guardar_ajuste("anthropic_api_key", None)
+    clave = d.get("anthropic_api_key")
+    if isinstance(clave, str) and clave.strip():
+        clave = "".join(clave.split())          # sin espacios ni saltos de línea pegados de más
+        if not clave.startswith("sk-ant-") or not 30 <= len(clave) <= 300:
+            raise ValueError("Eso no parece una API key de Claude (empieza con sk-ant-).")
+        from .ia.motor_api import probar_clave
+        probar_clave(clave)
+        comun.guardar_ajuste("anthropic_api_key", clave, cifrado=True)
     return _ajustes()
 
 

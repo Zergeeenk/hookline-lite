@@ -206,7 +206,8 @@ def estado_puente() -> dict:
     """Lo que muestra el panel abajo a la izquierda ('Claude conectado')."""
     motor = motor_actual()
     if motor == "api":
-        ok = config().anthropic_api_key_presente
+        from ..comun import hay_clave_anthropic
+        ok = hay_clave_anthropic()
         return {"motor": "api", "instalado": ok, "cli": ok, "extension": False,
                 "puente": "escuchando" if ok else "apagado", "ultimo": ""}
     p = ajuste("puente", {}) or {}

@@ -98,7 +98,7 @@ class Config:
             if not self.base_datos:
                 p.append("En producción usá Postgres (HOOKLINE_BASE_DATOS).")
         if self.motor_ia == "api" and not self.anthropic_api_key_presente:
-            p.append("Motor de IA 'api' sin ANTHROPIC_API_KEY: los pedidos a Claude van a fallar.")
+            p.append("Falta la API key de Claude (ANTHROPIC_API_KEY): cargala en Ajustes → Cómo trabaja Claude.")
         if self.almacen == "s3" and not self.s3_bucket:
             p.append("HOOKLINE_ALMACEN=s3 sin HOOKLINE_S3_BUCKET.")
         return p

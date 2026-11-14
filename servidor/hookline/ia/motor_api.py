@@ -25,6 +25,7 @@ log = logging.getLogger("hookline.ia.api")
 BETA_FALLBACK = "server-side-fallback-2026-07-01"
 LADO_MAX = 1568          # más grande no suma (la API lo achica igual) y cuesta más subirlo
 _cliente = None
+_cliente_clave = ""
 
 
 class ErrorIA(RuntimeError):
@@ -32,13 +33,29 @@ class ErrorIA(RuntimeError):
 
 
 def cliente():
-    global _cliente
-    if _cliente is None:
-        if not config().anthropic_api_key_presente:
-            raise ErrorIA("Falta ANTHROPIC_API_KEY: cargala o cambiá el motor de IA a Claude Code en Ajustes.")
+    """Cliente de la API. Se rehace solo si cambian la clave en Ajustes (no hace falta reiniciar nada)."""
+    global _cliente, _cliente_clave
+    from ..comun import clave_anthropic
+    clave = clave_anthropic()
+    if not clave:
+        raise ErrorIA("Falta la API key de Claude: cargala en Ajustes → Cómo trabaja Claude.")
+    if _cliente is None or clave != _cliente_clave:
         import anthropic
-        _cliente = anthropic.Anthropic(max_retries=2, timeout=600)
+        _cliente, _cliente_clave = anthropic.Anthropic(api_key=clave, max_retries=2, timeout=600), clave
     return _cliente
+
+
+def probar_clave(clave: str) -> None:
+    """Antes de guardar una clave: ¿Anthropic la acepta? ValueError si la rechaza. Si no hay red, no frena."""
+    import anthropic
+    try:
+        anthropic.Anthropic(api_key=clave, max_retries=0, timeout=15).models.list(limit=1)
+    except anthropic.AuthenticationError:
+        raise ValueError("Anthropic rechazó esa clave: fijate que esté bien copiada y que no la hayas borrado.")
+    except anthropic.PermissionDeniedError:
+        raise ValueError("Esa clave no tiene permiso para usar la API (revisá el espacio de trabajo en la consola).")
+    except anthropic.APIError as ex:
+        log.info("no se pudo probar la clave (%s): se guarda igual", str(ex)[:120])
 
 
 def _imagen(rel: str) -> dict:

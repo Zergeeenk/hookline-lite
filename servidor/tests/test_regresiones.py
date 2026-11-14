@@ -196,3 +196,48 @@ def test_webhook_no_se_manda_dos_veces_con_varios_workers(monkeypatch):
     [h.start() for h in hs]
     [h.join() for h in hs]
     assert len(recibidos) == 10
+
+
+def test_clave_de_claude_desde_el_panel(cliente_api, monkeypatch):
+    import json as _json
+    from hookline.ia import motor_api, tareas
+    probadas = []
+    monkeypatch.setattr(motor_api, "probar_clave", lambda c: probadas.append(c))
+    assert cliente_api.get("/api/ajustes").json()["tiene_clave_claude"] is False
+    assert cliente_api.post("/api/ajustes", json={"anthropic_api_key": "hola"}).status_code == 400
+    clave = "sk-ant-api03-" + "x" * 60 + "FINAL"
+    r = cliente_api.post("/api/ajustes", json={"anthropic_api_key": "  " + clave + "\n"})
+    assert r.status_code == 200 and r.json()["tiene_clave_claude"] and r.json()["clave_claude_fin"] == "INAL"
+    assert probadas == [clave]
+    for ruta in ("/api/ajustes", "/api/estado"):
+        assert clave not in cliente_api.get(ruta).text
+    from hookline.db import sesion
+    from hookline.modelos import Ajuste
+    with sesion() as s:
+        assert clave not in _json.dumps(s.get(Ajuste, "anthropic_api_key").valor)   # cifrada en la base
+    cliente_api.post("/api/ajustes", json={"motor_ia": "api"})
+    comun_motor = tareas.estado_puente()
+    assert comun_motor["puente"] == "escuchando"
+    assert motor_api.cliente().api_key == clave
+    cliente_api.post("/api/ajustes", json={"borrar_clave_claude": True})
+    assert cliente_api.get("/api/ajustes").json()["tiene_clave_claude"] is False
+
+
+def test_clave_rechazada_por_anthropic_no_se_guarda(cliente_api, monkeypatch):
+    from hookline.ia import motor_api
+
+    def rechazar(c):
+        raise ValueError("Anthropic rechazó esa clave")
+    monkeypatch.setattr(motor_api, "probar_clave", rechazar)
+    r = cliente_api.post("/api/ajustes", json={"anthropic_api_key": "sk-ant-api03-" + "y" * 60})
+    assert r.status_code == 400 and "rechazó" in r.json()["error"]
+    assert cliente_api.get("/api/ajustes").json()["tiene_clave_claude"] is False
+
+
+def test_solo_admin_carga_la_clave(cliente_api):
+    from fastapi.testclient import TestClient
+    from hookline import api
+    cliente_api.post("/api/usuarios", json={"op": "crear", "email": "ed@x.com", "clave": "clave-larga-123", "rol": "editor"})
+    ed = TestClient(api.app)
+    ed.headers["X-CSRF-Token"] = ed.post("/api/login", json={"email": "ed@x.com", "clave": "clave-larga-123"}).json()["csrf"]
+    assert ed.post("/api/ajustes", json={"anthropic_api_key": "sk-ant-api03-" + "z" * 60}).status_code == 403

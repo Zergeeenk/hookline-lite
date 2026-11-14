@@ -61,6 +61,19 @@ def app_meta() -> tuple[str, str]:
             cfg.meta_app_secret or str(ajuste("meta_app_secret", "") or ""))
 
 
+def clave_anthropic() -> str:
+    """La API key de Claude: la variable de entorno ANTHROPIC_API_KEY manda; si no, la cargada en Ajustes (cifrada)."""
+    import os
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip() or str(ajuste("anthropic_api_key", "") or "").strip()
+
+
+def hay_clave_anthropic() -> bool:
+    try:
+        return bool(clave_anthropic())
+    except Exception:
+        return False
+
+
 # --- chat del panel ---------------------------------------------------------------------------------------------
 def chat_agregar(de: str, texto: str, extra: dict | None = None, autor: str = "") -> dict:
     with sesion() as s:
