@@ -526,6 +526,13 @@ def publico(rel: str, v: str = "", f: str = ""):
 
 
 # --- usuarios y tokens (admin) -------------------------------------------------------------------------------------------------------
+@app.post("/api/probar_claude")
+def probar_claude(d: dict = Depends(_json), q: Quien = requerir("admin")):
+    """Ajustes → Probar conexión: confirma que la API key funciona (un pedido mínimo)."""
+    from .ia.motor_api import probar_conexion
+    return probar_conexion()
+
+
 @app.get("/api/usuarios")
 def usuarios(q: Quien = requerir("admin")):
     with sesion() as s:
