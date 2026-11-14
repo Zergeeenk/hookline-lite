@@ -67,6 +67,7 @@ def como_dict(c: Cuenta) -> dict:
             "publicaciones": c.publicaciones, "ultima": iso_local(c.ultima_sync), "error": c.error, "aviso": c.aviso,
             "limite": c.limite or {}, "cuenta_28d": c.insights_28d or {},
             "tendencias_fecha": iso_local(tend.fecha) if tend else "",
+            "pyro_modelo_id": c.pyro_modelo_id, "pyro_modelo": c.pyro_modelo or "",
             "perfil": f"https://www.instagram.com/{c.usuario_ig or c.id}/"}
 
 

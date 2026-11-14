@@ -23,7 +23,7 @@ from .trabajos import encolar, manejador
 log = logging.getLogger("hookline.worker")
 
 GRUPOS = {"publicar": ("publicar",), "render": ("render", "preparar_copia"),
-          "descargas": ("descargar_ejemplo", "bajar_material", "fichas"), "buscador": ("buscar",)}
+          "descargas": ("descargar_ejemplo", "bajar_material", "fichas", "pyro_material"), "buscador": ("buscar",)}
 PERIODO_RAPIDO = 4       # recoger resultados de Claude Code, avanzar encargos, escanear la bandeja
 PERIODO_COLA = 30
 
@@ -32,7 +32,7 @@ def _importar_manejadores() -> None:
     """Registra todos los @manejador (los módulos de servicios se importan acá)."""
     from .ia import tareas  # noqa: F401
     from .servicios import comentarios, cuentas, jueces, piezas  # noqa: F401
-    for mod in ("material", "fabrica", "buscador", "repartir"):
+    for mod in ("material", "fabrica", "buscador", "repartir", "pyro"):
         try:
             __import__(f"hookline.servicios.{mod}")
         except ImportError as ex:
@@ -80,6 +80,11 @@ def periodicas() -> None:
         encolar("refrescar_token", {"cuenta": cid}, clave=f"refrescar:{cid}:{dia}")
     encolar("tendencias_semanales", {}, clave=f"tendencias:{hora}")
     encolar("mantenimiento", {}, clave=f"mantenimiento:{dia}")
+    try:
+        from .servicios import pyro
+        pyro.periodicas(hora, dia)
+    except Exception as ex:
+        log.warning("pyro: %s", ex)
 
 
 def _rapido() -> None:

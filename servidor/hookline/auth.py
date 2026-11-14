@@ -30,13 +30,16 @@ class Quien:
     rol: str
     via: str            # "sesion" | "token"
     csrf: str = ""
+    actor: str = ""     # con token: quién es del otro lado (el puente de Pyro manda X-Hookline-Actor)
 
     def dict(self) -> dict:
         return {"email": self.email, "nombre": self.nombre, "rol": self.rol}
 
     @property
     def firma(self) -> str:
-        return self.email if self.via == "sesion" else f"token:{self.nombre}"
+        if self.via == "sesion":
+            return self.email
+        return f"token:{self.nombre}" + (f" · {self.actor}" if self.actor else "")
 
 
 def crear_usuario(email: str, clave: str, nombre: str = "", rol: str = "admin") -> int:
@@ -107,6 +110,12 @@ def crear_token(nombre: str, rol: str = "editor") -> str:
     return tok
 
 
+def _actor(texto: str | None) -> str:
+    """Solo para el registro (quién aprobó desde Pyro): texto plano corto, sin caracteres de control."""
+    import re
+    return re.sub(r"[^\w .:@()#\-áéíóúñÁÉÍÓÚÑ]", "", str(texto or ""))[:80].strip()
+
+
 def identificar(req: Request) -> Quien | None:
     h = req.headers.get("authorization") or ""
     if h.lower().startswith("bearer "):
@@ -116,7 +125,7 @@ def identificar(req: Request) -> Quien | None:
             if not t:
                 return None
             t.ultimo_uso = ahora()
-            return Quien(None, "", t.nombre, t.rol, "token")
+            return Quien(None, "", t.nombre, t.rol, "token", actor=_actor(req.headers.get("x-hookline-actor")))
     tok = req.cookies.get(COOKIE)
     if not tok:
         return None

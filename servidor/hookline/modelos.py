@@ -86,6 +86,9 @@ class Cuenta(Base):
     insights_28d: Mapped[dict | None] = mapped_column(JSONTexto, nullable=True)
     limite: Mapped[dict | None] = mapped_column(JSONTexto, nullable=True)
     metricas_ok: Mapped[dict | None] = mapped_column(JSONTexto, nullable=True)
+    # la modelo de Pyro a la que pertenece (la sincronización con Pyro la ata por el usuario de Instagram)
+    pyro_modelo_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    pyro_modelo: Mapped[str] = mapped_column(String(200), default="")
 
 
 class CredencialIG(Base):

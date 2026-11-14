@@ -116,6 +116,10 @@ def evento(nombre: str, /, **datos) -> None:
     if not config().webhook_url:
         return
     with sesion() as s:
+        if datos.get("cuenta") and "pyro_modelo_id" not in datos:      # Pyro filtra por su modelo
+            from .modelos import Cuenta
+            c = s.get(Cuenta, str(datos["cuenta"]))
+            datos["pyro_modelo_id"] = c.pyro_modelo_id if c else None
         s.add(Evento(tipo=nombre, datos=datos))
 
 
