@@ -1,0 +1,198 @@
+"""Un test por cada bug que encontraron las revisiones (para que no vuelvan)."""
+import shutil
+import threading
+import time
+from datetime import timedelta
+
+import pytest
+
+
+@pytest.fixture
+def pieza(cuenta_conectada, foto):
+    from hookline import almacen
+    from hookline.servicios import piezas
+    shutil.copy(foto, almacen.dir_de("subir", cuenta_conectada) / "post.jpg")
+    piezas.escanear()
+    return piezas.listar(cuenta_conectada)[0]["id"]
+
+
+def _correr_publicar():
+    from hookline import trabajos
+    while (t := trabajos.tomar("w", ["publicar"])):
+        trabajos.correr(t)
+
+
+def _publicaciones(meta):
+    return sum(1 for _, u, _, _ in meta.llamadas if u.endswith("/media_publish"))
+
+
+def test_no_se_pueden_bajar_archivos_internos_por_agregar_encontrados(cliente_api):
+    r = cliente_api.post("/api/copiar", json={"op": "agregar_encontrados", "items": [{"link": "https://x", "img": "hookline.db"}]})
+    assert r.status_code == 400
+
+
+def test_cancelar_y_reprogramar_a_la_misma_hora_publica(pieza, meta):
+    from hookline.db import ahora, sesion
+    from hookline.modelos import Pieza
+    from hookline.servicios import piezas
+    piezas.accion({"op": "programar", "id": pieza, "cuando": "2099-01-01T20:00"})
+    with sesion() as s:
+        s.get(Pieza, pieza).cuando = ahora() + timedelta(minutes=5)
+    piezas.revisar_cola()
+    piezas.accion({"op": "cancelar", "id": pieza})
+    _correr_publicar()                                  # el trabajo viejo corre y no hace nada
+    with sesion() as s:
+        cuando = s.get(Pieza, pieza).cuando
+    from hookline.comun import iso_local
+    time.sleep(1.1)                                     # otra aprobación (en otro segundo)
+    piezas.accion({"op": "programar", "id": pieza, "cuando": iso_local(cuando)})
+    with sesion() as s:
+        s.get(Pieza, pieza).cuando = ahora() + timedelta(seconds=1)
+    piezas.revisar_cola()
+    _correr_publicar()
+    with sesion() as s:
+        assert s.get(Pieza, pieza).estado == "publicada"
+    assert _publicaciones(meta) == 1
+
+
+def test_worker_caido_mientras_sube_no_publica_tarde(pieza, meta):
+    from hookline import trabajos
+    from hookline.db import ahora, sesion
+    from hookline.modelos import Pieza, Trabajo
+    from hookline.servicios import piezas
+    piezas.accion({"op": "programar", "id": pieza, "cuando": "2099-01-01T20:00"})
+    with sesion() as s:
+        s.get(Pieza, pieza).cuando = ahora() + timedelta(minutes=3)
+    piezas.revisar_cola()
+    t = trabajos.tomar("muerto:999999", ["publicar"])
+    assert t
+    # el worker se muere justo después de pasar la pieza a 'subiendo'
+    piezas._pasar(pieza, "programada", estado="subiendo", etapa="arrancando")
+    with sesion() as s:   # pasan 40 minutos
+        s.get(Trabajo, t.id).tomado_hasta = ahora() - timedelta(seconds=1)
+        s.get(Pieza, pieza).cuando = ahora() - timedelta(minutes=37)
+    assert trabajos.tomar("otro", ["publicar"]) is None        # no se reabre (max_intentos=1)
+    piezas.revisar_cola()
+    with sesion() as s:
+        x = s.get(Pieza, pieza)
+        assert x.estado == "error" and "Instagram" in x.error
+    assert _publicaciones(meta) == 0
+
+
+def test_dos_trabajos_de_la_misma_pieza_publican_una_vez(pieza, meta):
+    from hookline.servicios import piezas
+    piezas.accion({"op": "programar", "id": pieza})
+    datos = {"pieza": pieza, "clave": None}
+    hs = [threading.Thread(target=piezas.publicar, args=(datos,)) for _ in range(5)]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    assert _publicaciones(meta) == 1
+
+
+def test_cancelar_mientras_el_worker_la_toma_no_pisa(pieza, meta):
+    from sqlalchemy.orm.exc import StaleDataError  # noqa: F401
+    from hookline.db import sesion
+    from hookline.modelos import Pieza
+    from hookline.servicios import piezas
+    piezas.accion({"op": "programar", "id": pieza})
+    # el panel leyó 'programada'...
+    s = sesion().__enter__()
+    x = s.get(Pieza, pieza)
+    # ...mientras tanto el worker la toma
+    assert piezas._pasar(pieza, "programada", estado="subiendo")
+    x.estado = "juzgada"                                # el panel intenta cancelar con lo que leyó
+    with pytest.raises(Exception):
+        s.commit()
+    s.rollback()
+    s.close()
+    with sesion() as s2:
+        assert s2.get(Pieza, pieza).estado == "subiendo"
+
+
+def test_horas_con_zona_desde_pyro():
+    from hookline.comun import desde_local
+    assert desde_local("2026-11-20T23:00:00Z").hour == 23
+    assert desde_local("2026-11-20T20:00:00-03:00").hour == 23
+    assert desde_local("2026-11-20T20:00").hour == 23          # sin zona = hora local (Argentina)
+
+
+def test_contenedor_ya_publicado_no_se_publica_de_nuevo(pieza, meta, monkeypatch):
+    from hookline import instagram
+    from hookline.db import sesion
+    from hookline.modelos import Pieza
+    from hookline.servicios import piezas
+    piezas.accion({"op": "programar", "id": pieza})
+    with sesion() as s:
+        s.get(Pieza, pieza).contenedor_id = "CONT-VIEJO"
+    real = instagram.pedir
+    monkeypatch.setattr(instagram, "pedir", lambda m, u, p=None, d=None, **k:
+                        {"status_code": "PUBLISHED"} if "CONT-VIEJO" in u else real(m, u, p, d, **k))
+    piezas.revisar_cola()
+    _correr_publicar()
+    with sesion() as s:
+        assert s.get(Pieza, pieza).estado == "publicada"
+    assert _publicaciones(meta) == 0
+
+
+def test_resultado_de_claude_se_aplica_una_sola_vez(cuenta_conectada):
+    from hookline.ia import tareas
+    from hookline.modelos import MensajeChat
+    from hookline.db import sesion
+    from hookline.servicios import jueces
+    jueces.mensaje("hola")
+    t = tareas.pendientes_claude_code()[0]
+    hs = [threading.Thread(target=tareas.completar, args=(t.id, {"respuesta": "chau"})) for _ in range(6)]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    with sesion() as s:
+        assert s.query(MensajeChat).filter_by(de="claude").count() == 1
+
+
+def test_pedido_de_claude_code_que_nadie_atiende_vence(pieza):
+    from hookline import trabajos
+    from hookline.db import ahora, sesion
+    from hookline.ia import tareas
+    from hookline.modelos import Pieza, TareaIA
+    from hookline.servicios import piezas
+    piezas.accion({"op": "jueces", "id": pieza})
+    trabajos.correr(trabajos.tomar("w", ["preparar_jueces"]))
+    with sesion() as s:
+        s.query(TareaIA).one().creado = ahora() - timedelta(hours=4)    # el puente nunca corrió
+    tareas.recoger_claude_code()
+    with sesion() as s:
+        assert s.query(TareaIA).one().estado == "error"
+        assert s.get(Pieza, pieza).estado == "nueva"
+
+
+def test_migrar_lite_subiendo_queda_en_error(tmp_path):
+    import json
+    from hookline.db import sesion
+    from hookline.migrar_lite import migrar
+    from hookline.modelos import Pieza
+    lite = tmp_path / "lite"
+    (lite / "cuentas" / "c1").mkdir(parents=True)
+    (lite / "datos").mkdir()
+    (lite / "cuentas" / "c1" / "cuenta.json").write_text(json.dumps({"usuario": "c1"}))
+    (lite / "datos" / "piezas.json").write_text(json.dumps([{"id": "p1", "cuenta": "c1", "tipo": "reel",
+                                                             "estado": "subiendo", "ahora": True}]))
+    migrar(str(lite))
+    with sesion() as s:
+        assert s.get(Pieza, "p1").estado == "error"
+
+
+def test_webhook_no_se_manda_dos_veces_con_varios_workers(monkeypatch):
+    import httpx
+    from hookline import config, eventos
+    from hookline.comun import evento
+    monkeypatch.setenv("HOOKLINE_WEBHOOK_URL", "https://pyro.test/h")
+    config.recargar()
+    recibidos = []
+    real = httpx.Client
+    monkeypatch.setattr(eventos.httpx, "Client", lambda **kw: real(
+        transport=httpx.MockTransport(lambda r: (recibidos.append(1), httpx.Response(200))[1]), **kw))
+    for i in range(10):
+        evento("pieza.publicada", pieza=f"p{i}")
+    hs = [threading.Thread(target=eventos.enviar_pendientes) for _ in range(5)]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    assert len(recibidos) == 10

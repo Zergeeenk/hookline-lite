@@ -1,0 +1,53 @@
+# Hookline completo para una máquina: Postgres + API + worker.
+#   cp .env.ejemplo .env   (y completalo)
+#   docker compose up -d --build
+#   docker compose run --rm api db migrar
+#   docker compose run --rm api crear-usuario duena@ejemplo.com
+# El panel queda en http://localhost:8000. Para Instagram hace falta HTTPS público (ver README: proxy o túnel).
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hookline
+      POSTGRES_USER: hookline
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Poné POSTGRES_PASSWORD en .env}
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hookline -d hookline"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: ["api"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOOKLINE_BASE_DATOS: postgresql+psycopg://hookline:${POSTGRES_PASSWORD}@db:5432/hookline
+    ports:
+      - "8000:8000"
+    volumes:
+      - datos:/datos
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["worker"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOOKLINE_BASE_DATOS: postgresql+psycopg://hookline:${POSTGRES_PASSWORD}@db:5432/hookline
+    volumes:
+      - datos:/datos          # el mismo volumen que la API: medios, copias, cuadros
+    shm_size: "512m"          # chromium del buscador
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pg:
+  datos:
