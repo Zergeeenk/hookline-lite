@@ -260,3 +260,26 @@ def test_probar_conexion_con_claude(cliente_api, monkeypatch):
 def test_probar_conexion_sin_clave_avisa(cliente_api):
     r = cliente_api.post("/api/probar_claude", json={})
     assert r.status_code == 400 and "API key" in r.json()["error"]
+
+
+@pytest.mark.parametrize("email,clave", [
+    ("x" * 300 + "@a.com", "clave-larga-123"),                 # más largo que la columna (en Postgres era un 500)
+    ({"a": [None, False]}, "clave-larga-123"),                  # lo que encontró el fuzz en la CI
+    ("sin-arroba", "clave-larga-123"),
+    ("a@b", "clave-larga-123"),
+    ("con espacio@x.com", "clave-larga-123"),
+    ("ok@x.com", "corta"),
+    ("ok@x.com", "x" * 500),
+    ("ok@x.com", None),
+])
+def test_crear_usuario_con_datos_malos_da_400(cliente_api, email, clave):
+    r = cliente_api.post("/api/usuarios", json={"op": "crear", "email": email, "clave": clave, "nombre": "n" * 500})
+    assert r.status_code == 400
+
+
+def test_crear_usuario_recorta_el_nombre(cliente_api):
+    r = cliente_api.post("/api/usuarios", json={"op": "crear", "email": "Larga@X.com", "clave": "clave-larga-123",
+                                                "nombre": "N\x07" * 300})
+    assert r.status_code == 200
+    u = next(u for u in cliente_api.get("/api/usuarios").json()["usuarios"] if u["email"] == "larga@x.com")
+    assert len(u["nombre"]) == 120 and "\x07" not in u["nombre"]

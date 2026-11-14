@@ -43,13 +43,19 @@ class Quien:
 
 
 def crear_usuario(email: str, clave: str, nombre: str = "", rol: str = "admin") -> int:
+    import re
     if rol not in NIVEL:
         raise ValueError("Rol inválido.")
-    email = email.strip().lower()
+    email = str(email or "").strip().lower()
+    if len(email) > 200 or not re.fullmatch(r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+\.[^@\s\x00-\x1f\x7f]+", email):
+        raise ValueError("Escribí un email válido.")
+    if not isinstance(clave, str) or not 10 <= len(clave) <= 200:
+        raise ValueError("La contraseña tiene que tener entre 10 y 200 caracteres.")
+    nombre = re.sub(r"[\x00-\x1f\x7f]", "", str(nombre or "")).strip()[:120] or email.split("@")[0][:120]
     with sesion() as s:
         if s.scalar(select(Usuario).where(Usuario.email == email)):
             raise ValueError("Ya existe un usuario con ese email.")
-        u = Usuario(email=email, nombre=nombre or email.split("@")[0], clave_hash=seguridad.hash_clave(clave), rol=rol)
+        u = Usuario(email=email, nombre=nombre, clave_hash=seguridad.hash_clave(clave), rol=rol)
         s.add(u)
         s.flush()
         return u.id
