@@ -188,6 +188,7 @@ textarea.in { resize: vertical; min-height: 110px; line-height: 1.5; }
 .card.fu.fu-pre { border-color: var(--ac); box-shadow: 0 0 0 3px var(--acs); }
 .fu-muestra { min-height: 110px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 14px; border-radius: 12px; line-height: 1.15; overflow-wrap: anywhere; color: #fff; background: linear-gradient(135deg, #3a2430, #1c1218); text-shadow: 0 1px 2px rgba(0,0,0,.35); }
 .fu-pie { display: flex; align-items: center; gap: 10px; }
+.fu-muestra.chica { min-height: 84px; }
 .fu-pie small { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #fuTam { accent-color: var(--ac); }
 .fu-ctrl { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
@@ -781,7 +782,7 @@ let semana = 0, calTodas = false, CAL = { medios: [] }, calTs = 0, calClave = ""
 let ST = null, stTs = 0, stClave = "";
 let CM = { items: {} }, cmTs = 0, cmClave = "", filtroC = "nuevo";
 let TD = { items: [] }, tdTs = 0, tdClave = "";
-let AJ = null, PY = null, FU = null, fuTexto = "Cuando me dice «ya llego» 😅", fuTam = 44;
+let AJ = null, PY = null, FU = null, FC = null, fcQ = "", fcPag = 0, fcT = 0, fuTexto = "Cuando me dice «ya llego»", fuTam = 44;
 let inFiltro = "libres", inCat = "", inCargando = false;
 let CP = null, cpTs = 0, cpSel = "", cpDraft = {}, cpZonas = true, cpCaras = {}, cpAutoFirma = {}, cpAutoT = 0, cpAjustar = false;
 let MT = null, mtTs = 0, mtClave = "", mtSec = "modelo", mtFiltro = "", mtMas = false;
@@ -1218,7 +1219,8 @@ document.addEventListener("dragleave", e => { if (pagina === "fuentes" && e.targ
 document.addEventListener("drop", e => { if (pagina !== "fuentes" || !e.dataTransfer || !e.dataTransfer.files.length) return; e.preventDefault(); const d = $("#fuDrop"); d && d.classList.remove("sobre"); subirFuentes(e.dataTransfer.files); });
 document.addEventListener("input", e => {
   if (e.target.id === "fuTexto") { fuTexto = e.target.value || " "; $$(".fu-muestra").forEach(m => m.textContent = fuTexto); }
-  if (e.target.id === "fuTam") { fuTam = +e.target.value; $$(".fu-muestra").forEach(m => m.style.fontSize = fuTam + "px"); }
+  if (e.target.id === "fuTam") { fuTam = +e.target.value; $$(".fu-muestra").forEach(m => m.style.fontSize = (m.classList.contains("chica") ? Math.round(fuTam * 0.8) : fuTam) + "px"); }
+  if (e.target.id === "fcBuscar") { fcQ = e.target.value; fcPag = 0; clearTimeout(window._fcT); window._fcT = setTimeout(cargarCatalogo, 250); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "mtLink") bajarTikTok(); });
 
@@ -1441,7 +1443,7 @@ function pCopiar() {
       <div class="fila"><button class="btn sm" id="cpSubirAudio">${icn("upload")}Subir audio</button>${ac ? `<button class="btn sm" id="cpElegirAudio">${icn("music")}Elegir de Música</button>` : ""}</div></div>` : "";
   const controles = `<div class="card cp-paso"><h3>Texto y audio</h3>
     <small class="muted" style="margin-top:-4px">Letra blanca, sin sombra. La letra la elegís abajo (o en Fuentes).</small>
-    <label class="cp-campo"><span>Texto en pantalla</span><textarea class="in" id="cpTexto" rows="2" style="min-height:60px">${esc(dr.texto || "")}</textarea></label>
+    <label class="cp-campo"><span>Texto en pantalla</span><textarea class="in" id="cpTexto" rows="2" style="min-height:60px">${esc(dr.texto || "")}</textarea>${c.faltan ? `<small style="color:var(--warn,#b8700f)">${icn("alert", "sm")} Esto no sale en el video con esta letra: ${esc(c.faltan)} (se saca solo)</small>` : ""}</label>
     <div class="cp-campo"><span>Letra <a href="#fuentes" data-ir="fuentes" style="font-weight:500">(ver todas)</a></span><div class="fu-elegir">${Object.entries(o.fuentes || {}).map(([k, f]) => `<button type="button" class="fu-chip ${dr.fuente === k ? "on" : ""}" data-cpset="fuente" data-cpval="${esc(k)}" style="font-family:'${esc(f.familia)}'">${esc(f.nombre)}</button>`).join("")}</div></div>
     <div class="cp-campo"><span>Tamaño <b id="cpTamLbl" style="color:var(--tx)"></b></span><input type="range" id="cpTam" min="2" max="9" step="0.1" value="${(dr.texto_tam * 100).toFixed(1)}"></div>
     <label class="cp-campo"><span>Segundos de tu modelo (después sigue el ejemplo)</span><input class="in" id="cpCorte" type="number" min="0.3" step="0.1" max="${c.duracion || 60}" value="${dr.corte || ""}"><small class="muted">El ejemplo dura ${String(c.duracion || 0).replace(".", ",")} s.</small></label>
@@ -1897,25 +1899,44 @@ function cargarFuentes(forzar) {
   api("/api/fuentes").then(d => { FU = d; cargarCaras(d.fuentes); if (pagina === "fuentes") render(true); }).catch(fallo);
 }
 const kb = n => n > 1048576 ? (n / 1048576).toFixed(1).replace(".", ",") + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+function cargarCatalogo() {
+  const pedido = ++fcT;
+  api(`/api/fuentes_catalogo?q=${encodeURIComponent(fcQ)}&pagina=${fcPag}`).then(d => { if (pedido !== fcT) return; FC = d; cargarCaras(d.items); if (pagina === "fuentes") pintarCatalogo(); }).catch(fallo);
+}
+function pintarCatalogo() {
+  const el = $("#fuCatalogo"); if (!el || !FC) return;
+  const puede = ["admin", "editor"].includes((S.usuario || {}).rol), paginas = Math.max(1, Math.ceil(FC.total / FC.por_pagina));
+  el.innerHTML = FC.items.length ? `<div class="fu-grilla">${FC.items.map(f => `<div class="card fu fu-cat">
+      <div class="fu-muestra chica" style="font-family:'hl-${esc(f.clave)}';font-size:${Math.round(fuTam * 0.8)}px">${esc(fuTexto)}</div>
+      <div class="fu-pie"><div style="min-width:0;flex:1"><b>${esc(f.nombre)}</b><small class="muted">${esc(f.archivo)}</small></div>
+      ${puede ? `<button class="btn sm prim" data-fuagregar="${esc(f.clave)}">${icn("plus", "sm")}Agregar</button>` : ""}</div></div>`).join("")}</div>
+    ${paginas > 1 ? `<div class="fila" style="justify-content:center;margin-top:14px"><button class="btn sm" data-fcpag="-1" ${fcPag ? "" : "disabled"}>${icn("chevron-left", "sm")}Anterior</button><span class="muted" style="font-size:13px">Página ${fcPag + 1} de ${paginas}</span><button class="btn sm" data-fcpag="1" ${fcPag + 1 < paginas ? "" : "disabled"}>Siguiente${icn("chevron-right", "sm")}</button></div>` : ""}`
+    : `<div class="vacio"><div class="ic">${icn("search")}</div><b>${fcQ ? "No hay fuentes con ese nombre" : "Ya agregaste todas las del catálogo"}</b><p>${fcQ ? "Probá con otra palabra (por ejemplo: arial, script, mono, serif, bold)." : "Subí más desde tu compu con «Elegir archivos»."}</p></div>`;
+  const tot = $("#fuCatTotal"); if (tot) tot.textContent = FC.total;
+}
 function pFuentes() {
   if (!FU) { cargarFuentes(); return `<div class="card"><div class="vacio"><div class="ic">${icn("loader")}</div><b>Cargando…</b></div></div>`; }
-  const puede = ["admin", "editor"].includes((S.usuario || {}).rol), vis = FU.fuentes.filter(f => !f.oculta), ocu = FU.fuentes.filter(f => f.oculta);
+  if (!FC) cargarCatalogo(); else requestAnimationFrame(pintarCatalogo);
+  const puede = ["admin", "editor"].includes((S.usuario || {}).rol), mias = FU.fuentes;
+  const origen = f => f.origen === "subida" ? "Subida" + (f.por ? " por " + esc(f.por) : "") : f.origen === "catalogo" ? "Del catálogo" : "De Hookline";
   const tarjeta = f => `<div class="card fu ${f.predeterminada ? "fu-pre" : ""}" data-fu="${esc(f.clave)}">
       <div class="fu-muestra" style="font-family:'hl-${esc(f.clave)}';font-size:${fuTam}px">${esc(fuTexto)}</div>
-      <div class="fu-pie"><div style="min-width:0;flex:1"><b>${esc(f.nombre)}</b><small class="muted">${f.origen === "sistema" ? "Del sistema" : "Subida" + (f.por ? " por " + esc(f.por) : "")}${f.familia && f.familia !== f.nombre ? " · " + esc(f.familia) : ""} · ${kb(f.bytes)}</small></div>
+      <div class="fu-pie"><div style="min-width:0;flex:1"><b>${esc(f.nombre)}</b><small class="muted">${origen(f)}${f.familia && f.familia !== f.nombre ? " · " + esc(f.familia) : ""} · ${kb(f.bytes)}</small></div>
         ${f.predeterminada ? `<span class="chip ok">${icn("check", "sm")}Predeterminada</span>` : ""}</div>
-      ${puede ? `<div class="fila" style="flex-wrap:wrap">${f.oculta ? `<button class="btn sm" data-fumostrar="${esc(f.clave)}">${icn("eye", "sm")}Mostrar</button>`
-        : `${f.predeterminada ? "" : `<button class="btn sm" data-fupre="${esc(f.clave)}">${icn("check", "sm")}Usar por defecto</button>`}${f.origen === "subida" ? `<button class="btn sm fant" data-furenombrar="${esc(f.clave)}">${icn("pencil", "sm")}Nombre</button><button class="btn sm fant peligro" data-fuborrar="${esc(f.clave)}">${icn("trash", "sm")}Borrar</button>` : `<button class="btn sm fant" data-fuocultar="${esc(f.clave)}">${icn("eye-off", "sm")}Ocultar</button>`}`}</div>` : ""}
+      ${puede ? `<div class="fila" style="flex-wrap:wrap">${f.predeterminada ? "" : `<button class="btn sm" data-fupre="${esc(f.clave)}">${icn("check", "sm")}Usar por defecto</button>`}${f.origen === "subida" ? `<button class="btn sm fant" data-furenombrar="${esc(f.clave)}">${icn("pencil", "sm")}Nombre</button><button class="btn sm fant peligro" data-fuborrar="${esc(f.clave)}">${icn("trash", "sm")}Borrar</button>` : `<button class="btn sm fant" data-fusacar="${esc(f.clave)}">${icn("eye-off", "sm")}Sacar</button>`}</div>` : ""}
     </div>`;
   return `${puede ? `<div class="drop" id="fuDrop" style="margin-top:6px"><div class="ic">${icn("upload")}</div><div style="flex:1"><b>Subí fuentes nuevas</b><div class="muted" style="font-size:13px">Arrastrá acá archivos <b>.ttf</b> u <b>.otf</b>, o el <b>.zip</b> que te baja Google Fonts (dafont, fonts.google.com…). Quedan para todas las cuentas.</div></div><button class="btn prim" data-fusubir>${icn("upload")}Elegir archivos</button></div>` : ""}
     <div class="card pad" style="margin-top:14px"><div class="fu-ctrl">
       <label class="campo" style="flex:1;margin:0"><span>Probá con tu texto</span><input class="in" id="fuTexto" value="${esc(fuTexto)}" maxlength="120"></label>
       <div class="campo" style="width:200px;margin:0"><span>Tamaño</span><input type="range" id="fuTam" min="20" max="90" value="${fuTam}"></div></div>
-      <div class="fila" style="margin-top:12px;align-items:flex-start"><span style="flex:1"><span>Que Claude elija la letra de cada reel</span><small class="muted" style="display:block;font-size:12.5px;margin-top:2px">${FU.claude ? "Prendido: Claude mira la letra del meme de ejemplo y usa la más parecida de estas. Si no está segura, usa la predeterminada." : "Apagado: los reels nuevos salen con la predeterminada (la podés cambiar a mano en Copiar video → Ajustar a mano)."}</small></span>
+      <small class="muted" style="display:block;font-size:12.5px;margin-top:8px">${icn("alert", "sm")} Los emojis no salen en el video (estas letras no los tienen): si el texto trae alguno, se saca solo al armar el reel.</small>
+      <div class="fila" style="margin-top:12px;align-items:flex-start"><span style="flex:1"><span>Que Claude elija la letra de cada reel</span><small class="muted" style="display:block;font-size:12.5px;margin-top:2px">${FU.claude ? "Prendido: Claude mira la letra del meme de ejemplo y usa la más parecida de Mis fuentes. Si no está segura, usa la predeterminada." : "Apagado: los reels nuevos salen con la predeterminada (la podés cambiar a mano en Copiar video → Ajustar a mano)."}</small></span>
       <div class="seg" role="group" aria-label="Claude elige la letra"><button class="${FU.claude ? "" : "on"}" data-fuclaude="0" ${puede ? "" : "disabled"}>No</button><button class="${FU.claude ? "on" : ""}" data-fuclaude="1" ${puede ? "" : "disabled"}>Sí</button></div></div></div>
-    <div class="sec" style="margin-top:18px"><b>${vis.length} ${vis.length === 1 ? "fuente" : "fuentes"} en uso</b><small class="muted">La predeterminada es la que usan los reels nuevos</small></div>
-    <div class="fu-grilla">${vis.map(tarjeta).join("")}</div>
-    ${ocu.length ? `<div class="sec" style="margin-top:22px"><b>Ocultas (${ocu.length})</b><small class="muted">Las del sistema no se borran: se ocultan y dejan de ofrecerse</small></div><div class="fu-grilla">${ocu.map(tarjeta).join("")}</div>` : ""}`;
+    <div class="sec" style="margin-top:18px"><b>Mis fuentes (${mias.length})</b><small class="muted">Las que se usan en los reels. La predeterminada sale en los nuevos</small></div>
+    <div class="fu-grilla">${mias.map(tarjeta).join("")}</div>
+    <div class="sec" style="margin-top:26px"><b>Catálogo (<span id="fuCatTotal">${FU.catalogo_total}</span>)</b><small class="muted">Todas las letras instaladas en el servidor: agregá las que quieras usar</small></div>
+    <div class="card pad" style="margin-top:8px"><label class="campo" style="margin:0"><span>Buscar</span><input class="in" id="fcBuscar" value="${esc(fcQ)}" placeholder="Ej.: arial, impact, times, roboto, script, mono, bold…" autocomplete="off"></label></div>
+    <div id="fuCatalogo" style="margin-top:10px"><div class="vacio"><div class="ic">${icn("loader")}</div><b>Cargando…</b></div></div>`;
 }
 async function subirFuentes(lista) {
   const fs = [...lista]; if (!fs.length) return;
@@ -1926,10 +1947,10 @@ async function subirFuentes(lista) {
     catch (e) { fallo(e); }
   }
   if (nuevas || rep) toast(nuevas ? `${nuevas} ${nuevas === 1 ? "fuente nueva lista" : "fuentes nuevas listas"}${rep ? ` (${rep} ya estaban)` : ""}` : "Esas fuentes ya estaban");
-  CP = null; cargarFuentes(true);
+  CP = null; FC = null; cargarFuentes(true);
 }
 async function fuAccion(cuerpo, ok) {
-  try { FU = await api("/api/fuentes", cuerpo); cargarCaras(FU.fuentes); CP = null; if (ok) toast(ok); render(true); } catch (e) { fallo(e); }
+  try { FU = await api("/api/fuentes", cuerpo); cargarCaras(FU.fuentes); CP = null; FC = null; if (ok) toast(ok); render(true); } catch (e) { fallo(e); }
 }
 
 // ----- Ajustes -----
@@ -2159,9 +2180,10 @@ document.addEventListener("click", async e => {
   }
   if (d.fusubir !== undefined) return $("#fuArchivos").click();
   if (d.fupre) return fuAccion({ op: "predeterminada", clave: d.fupre }, "Listo: los reels nuevos salen con esta letra");
-  if (d.fumostrar) return fuAccion({ op: "mostrar", clave: d.fumostrar }, "La fuente vuelve a estar en uso");
+  if (d.fuagregar) return fuAccion({ op: "agregar", clave: d.fuagregar }, "Agregada a Mis fuentes");
+  if (d.fcpag) { fcPag = Math.max(0, fcPag + +d.fcpag); cargarCatalogo(); const c = $("#fuCatTotal"); c && c.closest(".sec").scrollIntoView({ behavior: "smooth" }); return; }
   if (d.fuclaude !== undefined) return fuAccion({ op: "claude", valor: d.fuclaude === "1" });
-  if (d.fuocultar) { if (!(await confirmar({ titulo: "¿Ocultar esta fuente?", texto: "Es del sistema, así que no se borra: deja de ofrecerse. La podés volver a mostrar cuando quieras.", ok: "Ocultar" }))) return; return fuAccion({ op: "borrar", clave: d.fuocultar }, "Fuente oculta"); }
+  if (d.fusacar) return fuAccion({ op: "borrar", clave: d.fusacar }, "La sacaste de Mis fuentes: queda en el catálogo por si la querés de nuevo");
   if (d.fuborrar) { if (!(await confirmar({ titulo: "¿Borrar esta fuente?", peligro: true, texto: "Se borra del servidor. Los reels que ya se armaron con ella no cambian; los que se rehagan van a usar la predeterminada.", ok: "Borrar" }))) return; return fuAccion({ op: "borrar", clave: d.fuborrar }, "Fuente borrada"); }
   if (d.furenombrar) { const f = FU.fuentes.find(x => x.clave === d.furenombrar); const n = await dialogo({ tipo: "pedir", titulo: "Nombre de la fuente", icono: "type", ok: "Guardar", valor: f ? f.nombre : "" }); if (!n) return; return fuAccion({ op: "renombrar", clave: d.furenombrar, nombre: n }, "Nombre cambiado"); }
   if (t.id === "pyGuardar") {
