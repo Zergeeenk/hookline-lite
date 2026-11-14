@@ -81,6 +81,18 @@ y no se reintenta. El costo por pedido queda en `/api/tareas_ia` (tokens).
 
 ## Integración con Pyro
 
+El plan completo (qué tiene Pyro, cómo se conectan los dos y cómo encenderlo) está en
+[`INTEGRACION_PYRO.md`](../INTEGRACION_PYRO.md). En corto, son tres caminos:
+
+1. **Hookline lee de Pyro** (Ajustes → Pyro): con una clave de la API de solo lectura de Pyro (`pyro_...`) ata cada
+   cuenta a su modelo de Pyro (por el usuario de Instagram; las multicuentas heredan la de su main) y trae la
+   biblioteca de fotos y videos de cada modelo a su Material, respetando las carpetas. Se repite sola (modelos cada
+   6 horas, material una vez por día). Nunca escribe en Pyro. Código: `hookline/pyro.py` y `servicios/pyro.py`.
+2. **Pyro llama a Hookline** (el puente `/api/hookline/*` del lado de Pyro, igual al de Contenido IA): con un token
+   `hl_...`. Cada cuenta trae `pyro_modelo_id`, así Pyro muestra a cada persona solo las cuentas de sus modelos.
+   Si manda `X-Hookline-Actor: Nombre (pyro:ID)`, Hookline anota quién aprobó.
+3. **Hookline le avisa a Pyro** (webhooks firmados, abajo). Cada evento con `cuenta` lleva su `pyro_modelo_id`.
+
 ### Llamar a Hookline
 Cualquier ruta de `/api/*` acepta `Authorization: Bearer hl_...` (sin cookies ni CSRF). Crear un token:
 `hookline token pyro --rol editor` (se muestra una sola vez). Documentación OpenAPI en `/docs`.
@@ -103,7 +115,8 @@ El detalle de cada ruta y sus `op` está en `REQUERIMIENTOS_INTEGRACION.md` §5 
 Con `HOOKLINE_WEBHOOK_URL` cada evento se manda como `POST` JSON `{id, tipo, creado, datos}`, firmado con
 `X-Hookline-Firma: sha256=HMAC(secreto, "<X-Hookline-Tiempo>.<cuerpo>")`. Si Pyro no responde 2xx se reintenta con
 espera creciente (hasta 12 veces). Eventos: `pieza.juzgada`, `pieza.publicada`, `pieza.error`, `pieza.vencida`,
-`cuenta.conectada`, `cuenta.token_vencido`, `cuenta.token_por_vencer`.
+`cuenta.conectada`, `cuenta.token_vencido`, `cuenta.token_por_vencer`. Los que tienen `cuenta` traen también
+`pyro_modelo_id` (la modelo de Pyro de esa cuenta, o `null`).
 
 ## Seguridad
 - Login con usuario y contraseña (scrypt), cookie HttpOnly, **CSRF** en todo POST, roles `admin`/`editor`/`lector`.

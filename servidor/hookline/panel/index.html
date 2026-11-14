@@ -767,7 +767,7 @@ let semana = 0, calTodas = false, CAL = { medios: [] }, calTs = 0, calClave = ""
 let ST = null, stTs = 0, stClave = "";
 let CM = { items: {} }, cmTs = 0, cmClave = "", filtroC = "nuevo";
 let TD = { items: [] }, tdTs = 0, tdClave = "";
-let AJ = null;
+let AJ = null, PY = null;
 let inFiltro = "libres", inCat = "", inCargando = false;
 let CP = null, cpTs = 0, cpSel = "", cpDraft = {}, cpZonas = true, cpCaras = {}, cpAutoFirma = {}, cpAutoT = 0, cpAjustar = false;
 let MT = null, mtTs = 0, mtClave = "", mtSec = "modelo", mtFiltro = "", mtMas = false;
@@ -844,14 +844,14 @@ function mostrarLogin(msg) {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || d.detail || "No se pudo entrar");
       f.querySelector("#lgForm").style.display = "none"; f.querySelector("#lgOk").classList.add("on");
-      AJ = null; firma = ""; refrescar(true);
+      AJ = null; PY = null; firma = ""; refrescar(true);
       setTimeout(() => { f.classList.add("sale"); setTimeout(() => { f.remove(); loginAbierto = false; }, 480); }, 750);
     } catch (e) { btn.disabled = false; btn.innerHTML = antes; malo(e.message); clave.select(); }
   });
 }
 async function salir() {
   try { await api("/api/logout", {}); } catch (e) {}
-  S = { cuentas: [], piezas: [], chat: [], claude: {}, app: {} }; AJ = null; firma = "";
+  S = { cuentas: [], piezas: [], chat: [], claude: {}, app: {} }; AJ = null; PY = null; firma = "";
   mostrarLogin("Saliste. Para volver a entrar, escribí tu email y tu contraseña.");
 }
 function toast(t, mal) {
@@ -1131,7 +1131,7 @@ function pMaterial() {
   const miga = `<div class="mc-miga"><button class="btn sm fant" data-mtvista="modelos">${icn("users", "sm")}Modelos</button>${icn("chevron-right", "sm")}<button class="btn sm fant" data-mtvista="carpetas">${esc((duena || c).usuario)}</button>${mtVista === "archivos" ? `${icn("chevron-right", "sm")}<b>${esc(mtInfo(mtSec)[0])}</b>` : ""}</div>`;
   if (mtVista === "carpetas") {
     const ks = Object.keys(MT).filter(k => k !== "bajando");
-    return `<div class="sec" style="margin-top:6px">${miga}<div class="der"><button class="btn prim" data-mtnuevacarpeta>${icn("plus")}Nueva carpeta</button></div></div>
+    return `<div class="sec" style="margin-top:6px">${miga}<div class="der">${(duena || c).pyro_modelo_id ? `<button class="btn" data-mtpyro="${esc((duena || c).id)}" title="Trae las fotos y videos nuevos de la biblioteca de Pyro">${icn("download")}Traer de Pyro</button>` : ""}<button class="btn prim" data-mtnuevacarpeta>${icn("plus")}Nueva carpeta</button></div></div>
       <small class="muted" style="display:block;margin:2px 2px 10px">CARPETAS · ${ks.length} · tocá para abrir</small>
       <div class="mc-grid">${ks.map(k => { const its = MT[k] || [], vid = its.filter(x => x.tipo === "video").length, fot = its.filter(x => x.tipo === "foto").length, f = Math.max(0, ...its.map(x => x.fecha || 0)); return `<button type="button" class="card mc" data-mtsec="${esc(k)}"><span class="mc-fold">${CARPETA_SVG}</span><span class="mc-t"><b>${esc(mtInfo(k)[0].toUpperCase())}</b>${k === "musica" ? `<div class="mc-c"><span>${icn("music", "sm")}${its.length}</span></div>` : mtCuenta(vid, fot, null, f || null)}</span></button>`; }).join("")}</div>`;
   }
@@ -1797,6 +1797,7 @@ function pCuentas() {
     <div class="cu-cab">${avatar(c, chica ? "" : "lg")}<div style="min-width:0;flex:1"><b>@${esc(c.usuario)}</b><small class="muted">${chica ? "Subcuenta (la fábrica sube acá)" : "Main · cuenta oficial, la subís vos"}${c.nombre ? " · " + esc(c.nombre) : ""}</small></div>
       ${c.conectada ? `<span class="chip ok">${icn("check")}Conectada</span>` : `<span class="chip">${icn("alert")}Sin conectar</span>`}</div>
     ${chica ? "" : `<div class="cu-datos"><div><small>Seguidores</small><b>${corto(c.seguidores)}</b></div><div><small>Publicaciones</small><b>${corto(c.publicaciones)}</b></div><div><small>Multicuentas</small><b>${hijas(c).length}</b></div></div>`}
+    ${c.pyro_modelo ? `<div><span class="chip" title="Modelo de Pyro">${icn("link", "sm")}Pyro: ${esc(c.pyro_modelo)}</span></div>` : ""}
     ${c.error ? `<div class="chip err" style="white-space:normal">${esc(c.error)}</div>` : ""}
     <div class="fila"><button class="btn sm" data-editarcuenta="${esc(c.id)}">${icn("pencil")}Editar</button>${c.conectada ? `<button class="btn sm" data-sync="${esc(c.id)}">${icn("refresh")}Sincronizar</button>` : `<button class="btn sm prim" data-conectar>${icn("link")}Conectar</button>`}${chica ? "" : `<button class="btn sm" data-crearmulti="${esc(c.id)}">${icn("plus")}Multicuenta</button>`}${c.conectada ? `<button class="btn sm fant peligro" data-desconectar="${esc(c.id)}">${icn("log-out")}Desconectar</button>` : ""}</div></div>`;
   return `<div class="sec" style="margin-top:6px"><h2>${mains.length} ${mains.length === 1 ? "modelo" : "modelos"} · ${S.cuentas.length} ${S.cuentas.length === 1 ? "cuenta" : "cuentas"}</h2><div class="der"><button class="btn" data-crearlocal>${icn("plus")}Agregar main (modelo)</button><button class="btn prim" data-conectar>${icn("link")}Conectar cuenta</button></div></div>
@@ -1885,9 +1886,27 @@ function pAjustes() {
     <div class="card pad" style="margin-top:14px"><b>Estado del servidor</b><div class="lista" style="margin-top:6px">
       <div class="li" style="padding:10px 0"><span class="dot ${AJ.ffmpeg ? "ok" : "err"}"></span><div class="t"><b>ffmpeg</b><small>${AJ.ffmpeg ? "Listo: vista previa, cuadros de los videos y fábrica de reels." : "Falta ffmpeg en el servidor."}</small></div></div>
       <div class="li" style="padding:10px 0"><span class="dot ${S.claude.puente === "escuchando" ? "ok" : S.claude.puente === "trabajando" ? "warn" : "err"}"></span><div class="t"><b>Claude (${motor === "api" ? "API" : "Claude Code"})</b><small>${motor === "api" ? (S.claude.puente === "apagado" ? "Falta la API key: pegala acá abajo, en Cómo trabaja Claude." : "Listo.") : S.claude.puente === "escuchando" ? "Conectado." : S.claude.puente === "trabajando" ? "Trabajando en un pedido." : "Desconectado: abrí Claude Code en la carpeta del servidor y escribile 'arrancá'."}</small></div></div></div></div>
+    ${tarjetaPyro()}
     ${AJ.carpeta ? `<div class="card pad" style="margin-top:14px"><b>Carpeta de datos</b><div class="muted" style="font-size:13px;margin:4px 0 10px">En el servidor: ahí quedan los archivos de la bandeja, el material y los videos armados.</div><div class="link-c"><code>${esc(AJ.carpeta)}</code><button class="btn sm" data-copiar="${esc(AJ.carpeta)}">${icn("copy")}</button></div></div>` : ""}
     ${u.email ? `<div class="card pad" style="margin-top:14px"><b>Tu sesión</b><div class="fila" style="margin-top:10px"><span style="flex:1"><b>${esc(u.nombre || u.email)}</b><small class="muted" style="display:block">${esc(u.email)}${u.rol ? " · " + esc(u.rol) : ""}</small></span><button class="btn" data-salir>${icn("log-out")}Salir</button></div></div>` : ""}
   </div></div>`;
+}
+
+function tarjetaPyro() {
+  if (!PY) { api("/api/pyro").then(d => { PY = d; if (pagina === "ajustes") render(true); }).catch(() => {}); return ""; }
+  const admin = (S.usuario || {}).rol === "admin", sc = PY.sin_cuenta || [], mods = PY.modelos || [];
+  return `<div class="card pad" style="margin-top:14px"><div class="fila" style="margin-bottom:6px"><span class="dlg-ic">${icn("link")}</span><div><b>Pyro</b><div class="muted" style="font-size:13px">Ata cada cuenta a su modelo de Pyro y trae su biblioteca de fotos y videos al Material. Hookline solo lee de Pyro: nunca le cambia nada.</div></div></div>
+    <label class="campo"><span>Dirección de Pyro</span><input class="in" id="pyUrl" value="${esc(PY.url || "")}" placeholder="https://app.pyromodels.com" autocomplete="off" spellcheck="false" ${PY.por_entorno || !admin ? "disabled" : ""}></label>
+    <label class="campo"><span>Clave de la API de Pyro</span><input class="in" id="pyClave" type="password" autocomplete="off" spellcheck="false" placeholder="${PY.clave_fin ? "Guardada (termina en …" + esc(PY.clave_fin) + "). Pegá una nueva solo para cambiarla." : "Empieza con pyro_ (Pyro → Accesos → API de Pyro)"}" ${PY.por_entorno || !admin ? "disabled" : ""}></label>
+    <small class="muted" style="display:block;font-size:12.5px;margin:4px 0 8px">${PY.por_entorno ? "La conexión está puesta en el servidor (HOOKLINE_PYRO_URL / HOOKLINE_PYRO_CLAVE)." : "Se guarda cifrada y nunca se vuelve a mostrar. Si cambiás la dirección, hay que volver a pegar la clave."}</small>
+    <div class="fila" style="flex-wrap:wrap">${admin && !PY.por_entorno ? `<button class="btn prim" id="pyGuardar">${icn("check")}Guardar</button>` : ""}${PY.conectado ? `<span class="chip ok">${icn("check")}Conectado</span><button class="btn sm" id="pyProbar">${icn("zap", "sm")}Probar</button><button class="btn sm" id="pySync">${icn("refresh", "sm")}Sincronizar ahora</button>${admin && !PY.por_entorno ? `<button class="btn sm fant" id="pyQuitar">${icn("trash", "sm")}Desconectar</button>` : ""}` : `<span class="chip">${icn("alert")}Sin conectar</span>`}</div>
+    ${PY.error ? `<div class="chip err" style="white-space:normal;margin-top:10px">${esc(PY.error)}</div>` : ""}
+    ${PY.conectado ? `<div class="lista" style="margin-top:10px">
+      <div class="li" style="padding:8px 0"><span class="dot ${PY.atadas ? "ok" : "warn"}"></span><div class="t"><b>${PY.atadas} cuentas atadas a ${mods.length} modelos</b><small>${PY.ultima ? "Última sincronización: " + esc(PY.ultima) + ". Se repite sola cada 6 horas." : "Todavía no se sincronizó."}</small></div></div>
+      ${sc.length ? `<div class="li" style="padding:8px 0;align-items:flex-start"><span class="dot warn"></span><div class="t"><b>En Pyro pero no en Hookline</b><small>Cuentas de Instagram que Pyro tiene cargadas y acá no existen.</small>${sc.slice(0, 12).map(x => `<div class="fila" style="margin-top:6px"><span style="flex:1">@${esc(x.usuario)} <small class="muted">· ${esc(x.modelo)}</small></span><button class="btn sm" data-pycrear="${esc(x.usuario)}" data-pymodelo="${x.modelo_id}">${icn("plus", "sm")}Crear</button></div>`).join("")}</div></div>` : ""}
+      <div class="fila" style="margin-top:8px;align-items:flex-start"><span style="flex:1"><span>Traer el material de Pyro todos los días</span><small class="muted" style="display:block;font-size:12.5px;margin-top:2px">Las fotos y videos nuevos de la biblioteca de cada modelo entran a su Material, en carpetas con el mismo nombre que en Pyro.</small></span>
+      <div class="seg" role="group" aria-label="Traer material"><button class="${PY.material_auto ? "" : "on"}" data-pyauto="0" ${admin ? "" : "disabled"}>No</button><button class="${PY.material_auto ? "on" : ""}" data-pyauto="1" ${admin ? "" : "disabled"}>Sí</button></div></div></div>` : ""}
+  </div>`;
 }
 
 // ---------- chat ----------
@@ -2034,6 +2053,7 @@ document.addEventListener("click", async e => {
   }
   if (d.mtmodelo) { cambiarCuenta(d.mtmodelo); return mtIr("carpetas", d.mtmodelo); }
   if (d.mtvista) { if (d.mtvista === "modelos") MODS = null; return mtIr(d.mtvista, (activa() || {}).id); }
+  if (d.mtpyro) { try { await api("/api/pyro", { op: "material", cuenta: d.mtpyro }); toast("Trayendo el material de Pyro: aparece en unos minutos"); } catch (er) { fallo(er); } return; }
   if (d.mtnuevacarpeta !== undefined) { return dialogo({ tipo: "pedir", titulo: "Nueva carpeta", icono: "folder", ok: "Crear", placeholder: "Ej.: Historias, Reels, Canal free…" }).then(n => { if (!n) return; const ac = activa(); return api("/api/material", { op: "nueva_carpeta", cuenta: ac.id, nombre: n }).then(() => { cargarMaterial(true); toast("Carpeta creada"); }).catch(fallo); }); }
   if (d.repartir !== undefined) {
     const m = new Date(); m.setDate(m.getDate() + 1);
@@ -2064,6 +2084,16 @@ document.addEventListener("click", async e => {
     try { AJ = await api("/api/ajustes", { borrar_clave_claude: true }); toast("Clave quitada"); refrescar(true); render(true); } catch (er) { fallo(er); }
     return;
   }
+  if (t.id === "pyGuardar") {
+    t.disabled = true;
+    try { const r = await api("/api/pyro", { op: "guardar", url: $("#pyUrl").value, clave: $("#pyClave").value }); PY = r; toast(`Pyro conectado: ${r.n_modelos} modelos. Sincronizando…`); render(true); setTimeout(() => { PY = null; if (pagina === "ajustes") render(true); }, 8000); } catch (er) { fallo(er); t.disabled = false; }
+    return;
+  }
+  if (t.id === "pyProbar") { const antes = t.innerHTML; t.disabled = true; t.innerHTML = `${icn("loader", "sm")}Probando…`; try { const r = await api("/api/pyro", { op: "probar" }); toast(`Pyro respondió en ${(r.ms / 1000).toFixed(1)} s: ${r.modelos} modelos.`); } catch (er) { fallo(er); } finally { t.disabled = false; t.innerHTML = antes; } return; }
+  if (t.id === "pySync") { const antes = t.innerHTML; t.disabled = true; t.innerHTML = `${icn("loader", "sm")}Sincronizando…`; try { PY = await api("/api/pyro", { op: "sincronizar" }); toast(`Listo: ${PY.atadas} cuentas atadas`); refrescar(true); render(true); } catch (er) { fallo(er); t.disabled = false; t.innerHTML = antes; } return; }
+  if (t.id === "pyQuitar") { if (!(await confirmar({ titulo: "¿Desconectar Pyro?", peligro: true, texto: "Se borra la clave guardada. Las cuentas siguen atadas a su modelo y el material que ya se trajo queda.", ok: "Desconectar" }))) return; try { PY = await api("/api/pyro", { op: "desconectar" }); toast("Pyro desconectado"); render(true); } catch (er) { fallo(er); } return; }
+  if (d.pyauto !== undefined) { try { PY = await api("/api/pyro", { op: "material_auto", valor: d.pyauto === "1" }); render(true); } catch (er) { fallo(er); } return; }
+  if (d.pycrear) { try { await api("/api/pyro", { op: "crear_cuenta", usuario: d.pycrear, modelo_id: Number(d.pymodelo) }); PY = null; toast(`@${d.pycrear} creada y atada a Pyro`); refrescar(true); render(true); } catch (er) { fallo(er); } return; }
   if (t.id === "ajGuardar") {
     try { AJ = await api("/api/ajustes", { app_id: $("#ajId").value, app_secret: $("#ajSecret").value }); toast("Guardado"); refrescar(true); render(true); } catch (er) { fallo(er); } return;
   }

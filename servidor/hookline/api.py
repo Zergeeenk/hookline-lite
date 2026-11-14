@@ -525,6 +525,50 @@ def publico(rel: str, v: str = "", f: str = ""):
     return FileResponse(p, media_type=tipo, headers={"Cache-Control": "no-store"})
 
 
+# --- Pyro (Ajustes → Pyro) ------------------------------------------------------------------------------------------------------------
+@app.get("/api/pyro")
+def pyro_estado(q: Quien = requerir()):
+    from .servicios import pyro as svc_pyro
+    return svc_pyro.estado()
+
+
+@app.post("/api/pyro")
+def pyro_post(d: dict = Depends(_json), q: Quien = requerir()):
+    from .servicios import pyro as svc_pyro
+    from .trabajos import encolar
+    op = d.get("op")
+    admin = auth.NIVEL[q.rol] >= auth.NIVEL["admin"]
+    if op in ("guardar", "desconectar", "material_auto") and not admin:
+        raise HTTPException(403, "Solo un admin cambia la conexión con Pyro.")
+    if op == "guardar":
+        r = svc_pyro.guardar(str(d.get("url") or ""), str(d.get("clave") or ""))
+        return {**r, **svc_pyro.estado()}
+    if op == "desconectar":
+        svc_pyro.desconectar()
+    elif op == "material_auto":
+        comun.guardar_ajuste("pyro_material_auto", bool(d.get("valor")))
+    elif op == "probar":
+        return svc_pyro.probar()
+    elif op == "sincronizar":
+        return {**svc_pyro.sincronizar(), **svc_pyro.estado()}
+    elif op == "material":
+        cid = svc_cuentas.modelo_de(_cuenta(str(d.get("cuenta") or "")))
+        if not svc_pyro.conectado():
+            raise ValueError("Pyro no está conectado.")
+        if not svc_cuentas.obtener(cid).pyro_modelo_id:
+            raise ValueError("Esta modelo no está atada a Pyro (sincronizá en Ajustes → Pyro).")
+        import time
+        encolar("pyro_material", {"cuenta": cid}, clave=f"pyro_material:{cid}:pedido:{int(time.time() // 60)}")
+        return {"ok": True, "encolado": True}
+    elif op == "atar":
+        svc_pyro.atar(_cuenta(str(d.get("cuenta") or "")), d.get("modelo_id"))
+    elif op == "crear_cuenta":
+        return {"ok": True, "id": svc_pyro.crear_cuenta(str(d.get("usuario") or ""), d.get("modelo_id"))}
+    else:
+        raise HTTPException(400, "op")
+    return {"ok": True, **svc_pyro.estado()}
+
+
 # --- usuarios y tokens (admin) -------------------------------------------------------------------------------------------------------
 @app.post("/api/probar_claude")
 def probar_claude(d: dict = Depends(_json), q: Quien = requerir("admin")):

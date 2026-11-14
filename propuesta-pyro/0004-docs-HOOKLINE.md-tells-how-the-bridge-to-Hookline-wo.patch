@@ -1,0 +1,151 @@
+From 6b3414ee3d9de1acf012691c33d850f903ecd17e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 02:28:11 +0000
+Subject: [PATCH 4/4] docs/HOOKLINE.md tells how the bridge to Hookline works,
+ who may do what, how the scope and the webhooks are checked and how to turn
+ it on, linked from AGENTS.md, ARCHITECTURE.md and DESPLIEGUE.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ AGENTS.md            |  4 +++
+ docs/ARCHITECTURE.md |  3 +-
+ docs/DESPLIEGUE.md   |  2 ++
+ docs/HOOKLINE.md     | 77 ++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 85 insertions(+), 1 deletion(-)
+ create mode 100644 docs/HOOKLINE.md
+
+diff --git a/AGENTS.md b/AGENTS.md
+index ebbba68..e01c710 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -181,6 +181,10 @@ Example: a new field or a new small domain.
+ 
+ [docs/CONTENIDO-IA.md](docs/CONTENIDO-IA.md): Shelton's content department inside the CRM, a section like Lorax at `/contenido-ia` (permission `contenido_ia`, not `contenido`). The agents stay in Shelton: `sheltonbus`/`sheltonapp` forward a closed list of routes under `/api/shelton`, with each person's permission, model scope and a token of Shelton of their own. No connection saved (each agency's, sealed, pasted by an admin) is a section that is off: 503, and nothing else notices.
+ 
++## Hookline
++
++[docs/HOOKLINE.md](docs/HOOKLINE.md): the bridge to Hookline, the community manager of the models' Instagram accounts (pieces, judges, scheduled publishing, comments, stats), permission `hookline`: `hooklinebus`/`hooklineapp` forward a closed list of routes under `/api/hookline` with the agency's Hookline token and an `X-Hookline-Actor`, filtered by each account's `pyro_modelo_id` (404 outside the scope); its signed webhooks come in at `POST /api/hookline/webhook/{agencyID}` and notify through `notifbus`. No connection saved (sealed, migration 136) is a section that is off: 503.
++
+ ## AI suggested replies
+ 
+ - "Respuesta sugerida": design, data model and rollout in [docs/AI-SUGGESTED-REPLIES.md](docs/AI-SUGGESTED-REPLIES.md). Stage 1 is built on branch `ai-stage1` (not on main, not deployed): `business/sdk/llm` (any OpenAI-compatible provider, AI_* env vars, none set = off), `aibus`/`aiapp`, migration 74, the prompt's golden files in `business/domain/aibus/testdata` (`go test ./business/domain/aibus -update` after changing it on purpose), and `scripts/ai-bakeoff` to compare models blind. Stages 2–4 (pgvector) are still design.
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index dcc51c2..0a1abef 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -33,7 +33,7 @@ calls go bus → bus through narrow interfaces the caller declares.
+ - `rt.Perm(section, level)` / `rt.PermAny(...)` gate each route against
+   the user's permissions (`userbus.Sections`: dashboard, mensajes, modelos,
+   agenda, tareas, pizarra, contenido, redes, ingresos, fans, equipo,
+-  dispositivos, contabilidad, accesos, tienda, telegram_bot, canales; levels `view`/`edit`).
++  dispositivos, contabilidad, accesos, tienda, telegram_bot, canales, hookline; levels `view`/`edit`).
+ - `app/sdk/request` — `request.Scoped` reads caller + model scope;
+   `request.ID`, pagination, validation errors.
+ - Model scope (`business/types/modelscope`): admins see all models of the
+@@ -72,6 +72,7 @@ calls go bus → bus through narrow interfaces the caller declares.
+ | `credentialbus` | Accesos: encrypted logins of models' accounts and devices |
+ | `devicebus` | the agency's phones inventory |
+ | `notifbus` | per-user notifications and the activity log |
++| `hooklinebus` | the bridge to Hookline (Instagram community manager): a closed list of routes, filtered by each account's model, and its signed webhooks (`docs/HOOKLINE.md`) |
+ | `apikeybus` | the agency's API keys for `/api/v1`: shown once, kept as a SHA-256 and a prefix, revoked, last use |
+ | `metricbus` | what `/api/v1` tells: each model's fields and her metrics, from the Dashboard's and the Rendimiento's figures (paymentbus), plus store orders and Telegram calls |
+ 
+diff --git a/docs/DESPLIEGUE.md b/docs/DESPLIEGUE.md
+index 91e6e40..05eadbb 100644
+--- a/docs/DESPLIEGUE.md
++++ b/docs/DESPLIEGUE.md
+@@ -98,6 +98,8 @@ docker compose -f zarf/compose/docker_compose.prod.yaml --env-file zarf/compose/
+ 
+ **Contenido IA** (ver [CONTENIDO-IA.md](CONTENIDO-IA.md)): no usa variables en producción. La conexión con Shelton la pega un admin en *Contenido IA › Ajustes* y va cifrada en la base con `ENCRYPTION_KEY`. `SHELTON_ALLOW_HTTP=true` es solo para un Shelton falso en una máquina de desarrollo.
+ 
++**Hookline** (ver [HOOKLINE.md](HOOKLINE.md)): tampoco usa variables en producción. La dirección, el token y el secreto de los webhooks los pega un admin (`PUT /api/hookline/settings`) y van cifrados en la base con `ENCRYPTION_KEY`. `HOOKLINE_ALLOW_HTTP=true` es solo para un Hookline falso en una máquina de desarrollo.
++
+ **Generar con IA** (audios con la voz de la modelo, con ElevenLabs; ver [VOZ-IA.md](VOZ-IA.md)):
+ 
+ | Variable | Obligatoria | Qué es |
+diff --git a/docs/HOOKLINE.md b/docs/HOOKLINE.md
+new file mode 100644
+index 0000000..ac2d367
+--- /dev/null
++++ b/docs/HOOKLINE.md
+@@ -0,0 +1,77 @@
++# Hookline
++
++Hookline es la community manager de las cuentas de Instagram de las modelos: la bandeja de piezas, los jueces de IA, la publicación programada, los comentarios y las estadísticas. pyro la usa desde adentro con el permiso `hookline`, y las cuentas, los archivos y la publicación siguen en Hookline.
++
++pyro pone la persona, el permiso y el alcance. Hookline publica: la API le reenvía una lista cerrada de rutas y nada más.
++
++## El puente
++
++- `business/domain/hooklinebus` y `app/domain/hooklineapp`, rutas `/api/hookline/*`. Lo que no está en la lista da 404 y no llega a Hookline, sea cual sea el método.
++- **Conexión:** dirección, token de Hookline y secreto de los webhooks, cifrados juntos con `secretbox` en `hookline_settings` (migración 136). Ni el token ni el secreto vuelven nunca: se ven los últimos cuatro caracteres del token y si hay secreto guardado (`hasWebhookSecret`).
++- La dirección es `https`, solo con el nombre (sin camino, consulta ni usuario). No puede ser la máquina de la API, una link-local, una multicast ni una sin especificar (127.0.0.1, ::1, 169.254.x, 0.0.0.0, `localhost`).
++- **El token solo va a donde se pegó.** Si cambia la dirección hay que escribirlo de nuevo (400 en `token`). Guardar la misma dirección sin token ni secreto deja los que estaban.
++- **Sin conexión la sección está apagada:** 503 con `code: hookline_off` y no afecta a nada más.
++- **Token:** el de Hookline (`hl_…`), creado allá con rol editor, en `Authorization: Bearer`. Cada pedido dice para quién va con `X-Hookline-Actor: <nombre> (pyro:<id>)`, así Hookline anota quién aprobó o programó. El nombre va en ASCII (sin tildes, sin saltos de línea). El JWT de pyro nunca viaja.
++- **Hookline caído no le pega a nada más:** conexiones propias (`httpclient.Service`), un pozo de 16 para lecturas y cambios y otro de 8 para las miniaturas. 3 s para conectar, 20 s por pedido, y después de una conexión fallida nadie reintenta por 5 s. Responde 502 con `code: hookline_down`. Lo que no es JSON válido (un HTML de un proxy, una respuesta vacía, una redirección) cuenta como caída, y el detalle del error no llega a la pantalla. Un 401 o 403 de Hookline es 502 con `code: hookline_refused` (el token está mal o no tiene el rol).
++
++## Las rutas
++
++| Ruta | Permiso | En Hookline |
++|---|---|---|
++| `GET /api/hookline/cuentas` | ver | `GET /api/estado`, solo `cuentas`, filtradas por alcance |
++| `GET /api/hookline/piezas?cuenta=X` | ver | `GET /api/piezas?cuenta=X`; la cuenta tiene que estar al alcance, y lo que vuelve se filtra otra vez por la cuenta de cada pieza |
++| `POST /api/hookline/pieza` `{op, id, …}` | editar | `POST /api/pieza`; `op` solo `jueces`, `caption` (`caption`, hasta 2200), `programar` (`cuando`, `2026-11-20T20:00`) o `cancelar`. Antes se busca la pieza en `GET /api/piezas` y su cuenta tiene que estar al alcance |
++| `GET /api/hookline/stats?cuenta=X` | ver | `GET /api/stats?cuenta=X` |
++| `GET /api/hookline/comentarios?cuenta=X` | ver | `GET /api/comentarios?cuenta=X` |
++| `POST /api/hookline/comentario` `{op, cuenta, comentario, texto}` | editar | `POST /api/comentario`; `op` solo `responder` (con `texto`), `ocultar` o `saltar` |
++| `GET /api/hookline/mini?p=PATH` | ver | `GET /mini?p=PATH`, un JPEG de hasta 5 MB con `nosniff` |
++| `GET/PUT/DELETE /api/hookline/settings`, `POST /api/hookline/settings/test` | admin | Probar lee `GET /api/estado` |
++| `POST /api/hookline/webhook/{agencyID}` | ninguno (firma) | lo manda Hookline |
++
++A Hookline va solo lo que cada operación necesita: el puente arma el cuerpo de nuevo con sus campos, y lo demás que mande la pantalla se pierde. Lo que Hookline rechaza (un 400 con `{"error": "…"}`, un 404) llega a la pantalla como vino.
++
++## Perfiles y permiso
++
++| En pyro | Puede |
++|---|---|
++| Rol `admin` con `hookline` en editar | Todo, también las cuentas sin modelo y Ajustes |
++| `hookline` editar | Jueces, caption, programar, cancelar, responder, ocultar y saltar comentarios, de sus modelos |
++| `hookline` ver | Leer cuentas, piezas, miniaturas, estadísticas y comentarios de sus modelos |
++| Sin permiso | 403, sin llamar a Hookline |
++
++El admin se lee del rol en la base (el alcance de todas las modelos), nunca del token. La migración 136 le da `hookline` en editar a cada admin; a los demás se les da a mano en Equipo. La sección todavía no está en el frontend: hace falta sumar `hookline` a `src/api/types.ts`, `src/layout/nav.ts` y `src/lib/labels.ts` (y la pantalla).
++
++## Alcance
++
++Hookline no sabe de los alcances de pyro: el puente filtra.
++
++- Cada cuenta de Hookline dice qué modelo de pyro es (`pyro_modelo_id`). Quien no es admin ve solo las cuentas de sus modelos. Una cuenta con `pyro_modelo_id` en `null` es solo del admin.
++- Lo que sale de una cuenta fuera del alcance da 404 en todas sus rutas: sus piezas, las operaciones sobre ellas, sus miniaturas, sus estadísticas y sus comentarios. No se llega a llamar a Hookline para eso.
++- Qué modelo es cada cuenta se lee de `GET /api/estado` y se guarda un minuto por agencia; `GET /api/hookline/cuentas` siempre lo lee de nuevo. Si el estado no se puede leer, o no trae `cuentas`, no abre nada: 502, nunca muestra de más.
++- **Miniaturas:** solo de un camino que esté en `archivos` o en `vistas_previas` (el `p` de `/mini?p=`) de una pieza de una cuenta al alcance. Qué pieza tiene cada camino se guarda un minuto; un camino que no se conoce relee todas las piezas como mucho una vez cada 5 s.
++
++## Webhooks
++
++Hookline manda sus eventos a `POST https://<pyro>/api/hookline/webhook/<agencyID>` (Ajustes muestra el camino como `webhookPath`):
++
++- `X-Hookline-Firma: sha256=<hex de HMAC-SHA256(secreto, "<X-Hookline-Tiempo>.<cuerpo>")>`, comparada en tiempo constante, con el secreto guardado en la conexión.
++- `X-Hookline-Tiempo` a menos de 5 minutos de ahora, para un lado o el otro. El mismo evento (`id`) dos veces dentro de ese rato no avisa dos veces.
++- Cuerpo hasta 64 KB (413 si es más). Sin la sesión de pyro: lo deja pasar la firma. Cualquier otra cosa que esté mal (sin conexión, sin secreto, otra agencia, la firma, la hora) es el mismo 401, para no contar qué agencias tienen Hookline.
++- `pieza.error`, `pieza.vencida`, `cuenta.token_vencido` y `cuenta.token_por_vencer` avisan por las notificaciones de pyro (`notifbus`, tipo `hookline`) a los admins activos y, si el evento trae `datos.pyro_modelo_id`, a las personas activas asignadas a esa modelo que tienen el permiso `hookline`. Los demás tipos dan 204 y no hacen nada.
++
++## Encenderlo
++
++1. En Hookline: crear un token con rol editor (`hl_…`), atar cada cuenta a su modelo de pyro (`pyro_modelo_id`) y poner `HOOKLINE_WEBHOOK_URL=https://<pyro>/api/hookline/webhook/<agencyID>` y `HOOKLINE_WEBHOOK_SECRETO` (16 caracteres o más).
++2. La red: que el servidor de pyro llegue al 443 de Hookline, y Hookline al de pyro.
++3. Desplegar el backend (aplica la migración 136 al arrancar).
++4. En Ajustes de Hookline dentro de pyro (por ahora, `PUT /api/hookline/settings` con `{url, token, webhookSecret}`), un admin pega la dirección, el token y el mismo secreto de los webhooks, guarda y toca Probar (`POST /api/hookline/settings/test`).
++5. Dar el permiso «Hookline» a mano en Equipo.
++
++Para apagarlo: Desconectar (`DELETE /api/hookline/settings`).
++
++## Pruebas
++
++- `app/domain/hooklineapp/hooklineapp_test.go`: API real con Postgres y un Hookline falso. Cubre permisos en cada ruta, lo que está fuera de la lista, `hookline_off`, `hookline_down` (caído, 500, HTML, JSON roto, vacío, redirección, miniatura que no es JPEG o es muy grande), alcance (cuentas, piezas, operaciones, miniaturas, estadísticas y comentarios de otra modelo o sin modelo), las operaciones de la lista y sus campos, el token que nunca vuelve, la dirección que pide el token de nuevo, el actor y los webhooks (firma buena, mala, vieja, del futuro, muy grande, repetida, a quién avisa).
++- `app/domain/hooklineapp/hardening_test.go`: una ronda de rutas, valores y cuerpos raros al azar bajo `/api/hookline/`, con todos los métodos y todas las personas: ninguna da 5xx ni llega a Hookline fuera de la lista.
++- `business/domain/hooklinebus`: la dirección, el token que no sigue a otra dirección, la clave cambiada, la firma y el nombre en ASCII. `stores/hooklinedb`: la conexión y a quién se avisa.
++- `HOOKLINE_ALLOW_HTTP=true` deja usar una dirección `http://` (y la máquina misma), solo para un Hookline falso. En producción no se define.
+-- 
+2.43.0
+

@@ -1,0 +1,1599 @@
+From 6c58abc473f302e0d29beee2098d9f37c6702676 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 02:28:11 +0000
+Subject: [PATCH 3/4] Hookline is reachable at /api/hookline: accounts, pieces,
+ thumbnails, stats and comments of the models in each person's scope (404
+ outside it), the judges, caption, scheduling and cancelling and the comment
+ answers with the edit permission, the connection for an admin, and Hookline's
+ signed webhooks at /api/hookline/webhook/{agencyID}; everything else under it
+ is a 404 that never reaches Hookline.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ api/services/platform/build/all.go         |   5 +
+ app/domain/hooklineapp/hardening_test.go   | 171 ++++
+ app/domain/hooklineapp/hooklineapp.go      | 382 ++++++++
+ app/domain/hooklineapp/hooklineapp_test.go | 981 +++++++++++++++++++++
+ 4 files changed, 1539 insertions(+)
+ create mode 100644 app/domain/hooklineapp/hardening_test.go
+ create mode 100644 app/domain/hooklineapp/hooklineapp.go
+ create mode 100644 app/domain/hooklineapp/hooklineapp_test.go
+
+diff --git a/api/services/platform/build/all.go b/api/services/platform/build/all.go
+index c605d15..ffe553f 100644
+--- a/api/services/platform/build/all.go
++++ b/api/services/platform/build/all.go
+@@ -18,6 +18,7 @@ import (
+ 	"modelpro/app/domain/deviceapp"
+ 	"modelpro/app/domain/fanapp"
+ 	"modelpro/app/domain/goalapp"
++	"modelpro/app/domain/hooklineapp"
+ 	"modelpro/app/domain/inboxapp"
+ 	"modelpro/app/domain/loraxapp"
+ 	"modelpro/app/domain/memberapp"
+@@ -169,6 +170,10 @@ func (all) Add(rt web.Routers, cfg mux.Config) {
+ 		SheltonBus: bus.SheltonBus,
+ 		Perms:      bus.UserBus,
+ 	})
++	hooklineapp.Routes(rt, hooklineapp.Config{
++		Log:         cfg.Log,
++		HooklineBus: bus.HooklineBus,
++	})
+ 
+ 	storyapp.Routes(rt, storyapp.Config{
+ 		Log:      cfg.Log,
+diff --git a/app/domain/hooklineapp/hardening_test.go b/app/domain/hooklineapp/hardening_test.go
+new file mode 100644
+index 0000000..62349f7
+--- /dev/null
++++ b/app/domain/hooklineapp/hardening_test.go
+@@ -0,0 +1,171 @@
++package hooklineapp_test
++
++import (
++	"bufio"
++	"fmt"
++	"io"
++	"math/rand/v2"
++	"net"
++	"net/http"
++	"net/url"
++	"strings"
++	"testing"
++	"time"
++)
++
++/* Breaking the bridge: requests with raw request lines, so no client tidies
++   a path up, and a Hookline that writes down each request as it came. */
++
++// listed are the requests the bridge may make to Hookline.
++var listed = map[string]bool{
++	"GET /api/estado": true, "GET /api/piezas": true, "GET /api/stats": true, "GET /api/comentarios": true,
++	"GET /mini": true, "POST /api/pieza": true, "POST /api/comentario": true,
++}
++
++// rawRequest sends a request with exactly that request line, untouched by a
++// client, and returns the status.
++func rawRequest(t *testing.T, base, method, target, token string, extra http.Header, body string) int {
++	t.Helper()
++	u, _ := url.Parse(base)
++	conn, err := net.DialTimeout("tcp", u.Host, 3*time.Second)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	conn.SetDeadline(time.Now().Add(8 * time.Second))
++	var b strings.Builder
++	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n", method, target, u.Host)
++	if token != "" {
++		fmt.Fprintf(&b, "Authorization: Bearer %s\r\n", token)
++	}
++	for k, vs := range extra {
++		for _, v := range vs {
++			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
++		}
++	}
++	if body != "" {
++		fmt.Fprintf(&b, "Content-Type: application/json\r\nContent-Length: %d\r\n", len(body))
++	}
++	b.WriteString("\r\n" + body)
++	if _, err := conn.Write([]byte(b.String())); err != nil {
++		t.Fatal(err)
++	}
++	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
++	if err != nil {
++		return -1
++	}
++	defer res.Body.Close()
++	io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
++	return res.StatusCode
++}
++
++// Odd paths and values under /api/hookline, at random, with every method
++// and every person: none is a 5xx, none reaches Hookline off the list, no
++// header of the browser goes on, and nothing of another model's account is
++// ever asked for.
++func TestStrangeRoutesNeverReachHookline(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++
++	pieces := []string{
++		"cuentas", "piezas", "pieza", "stats", "comentarios", "comentario", "mini", "settings", "settings/test", "webhook", "webhook/1",
++		"estado", "ajustes", "media", "subir", "chat", "pyro", "actividad", "..", ".", "%2e%2e", "%2E%2E", "%2f", "%2F", "%5c", "%252e%252e",
++		"a%00b", "%00", "a%0d%0aX-Evil:1", "..;", "a;b", "é", "%E2%80%AE", "%ef%bc%8f", "%c0%af", "a%20b", "cuentas%2f..%2fajustes",
++		"piezas/", "mini/", "CUENTAS", "Piezas", strings.Repeat("a", 300), "1", "-1", "0x10",
++	}
++	queries := []string{
++		"", "?cuenta=pamela", "?cuenta=otra", "?cuenta=suelta", "?cuenta=..%2Fajustes", "?cuenta=pamela&cuenta=otra", "?cuenta=otra&cuenta=pamela",
++		"?cuenta=pamela%26x%3D1", "?cuenta=%00", "?cuenta=" + strings.Repeat("a", 100), "?p=para-subir/otra/b.jpg", "?p=../datos/ajustes.json",
++		"?p=para-subir/pamela/a.jpg&p=para-subir/otra/b.jpg", "?p=%2Fetc%2Fpasswd", "?p=para-subir/pamela/a.jpg%00.png", "?cuenta=pamela;otra",
++		"?p=" + strings.Repeat("x", 2000), "?cuenta[]=pamela", "?CUENTA=otra",
++	}
++	bodies := []string{
++		``, `{}`, `{"op":"jueces","id":"p2"}`, `{"op":"publicar","id":"p1"}`, `{"op":"jueces","id":"p1","cuenta":"otra"}`,
++		`{"op":"responder","cuenta":"otra","comentario":"c1","texto":"x"}`, `{"op":"ocultar","cuenta":"pamela","comentario":"../../x"}`,
++		`{"op":["jueces"],"id":"p1"}`, `{"op":"jueces","id":{"$ne":1}}`, `[1,2]`, `nope`, `{"op":"programar","id":"p1","cuando":"2026-11-20T20:00\r\nX: 1"}`,
++		`{"url":"https://169.254.169.254","token":"hl_aaaaaaaaaaaaaaaaaaaaaa"}`,
++	}
++	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"}
++	tokens := map[string]string{"admin": w.admin, "editor": w.editor, "reader": w.lect, "outside": w.outside, "nobody": ""}
++	extra := http.Header{"Cookie": {"session=1"}, "X-Forwarded-For": {"1.2.3.4"}, "X-Original-Url": {"/api/ajustes"}, "X-Http-Method-Override": {"DELETE"}}
++
++	rng := rand.New(rand.NewPCG(20261114, 7))
++	pick := func(list []string) string { return list[rng.IntN(len(list))] }
++	failed := map[string]bool{}
++	for range 1500 {
++		target := "/api/hookline/" + pick(pieces)
++		if rng.IntN(3) == 0 {
++			target += "/" + pick(pieces)
++		}
++		target += pick(queries)
++		who := pick([]string{"admin", "editor", "reader", "outside", "nobody"})
++		method := pick(methods)
++		if status := rawRequest(t, w.s.URL(), method, target, tokens[who], extra, pick(bodies)); status >= http.StatusInternalServerError || status < 0 {
++			failed[fmt.Sprintf("%d %s %s [%s]", status, method, target, who)] = true
++		}
++	}
++	for _, target := range []string{
++		"/api/hookline//cuentas", "/api/hookline/./cuentas", "/api/hookline/cuentas/", "/api/hookline/%63uentas", "/API/HOOKLINE/cuentas",
++		"/api/hookline/../hookline/cuentas", "/api//hookline/cuentas", "/api/hookline/cuentas;x=1", "/api/hookline/%2e%2e/auth/me",
++		"/api/hookline/webhook/1/../../settings", "/api/hookline/webhook/%2e%2e", "/api/hookline/webhook/1%2f..%2f..%2fsettings",
++	} {
++		for _, m := range methods {
++			if status := rawRequest(t, w.s.URL(), m, target, w.admin, extra, `{}`); status >= http.StatusInternalServerError || status < 0 {
++				failed[fmt.Sprintf("%d %s %s", status, m, target)] = true
++			}
++		}
++	}
++
++	for _, c := range w.f.seen() {
++		if !listed[c.method+" "+c.path] {
++			t.Errorf("reached Hookline off the list: %s %s?%s", c.method, c.path, c.query)
++		}
++		for _, h := range []string{"Cookie", "X-Evil", "X-Forwarded-For", "X-Original-Url", "X-Http-Method-Override"} {
++			if c.header.Get(h) != "" {
++				t.Errorf("header %s went on", h)
++			}
++		}
++		q, _ := url.ParseQuery(c.query)
++		switch {
++		case len(q["cuenta"]) > 1 || len(q["p"]) > 1:
++			t.Errorf("a repeated value went on: %s %s?%s", c.method, c.path, c.query)
++		case q.Get("cuenta") != "" && !ownOrAdmin(q.Get("cuenta")):
++			t.Errorf("an unknown account was asked for: %s %s?%s", c.method, c.path, c.query)
++		case c.path == "/mini" && !strings.HasPrefix(q.Get("p"), "para-subir/"):
++			t.Errorf("a thumbnail off the pieces: %s", c.query)
++		case c.method == http.MethodPost && strings.Contains(c.body, "\r"),
++			c.method == http.MethodPost && strings.Contains(c.body, `"otra"`) && !strings.HasPrefix(c.header.Get("X-Hookline-Actor"), "jefa "):
++			t.Errorf("a change outside went on: %s %s", c.path, c.body)
++		}
++	}
++	for k := range failed {
++		t.Errorf("failed: %s", k)
++	}
++}
++
++// ownOrAdmin is an account somebody of the test may ask for: pamela for the
++// team, otra and suelta for the admin alone.
++func ownOrAdmin(c string) bool { return c == "pamela" || c == "otra" || c == "suelta" }
++
++// A webhook's route takes nothing but a signed POST, and no other method
++// opens anything.
++func TestWebhookRouteTakesNothingElse(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for _, m := range []string{"GET", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE"} {
++		for _, tok := range []string{"", w.admin} {
++			if status := rawRequest(t, w.s.URL(), m, "/api/hookline/webhook/1", tok, nil, `{"id":1,"tipo":"pieza.error"}`); status >= http.StatusOK && status < http.StatusBadRequest || status >= http.StatusInternalServerError {
++				t.Errorf("%s with a login %v: %d", m, tok != "", status)
++			}
++		}
++	}
++	if status := rawRequest(t, w.s.URL(), "POST", "/api/hookline/webhook/1", w.admin, nil, `{"id":1,"tipo":"pieza.error"}`); status != http.StatusUnauthorized {
++		t.Errorf("a login is no signature: %d", status)
++	}
++	if got := w.told(); len(got) != 0 {
++		t.Fatalf("told %v", got)
++	}
++	if got := w.f.seen(); len(got) != 0 {
++		t.Fatalf("reached Hookline: %+v", got)
++	}
++}
+diff --git a/app/domain/hooklineapp/hooklineapp.go b/app/domain/hooklineapp/hooklineapp.go
+new file mode 100644
+index 0000000..189fadb
+--- /dev/null
++++ b/app/domain/hooklineapp/hooklineapp.go
+@@ -0,0 +1,382 @@
++// Package hooklineapp serves /api/hookline, the bridge to Hookline, the
++// community manager of the models' Instagram accounts: a closed list of
++// routes. What is not on the list is a 404 and never reaches Hookline.
++//
++// Who may do what:
++//   - view, with Hookline to view: the accounts, their pieces, the
++//     thumbnails of their files, their stats and their comments, of the
++//     models in their scope;
++//   - edit, with Hookline to edit: the judges, the caption, scheduling and
++//     cancelling a piece, and answering, hiding or leaving a comment;
++//   - an admin alone (the role in the database, the scope of every model,
++//     with the section to edit): the connection.
++//
++// Nobody without the permission gets a request out: the gate answers 403
++// before anything is called. Hookline's webhooks come in at
++// POST /api/hookline/webhook/{agencyID}, with no login: their signature is
++// what lets them in.
++package hooklineapp
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net/http"
++	"strconv"
++
++	"modelpro/app/sdk/request"
++	"modelpro/app/sdk/web"
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/business/domain/userbus"
++	"modelpro/business/types/modelscope"
++	"modelpro/foundation/logger"
++)
++
++// Config contains all the mandatory systems required by handlers.
++type Config struct {
++	Log         *logger.Logger
++	HooklineBus *hooklinebus.Business
++}
++
++type app struct {
++	log *logger.Logger
++	bus *hooklinebus.Business
++}
++
++// Routes adds the closed list of routes.
++func Routes(rt web.Routers, cfg Config) {
++	api := &app{log: cfg.Log, bus: cfg.HooklineBus}
++
++	view := rt.App.With(rt.Require(userbus.SectionHookline, userbus.LevelView))
++	edit := rt.App.With(rt.Require(userbus.SectionHookline, userbus.LevelEdit))
++	admin := edit.With(api.admin)
++
++	// What the section reads.
++	view.Get("/hookline/cuentas", api.cuentas)
++	view.Get("/hookline/piezas", api.piezas)
++	view.Get("/hookline/stats", api.stats)
++	view.Get("/hookline/comentarios", api.comentarios)
++	view.Get("/hookline/mini", api.mini)
++
++	// What a person does.
++	edit.Post("/hookline/pieza", api.pieza)
++	edit.Post("/hookline/comentario", api.comentario)
++
++	// An admin's.
++	admin.Get("/hookline/settings", api.settings)
++	admin.Put("/hookline/settings", api.saveSettings)
++	admin.Delete("/hookline/settings", api.removeSettings)
++	admin.Post("/hookline/settings/test", api.checkSettings)
++
++	// Hookline's webhooks: no login, the signature lets them in.
++	rt.Public.Post("/hookline/webhook/{agencyID}", api.webhook)
++
++	// Everything else under /hookline, whatever the method: not on the list.
++	rt.App.HandleFunc("/hookline/*", func(w http.ResponseWriter, r *http.Request) {
++		web.RespondError(w, http.StatusNotFound, "not found")
++	})
++}
++
++// admin lets an admin through: the role in the database, the scope of every
++// model. The gate in front of it has asked for the section to edit.
++func (a *app) admin(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_, scope, ok := request.Scoped(a.log, w, r)
++		if !ok {
++			return
++		}
++		if !scope.All {
++			web.RespondError(w, http.StatusForbidden, "only an admin")
++			return
++		}
++		next.ServeHTTP(w, r)
++	})
++}
++
++// person is who the request goes for, and their scope.
++func (a *app) person(w http.ResponseWriter, r *http.Request) (hooklinebus.Person, modelscope.Scope, bool) {
++	caller, scope, ok := request.Scoped(a.log, w, r)
++	if !ok {
++		return hooklinebus.Person{}, modelscope.Scope{}, false
++	}
++	return hooklinebus.Person{AgencyID: caller.AgencyID, UserID: caller.UserID}, scope, true
++}
++
++// code answers an error with the code the screen acts on.
++func code(w http.ResponseWriter, status int, msg, c string) {
++	web.Respond(w, status, map[string]string{"error": msg, "code": c})
++}
++
++// fail answers an error of the bridge.
++func (a *app) fail(w http.ResponseWriter, r *http.Request, err error) {
++	switch {
++	case errors.Is(err, context.Canceled):
++		// The person left: nobody reads the answer.
++	case request.FieldError(w, err):
++	case errors.Is(err, hooklinebus.ErrNotFound):
++		web.RespondError(w, http.StatusNotFound, "not found")
++	case errors.Is(err, hooklinebus.ErrOff):
++		code(w, http.StatusServiceUnavailable, hooklinebus.ErrOff.Error(), "hookline_off")
++	case errors.Is(err, hooklinebus.ErrDown), errors.Is(err, context.DeadlineExceeded):
++		code(w, http.StatusBadGateway, hooklinebus.ErrDown.Error(), "hookline_down")
++	case errors.Is(err, hooklinebus.ErrRefused):
++		code(w, http.StatusBadGateway, hooklinebus.ErrRefused.Error(), "hookline_refused")
++	default:
++		request.Internal(a.log, w, r, err)
++	}
++}
++
++// answer answers what Hookline answered: a refusal (a 400, a 404) goes as
++// it came, so the screen can read why.
++func (a *app) answer(w http.ResponseWriter, r *http.Request, rep hooklinebus.Reply, err error) {
++	if err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(rep.Status)
++	w.Write(rep.Body)
++}
++
++// cuenta reads the account of the query: required, and one that cannot be
++// an id does not exist.
++func cuenta(w http.ResponseWriter, r *http.Request) (string, bool) {
++	c := r.URL.Query().Get("cuenta")
++	switch {
++	case c == "":
++		web.RespondFieldError(w, "cuenta", "the account")
++		return "", false
++	case !hooklinebus.ValidCuenta(c):
++		web.RespondError(w, http.StatusNotFound, "not found")
++		return "", false
++	}
++	return c, true
++}
++
++// =============================================================================
++// The connection
++
++// settingsView is the connection as an admin sees it, with the path where
++// Hookline sends its webhooks for the agency.
++type settingsView struct {
++	hooklinebus.Settings
++	WebhookPath string `json:"webhookPath"`
++}
++
++func (a *app) settingsOut(agencyID int, s hooklinebus.Settings) settingsView {
++	return settingsView{Settings: s, WebhookPath: "/api/hookline/webhook/" + strconv.Itoa(agencyID)}
++}
++
++func (a *app) settings(w http.ResponseWriter, r *http.Request) {
++	caller, _, ok := request.Scoped(a.log, w, r)
++	if !ok {
++		return
++	}
++	out, err := a.bus.Settings(r.Context(), caller.AgencyID)
++	if err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	web.Respond(w, http.StatusOK, a.settingsOut(caller.AgencyID, out))
++}
++
++// settingsRequest is the body of PUT /api/hookline/settings. An empty token
++// or webhook secret keeps the one saved.
++type settingsRequest struct {
++	URL           string `json:"url"`
++	Token         string `json:"token"`
++	WebhookSecret string `json:"webhookSecret"`
++}
++
++func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
++	caller, _, ok := request.Scoped(a.log, w, r)
++	if !ok {
++		return
++	}
++	var req settingsRequest
++	if !request.Decode(w, r, &req) {
++		return
++	}
++	out, err := a.bus.Save(r.Context(), caller.AgencyID, caller.UserID, hooklinebus.SaveSettings{URL: req.URL, Token: req.Token, WebhookSecret: req.WebhookSecret})
++	if err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	web.Respond(w, http.StatusOK, a.settingsOut(caller.AgencyID, out))
++}
++
++func (a *app) removeSettings(w http.ResponseWriter, r *http.Request) {
++	caller, _, ok := request.Scoped(a.log, w, r)
++	if !ok {
++		return
++	}
++	if err := a.bus.Remove(r.Context(), caller.AgencyID); err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (a *app) checkSettings(w http.ResponseWriter, r *http.Request) {
++	p, _, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	out, err := a.bus.Check(r.Context(), p)
++	if err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	web.Respond(w, http.StatusOK, out)
++}
++
++// =============================================================================
++// What the section reads
++
++func (a *app) cuentas(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	rep, err := a.bus.Cuentas(r.Context(), p, scope)
++	a.answer(w, r, rep, err)
++}
++
++func (a *app) piezas(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	c, ok := cuenta(w, r)
++	if !ok {
++		return
++	}
++	rep, err := a.bus.Piezas(r.Context(), p, scope, c)
++	a.answer(w, r, rep, err)
++}
++
++func (a *app) stats(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	c, ok := cuenta(w, r)
++	if !ok {
++		return
++	}
++	rep, err := a.bus.Stats(r.Context(), p, scope, c)
++	a.answer(w, r, rep, err)
++}
++
++func (a *app) comentarios(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	c, ok := cuenta(w, r)
++	if !ok {
++		return
++	}
++	rep, err := a.bus.Comentarios(r.Context(), p, scope, c)
++	a.answer(w, r, rep, err)
++}
++
++// mini serves the thumbnail of a file of a piece in the scope: a JPEG, with
++// nosniff. The address and the token of Hookline never reach the browser.
++func (a *app) mini(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	raw, err := a.bus.Mini(r.Context(), p, scope, r.URL.Query().Get("p"))
++	if err != nil {
++		a.fail(w, r, err)
++		return
++	}
++	h := w.Header()
++	h.Set("Content-Type", "image/jpeg")
++	h.Set("X-Content-Type-Options", "nosniff")
++	h.Set("Cache-Control", "private, max-age=300")
++	h.Set("Content-Length", strconv.Itoa(len(raw)))
++	w.WriteHeader(http.StatusOK)
++	w.Write(raw)
++}
++
++// =============================================================================
++// What a person does
++
++// piezaRequest is the body of POST /api/hookline/pieza.
++type piezaRequest struct {
++	Op      string  `json:"op"`
++	ID      string  `json:"id"`
++	Caption *string `json:"caption"`
++	Cuando  *string `json:"cuando"`
++}
++
++func (a *app) pieza(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	var req piezaRequest
++	if !request.Decode(w, r, &req) {
++		return
++	}
++	rep, err := a.bus.DoPieza(r.Context(), p, scope, hooklinebus.PiezaOp{Op: req.Op, ID: req.ID, Caption: req.Caption, Cuando: req.Cuando})
++	a.answer(w, r, rep, err)
++}
++
++// comentarioRequest is the body of POST /api/hookline/comentario.
++type comentarioRequest struct {
++	Op         string `json:"op"`
++	Cuenta     string `json:"cuenta"`
++	Comentario string `json:"comentario"`
++	Texto      string `json:"texto"`
++}
++
++func (a *app) comentario(w http.ResponseWriter, r *http.Request) {
++	p, scope, ok := a.person(w, r)
++	if !ok {
++		return
++	}
++	var req comentarioRequest
++	if !request.Decode(w, r, &req) {
++		return
++	}
++	rep, err := a.bus.DoComentario(r.Context(), p, scope, hooklinebus.ComentarioOp{Op: req.Op, Cuenta: req.Cuenta, Comentario: req.Comentario, Texto: req.Texto})
++	a.answer(w, r, rep, err)
++}
++
++// =============================================================================
++// Hookline's webhooks
++
++// webhook takes one of Hookline's webhooks. Whatever is wrong with it (no
++// such agency, no secret, a signature or a time that does not do) is the
++// same 401, so nobody learns which agencies have Hookline.
++func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
++	defer r.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(r.Body, hooklinebus.MaxWebhook+1))
++	if err != nil {
++		web.RespondError(w, http.StatusBadRequest, "invalid request body")
++		return
++	}
++	if len(body) > hooklinebus.MaxWebhook {
++		web.RespondError(w, http.StatusRequestEntityTooLarge, "body too large")
++		return
++	}
++	agencyID, err := strconv.Atoi(web.Param(r, "agencyID"))
++	if err != nil || agencyID <= 0 {
++		web.RespondError(w, http.StatusUnauthorized, hooklinebus.ErrSignature.Error())
++		return
++	}
++	err = a.bus.Webhook(r.Context(), agencyID, r.Header.Get("X-Hookline-Tiempo"), r.Header.Get("X-Hookline-Firma"), body)
++	switch {
++	case err == nil:
++		w.WriteHeader(http.StatusNoContent)
++	case errors.Is(err, hooklinebus.ErrSignature):
++		web.RespondError(w, http.StatusUnauthorized, hooklinebus.ErrSignature.Error())
++	case request.FieldError(w, err):
++	default:
++		request.Internal(a.log, w, r, err)
++	}
++}
+diff --git a/app/domain/hooklineapp/hooklineapp_test.go b/app/domain/hooklineapp/hooklineapp_test.go
+new file mode 100644
+index 0000000..73999e6
+--- /dev/null
++++ b/app/domain/hooklineapp/hooklineapp_test.go
+@@ -0,0 +1,981 @@
++package hooklineapp_test
++
++import (
++	"encoding/json"
++	"fmt"
++	"io"
++	"maps"
++	"net/http"
++	"net/http/httptest"
++	"slices"
++	"strconv"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"modelpro/app/domain/hooklineapp"
++	"modelpro/app/sdk/apitest"
++	"modelpro/app/sdk/mux"
++	"modelpro/app/sdk/web"
++	"modelpro/business/domain/hooklinebus"
++	"modelpro/business/domain/userbus"
++)
++
++const (
++	hooklineToken = "hl_token-of-the-tests-0123456789"
++	webhookSecret = "webhook-secret-of-the-tests-0123"
++	jpeg          = "\xff\xd8\xff\xe0 a thumbnail"
++)
++
++func routes(rt web.Routers, cfg mux.Config) {
++	hooklineapp.Routes(rt, hooklineapp.Config{Log: cfg.Log, HooklineBus: cfg.BusConfig.HooklineBus})
++}
++
++// call is one request as the fake Hookline got it.
++type call struct {
++	method, path, query, body string
++	header                    http.Header
++}
++
++// fakeHookline is Hookline as these tests play it: its accounts, its pieces
++// and whatever each test changes. Every request is written down, so a test
++// can say that nothing reached it.
++type fakeHookline struct {
++	srv *httptest.Server
++
++	mu    sync.Mutex
++	calls []call
++	// cuentas and piezas are what /api/estado and /api/piezas say.
++	cuentas []map[string]any
++	piezas  []map[string]any
++	// loose answers every piece whatever account was asked for.
++	loose   bool
++	answers map[string]func(w http.ResponseWriter, r *http.Request)
++}
++
++func newFake(t *testing.T) *fakeHookline {
++	f := &fakeHookline{answers: map[string]func(w http.ResponseWriter, r *http.Request){}}
++	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
++	t.Cleanup(f.srv.Close)
++	return f
++}
++
++func (f *fakeHookline) serve(w http.ResponseWriter, r *http.Request) {
++	raw, _ := io.ReadAll(r.Body)
++	f.mu.Lock()
++	f.calls = append(f.calls, call{r.Method, r.URL.Path, r.URL.RawQuery, string(raw), r.Header.Clone()})
++	answer := f.answers[r.Method+" "+r.URL.Path]
++	cuentas, piezas, loose := f.cuentas, f.piezas, f.loose
++	f.mu.Unlock()
++	if r.Header.Get("Authorization") != "Bearer "+hooklineToken {
++		web.RespondError(w, http.StatusUnauthorized, "token")
++		return
++	}
++	if answer != nil {
++		answer(w, r)
++		return
++	}
++	switch r.Method + " " + r.URL.Path {
++	case "GET /api/estado":
++		web.Respond(w, http.StatusOK, map[string]any{"cuentas": cuentas, "piezas": piezas, "version": "test"})
++	case "GET /api/piezas":
++		c := r.URL.Query().Get("cuenta")
++		out := []map[string]any{}
++		for _, p := range piezas {
++			if c == "" || loose || p["cuenta"] == c {
++				out = append(out, p)
++			}
++		}
++		web.Respond(w, http.StatusOK, map[string]any{"piezas": out})
++	case "POST /api/pieza":
++		web.Respond(w, http.StatusOK, map[string]any{"ok": true})
++	case "GET /api/stats":
++		web.Respond(w, http.StatusOK, map[string]any{"cuenta": r.URL.Query().Get("cuenta"), "seguidores": 1200})
++	case "GET /api/comentarios":
++		web.Respond(w, http.StatusOK, map[string]any{"items": []map[string]any{{"id": "c1", "texto": "hola"}}})
++	case "POST /api/comentario":
++		web.Respond(w, http.StatusOK, map[string]any{"ok": true})
++	case "GET /mini":
++		w.Header().Set("Content-Type", "image/jpeg")
++		io.WriteString(w, jpeg)
++	default:
++		web.RespondError(w, http.StatusNotFound, "no existe")
++	}
++}
++
++// on sets the answer of a route.
++func (f *fakeHookline) on(route string, answer func(w http.ResponseWriter, r *http.Request)) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.answers[route] = answer
++}
++
++func (f *fakeHookline) seen() []call {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return append([]call(nil), f.calls...)
++}
++
++// count is how many requests to a route Hookline got.
++func (f *fakeHookline) count(method, path string) int {
++	n := 0
++	for _, c := range f.seen() {
++		if c.method == method && c.path == path {
++			n++
++		}
++	}
++	return n
++}
++
++func (f *fakeHookline) reset() {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.calls = nil
++}
++
++// world is an API connected to a fake Hookline. Pamela is Maite's account,
++// whom the team works with; otra is Otra's, outside their scope; suelta is
++// tied to no model.
++type world struct {
++	t                    *testing.T
++	s                    *apitest.Server
++	f                    *fakeHookline
++	maite, otra          int
++	admin, editor, lect  string
++	adminID, editorID    int
++	lectID, outsideID    int
++	outside, otherEditor string
++}
++
++func newWorld(t *testing.T) *world {
++	t.Helper()
++	f := newFake(t)
++	s := apitest.New(t, routes)
++	w := &world{t: t, s: s, f: f}
++	w.maite, w.otra = s.Model("Maite"), s.Model("Otra")
++	w.adminID, w.admin = s.Login("jefa", userbus.RoleAdmin, nil)
++	w.editorID, w.editor = s.Login("reels", userbus.RoleCreator, map[string]string{"contenido": "edit", "hookline": "edit"}, w.maite)
++	w.lectID, w.lect = s.Login("mira", userbus.RoleChatter, map[string]string{"mensajes": "edit", "hookline": "view"}, w.maite)
++	w.outsideID, w.outside = s.Login("nadie", userbus.RoleChatter, map[string]string{"mensajes": "edit", "contenido_ia": "edit"}, w.maite)
++	_, w.otherEditor = s.Login("otraeditora", userbus.RoleCreator, map[string]string{"hookline": "edit"}, w.otra)
++	f.cuentas = []map[string]any{
++		{"id": "pamela", "usuario": "pamela", "main": "", "conectada": true, "pyro_modelo_id": w.maite, "pyro_modelo": "Maite", "seguidores": 1200},
++		{"id": "otra", "usuario": "otra", "main": "", "conectada": true, "pyro_modelo_id": w.otra, "pyro_modelo": "Otra", "seguidores": 900},
++		{"id": "suelta", "usuario": "suelta", "main": "", "conectada": false, "pyro_modelo_id": nil, "pyro_modelo": "", "seguidores": nil},
++	}
++	pieza := func(id, cuenta, file string) map[string]any {
++		return map[string]any{
++			"id": id, "cuenta": cuenta, "tipo": "foto", "estado": "juzgada", "caption": "hola", "cuando": "",
++			"archivos": []string{file}, "vistas_previas": []string{"/mini?p=" + file}, "jueces": nil, "error": "",
++		}
++	}
++	f.piezas = []map[string]any{
++		pieza("p1", "pamela", "para-subir/pamela/a.jpg"),
++		pieza("p2", "otra", "para-subir/otra/b.jpg"),
++		pieza("p3", "suelta", "para-subir/suelta/c.jpg"),
++	}
++	return w
++}
++
++// connect saves the connection, as an admin does in Ajustes.
++func (w *world) connect() {
++	w.t.Helper()
++	w.s.Expect(http.StatusOK, http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": w.f.srv.URL, "token": hooklineToken, "webhookSecret": webhookSecret}, nil)
++	w.f.reset()
++}
++
++// route is one route of the list, with what it needs.
++type route struct {
++	method, path, need string
++	body               any
++}
++
++func listRoutes() []route {
++	return []route{
++		{http.MethodGet, "/api/hookline/cuentas", "view", nil},
++		{http.MethodGet, "/api/hookline/piezas?cuenta=pamela", "view", nil},
++		{http.MethodGet, "/api/hookline/stats?cuenta=pamela", "view", nil},
++		{http.MethodGet, "/api/hookline/comentarios?cuenta=pamela", "view", nil},
++		{http.MethodGet, "/api/hookline/mini?p=para-subir/pamela/a.jpg", "view", nil},
++		{http.MethodPost, "/api/hookline/pieza", "edit", map[string]any{"op": "jueces", "id": "p1"}},
++		{http.MethodPost, "/api/hookline/comentario", "edit", map[string]any{"op": "ocultar", "cuenta": "pamela", "comentario": "c1"}},
++		{http.MethodGet, "/api/hookline/settings", "admin", nil},
++		{http.MethodPut, "/api/hookline/settings", "admin", map[string]any{"url": "https://hookline.example.net", "token": hooklineToken}},
++		{http.MethodDelete, "/api/hookline/settings", "admin", nil},
++		{http.MethodPost, "/api/hookline/settings/test", "admin", nil},
++	}
++}
++
++// Every route asks for its permission before anything is called.
++func TestGates(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for _, r := range listRoutes() {
++		if status, raw := w.s.Do(r.method, r.path, w.outside, r.body); status != http.StatusForbidden {
++			t.Errorf("no permission: %s %s: %d %s", r.method, r.path, status, raw)
++		}
++		if r.need == "edit" || r.need == "admin" {
++			if status, raw := w.s.Do(r.method, r.path, w.lect, r.body); status != http.StatusForbidden {
++				t.Errorf("reader: %s %s: %d %s", r.method, r.path, status, raw)
++			}
++		}
++		if r.need == "admin" {
++			if status, raw := w.s.Do(r.method, r.path, w.editor, r.body); status != http.StatusForbidden {
++				t.Errorf("editor: %s %s: %d %s", r.method, r.path, status, raw)
++			}
++		}
++		if status, _ := w.s.Do(r.method, r.path, "", r.body); status != http.StatusUnauthorized {
++			t.Errorf("no token: %s %s: %d", r.method, r.path, status)
++		}
++	}
++	if got := w.f.seen(); len(got) != 0 {
++		t.Fatalf("reached Hookline: %+v", got)
++	}
++
++	// Each one does what it is for, with the permission.
++	for _, r := range listRoutes() {
++		tok := w.admin
++		switch r.need {
++		case "view":
++			tok = w.lect
++		case "edit":
++			tok = w.editor
++		}
++		if r.method == http.MethodDelete || r.method == http.MethodPut {
++			continue
++		}
++		if status, raw := w.s.Do(r.method, r.path, tok, r.body); status != http.StatusOK {
++			t.Errorf("%s %s: %d %s", r.method, r.path, status, raw)
++		}
++	}
++}
++
++// What is not on the list is a 404 for everyone and never reaches Hookline,
++// whatever the method.
++func TestOutsideTheListIsNotFound(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for _, r := range []struct{ method, path string }{
++		{http.MethodGet, "/api/hookline/estado"},
++		{http.MethodGet, "/api/hookline/ajustes"},
++		{http.MethodPost, "/api/hookline/ajustes"},
++		{http.MethodPost, "/api/hookline/subir"},
++		{http.MethodPost, "/api/hookline/chat"},
++		{http.MethodGet, "/api/hookline/media?p=para-subir/pamela/a.jpg"},
++		{http.MethodGet, "/api/hookline/actividad"},
++		{http.MethodDelete, "/api/hookline/cuentas"},
++		{http.MethodPost, "/api/hookline/cuentas"},
++		{http.MethodPut, "/api/hookline/pieza"},
++		{http.MethodGet, "/api/hookline/pieza"},
++		{http.MethodGet, "/api/hookline/piezas/p1"},
++		{http.MethodPost, "/api/hookline/piezas"},
++		{http.MethodGet, "/api/hookline/pyro"},
++		{http.MethodGet, "/api/hookline/cuentas/../ajustes"},
++		{http.MethodGet, "/api/hookline/piezas?cuenta=..%2Fajustes"},
++		{http.MethodGet, "/api/hookline/stats?cuenta=pamela%26x%3D1"},
++	} {
++		if status, raw := w.s.Do(r.method, r.path, w.admin, map[string]any{}); status != http.StatusNotFound {
++			t.Errorf("%s %s: %d %s", r.method, r.path, status, raw)
++		}
++	}
++	if got := w.f.seen(); len(got) != 0 {
++		t.Fatalf("reached Hookline: %+v", got)
++	}
++}
++
++// With no connection the section is off: 503 with its code for everyone
++// with the permission, and an admin can still connect it.
++func TestOffWithoutConnection(t *testing.T) {
++	w := newWorld(t)
++	for _, r := range listRoutes() {
++		if r.need == "admin" {
++			continue
++		}
++		for _, tok := range []string{w.admin, w.editor} {
++			status, raw := w.s.Do(r.method, r.path, tok, r.body)
++			if status != http.StatusServiceUnavailable || !strings.Contains(string(raw), `"hookline_off"`) {
++				t.Fatalf("%s %s: %d %s", r.method, r.path, status, raw)
++			}
++		}
++	}
++	var s struct {
++		Connected bool `json:"connected"`
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/settings", w.admin, nil, &s)
++	if s.Connected {
++		t.Fatal("connected with nothing saved")
++	}
++	if status, raw := w.s.Do(http.MethodPost, "/api/hookline/settings/test", w.admin, nil); status != http.StatusServiceUnavailable {
++		t.Fatalf("test: %d %s", status, raw)
++	}
++	if got := w.f.seen(); len(got) != 0 {
++		t.Fatalf("reached Hookline: %+v", got)
++	}
++
++	w.connect()
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.admin, nil, nil)
++	w.s.Expect(http.StatusNoContent, http.MethodDelete, "/api/hookline/settings", w.admin, nil, nil)
++	if status, _ := w.s.Do(http.MethodGet, "/api/hookline/cuentas", w.admin, nil); status != http.StatusServiceUnavailable {
++		t.Fatalf("after disconnecting: %d", status)
++	}
++}
++
++type settings struct {
++	Connected        bool   `json:"connected"`
++	URL              string `json:"url"`
++	TokenHint        string `json:"tokenHint"`
++	HasWebhookSecret bool   `json:"hasWebhookSecret"`
++	WebhookPath      string `json:"webhookPath"`
++}
++
++// The connection is sealed, neither the token nor the secret comes back,
++// the fields are checked and the token does not follow a new address.
++func TestSettings(t *testing.T) {
++	w := newWorld(t)
++	for name, body := range map[string]map[string]string{
++		"no token":      {"url": w.f.srv.URL},
++		"short token":   {"url": w.f.srv.URL, "token": "corto"},
++		"spaced token":  {"url": w.f.srv.URL, "token": "un token con espacios adentro"},
++		"short secret":  {"url": w.f.srv.URL, "token": hooklineToken, "webhookSecret": "corto"},
++		"no url":        {"token": hooklineToken},
++		"not a url":     {"url": "hookline", "token": hooklineToken},
++		"with a path":   {"url": w.f.srv.URL + "/api", "token": hooklineToken},
++		"with a query":  {"url": w.f.srv.URL + "?a=1", "token": hooklineToken},
++		"with a user":   {"url": "https://a:b@hookline.example.net", "token": hooklineToken},
++		"ftp":           {"url": "ftp://hookline.example.net", "token": hooklineToken},
++		"link-local":    {"url": "https://169.254.169.254", "token": hooklineToken},
++		"unspecified":   {"url": "https://0.0.0.0", "token": hooklineToken},
++		"unspecified 6": {"url": "https://[::]", "token": hooklineToken},
++	} {
++		if status, raw := w.s.Do(http.MethodPut, "/api/hookline/settings", w.admin, body); status != http.StatusBadRequest {
++			t.Errorf("%s: %d %s", name, status, raw)
++		}
++	}
++
++	var s settings
++	status, raw := w.s.Do(http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": " " + w.f.srv.URL + "/ ", "token": hooklineToken, "webhookSecret": webhookSecret})
++	if status != http.StatusOK || strings.Contains(string(raw), hooklineToken) || strings.Contains(string(raw), webhookSecret) {
++		t.Fatalf("save: %d %s", status, raw)
++	}
++	json.Unmarshal(raw, &s)
++	if !s.Connected || s.URL != w.f.srv.URL || s.TokenHint != "6789" || !s.HasWebhookSecret || s.WebhookPath != "/api/hookline/webhook/1" {
++		t.Fatalf("saved %+v", s)
++	}
++	status, raw = w.s.Do(http.MethodGet, "/api/hookline/settings", w.admin, nil)
++	if status != http.StatusOK || strings.Contains(string(raw), hooklineToken) || strings.Contains(string(raw), webhookSecret) {
++		t.Fatalf("read: %d %s", status, raw)
++	}
++
++	var sealed []byte
++	if err := w.s.DB.QueryRow(`SELECT connection FROM hookline_settings WHERE agency_id = $1`, apitest.Agency).Scan(&sealed); err != nil {
++		t.Fatal(err)
++	}
++	for _, plain := range []string{hooklineToken, webhookSecret, w.f.srv.URL} {
++		if strings.Contains(string(sealed), plain) {
++			t.Fatalf("%q is in the database in the clear", plain)
++		}
++	}
++
++	// Saving the same address without a token or a secret keeps them.
++	w.s.Expect(http.StatusOK, http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": w.f.srv.URL}, &s)
++	if s.TokenHint != "6789" || !s.HasWebhookSecret {
++		t.Fatalf("saved again %+v", s)
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.admin, nil, nil)
++
++	// Another address needs the token again.
++	other := newFake(t)
++	status, raw = w.s.Do(http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": other.srv.URL})
++	if status != http.StatusBadRequest || !strings.Contains(string(raw), `"token"`) {
++		t.Fatalf("another address: %d %s", status, raw)
++	}
++	if got := other.seen(); len(got) != 0 {
++		t.Fatalf("the token went to the other address: %+v", got)
++	}
++
++	// Probar says whether it works.
++	var check struct {
++		OK      bool   `json:"ok"`
++		Reason  string `json:"reason"`
++		Cuentas int    `json:"cuentas"`
++	}
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/settings/test", w.admin, nil, &check)
++	if !check.OK || check.Cuentas != 3 {
++		t.Fatalf("check %+v", check)
++	}
++	w.f.on("GET /api/estado", func(w http.ResponseWriter, r *http.Request) {
++		web.RespondError(w, http.StatusUnauthorized, "token")
++	})
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/settings/test", w.admin, nil, &check)
++	if check.OK || check.Reason != "refused" {
++		t.Fatalf("check %+v", check)
++	}
++}
++
++// Who is not an admin sees the accounts of their models, and everything of
++// another model's account, or of one tied to none, does not exist: its
++// pieces, their operations, their thumbnails, its stats and comments.
++func TestModelScope(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++
++	var out struct {
++		Cuentas []struct {
++			ID string `json:"id"`
++		} `json:"cuentas"`
++		Piezas []struct {
++			ID     string `json:"id"`
++			Cuenta string `json:"cuenta"`
++		} `json:"piezas"`
++	}
++	ids := func() []string {
++		var got []string
++		for _, c := range out.Cuentas {
++			got = append(got, c.ID)
++		}
++		return got
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.editor, nil, &out)
++	if got := ids(); !slices.Equal(got, []string{"pamela"}) {
++		t.Fatalf("editor's accounts %v", got)
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.otherEditor, nil, &out)
++	if got := ids(); !slices.Equal(got, []string{"otra"}) {
++		t.Fatalf("the other editor's accounts %v", got)
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.admin, nil, &out)
++	if got := ids(); !slices.Equal(got, []string{"pamela", "otra", "suelta"}) {
++		t.Fatalf("admin's accounts %v", got)
++	}
++	status, raw := w.s.Do(http.MethodGet, "/api/hookline/cuentas", w.editor, nil)
++	if status != http.StatusOK || strings.Contains(string(raw), `"piezas"`) || strings.Contains(string(raw), "version") {
++		t.Fatalf("only the accounts: %s", raw)
++	}
++
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/piezas?cuenta=pamela", w.lect, nil, &out)
++	if len(out.Piezas) != 1 || out.Piezas[0].ID != "p1" {
++		t.Fatalf("pamela's pieces %+v", out.Piezas)
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/piezas?cuenta=suelta", w.admin, nil, &out)
++	if len(out.Piezas) != 1 || out.Piezas[0].ID != "p3" {
++		t.Fatalf("admin's suelta pieces %+v", out.Piezas)
++	}
++
++	// A Hookline that answers more than it was asked does not open more.
++	w.f.mu.Lock()
++	w.f.loose = true
++	w.f.mu.Unlock()
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/piezas?cuenta=pamela", w.editor, nil, &out)
++	if len(out.Piezas) != 1 || out.Piezas[0].Cuenta != "pamela" {
++		t.Fatalf("loose pieces %+v", out.Piezas)
++	}
++	w.f.mu.Lock()
++	w.f.loose = false
++	w.f.mu.Unlock()
++
++	w.f.reset()
++	for _, tok := range []string{w.editor, w.lect} {
++		for _, path := range []string{
++			"/api/hookline/piezas?cuenta=otra", "/api/hookline/piezas?cuenta=suelta", "/api/hookline/piezas?cuenta=nadie",
++			"/api/hookline/stats?cuenta=otra", "/api/hookline/stats?cuenta=suelta",
++			"/api/hookline/comentarios?cuenta=otra", "/api/hookline/comentarios?cuenta=suelta",
++			"/api/hookline/mini?p=para-subir/otra/b.jpg", "/api/hookline/mini?p=para-subir/suelta/c.jpg",
++			"/api/hookline/mini?p=para-subir/pamela/no-es-de-ninguna.jpg", "/api/hookline/mini?p=../datos/ajustes.json", "/api/hookline/mini",
++		} {
++			if status, raw := w.s.Do(http.MethodGet, path, tok, nil); status != http.StatusNotFound {
++				t.Errorf("%s: %d %s", path, status, raw)
++			}
++		}
++	}
++	for _, body := range []map[string]any{
++		{"op": "jueces", "id": "p2"}, {"op": "cancelar", "id": "p3"}, {"op": "caption", "id": "p2", "caption": "otra"},
++		{"op": "programar", "id": "p2", "cuando": "2026-11-20T20:00"}, {"op": "jueces", "id": "p9"},
++	} {
++		if status, raw := w.s.Do(http.MethodPost, "/api/hookline/pieza", w.editor, body); status != http.StatusNotFound {
++			t.Errorf("pieza %v: %d %s", body, status, raw)
++		}
++	}
++	for _, c := range []string{"otra", "suelta"} {
++		if status, raw := w.s.Do(http.MethodPost, "/api/hookline/comentario", w.editor, map[string]any{"op": "responder", "cuenta": c, "comentario": "c1", "texto": "gracias"}); status != http.StatusNotFound {
++			t.Errorf("comentario %s: %d %s", c, status, raw)
++		}
++	}
++	for _, c := range w.f.seen() {
++		if c.path != "/api/estado" && !(c.method == http.MethodGet && c.path == "/api/piezas" && c.query == "") {
++			t.Errorf("reached Hookline outside the scope: %s %s?%s", c.method, c.path, c.query)
++		}
++	}
++
++	// The thumbnail of a piece in the scope comes, as a JPEG with nosniff.
++	res, err := w.s.Client().Do(authed(t, w.s.URL()+"/api/hookline/mini?p=para-subir/pamela/a.jpg", w.lect))
++	if err != nil {
++		t.Fatal(err)
++	}
++	body, _ := io.ReadAll(res.Body)
++	res.Body.Close()
++	if res.StatusCode != http.StatusOK || string(body) != jpeg || res.Header.Get("Content-Type") != "image/jpeg" || res.Header.Get("X-Content-Type-Options") != "nosniff" {
++		t.Fatalf("mini: %d %q %v", res.StatusCode, body, res.Header)
++	}
++	if got := w.f.seen(); got[len(got)-1].path != "/mini" || got[len(got)-1].query != "p=para-subir%2Fpamela%2Fa.jpg" {
++		t.Fatalf("mini asked as %+v", got[len(got)-1])
++	}
++
++	// An admin reaches the account tied to no model.
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/pieza", w.admin, map[string]any{"op": "jueces", "id": "p3"}, nil)
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/mini?p=para-subir/suelta/c.jpg", w.admin, nil, nil)
++
++	// A model taken from the account in Hookline closes it within a minute
++	// at most; a new list of accounts closes it at once.
++	w.f.mu.Lock()
++	moved := make([]map[string]any, len(w.f.cuentas))
++	for i, c := range w.f.cuentas {
++		moved[i] = maps.Clone(c)
++	}
++	moved[0]["pyro_modelo_id"] = w.otra
++	w.f.cuentas = moved
++	w.f.mu.Unlock()
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.editor, nil, &out)
++	if len(out.Cuentas) != 0 {
++		t.Fatalf("accounts after the change %+v", out.Cuentas)
++	}
++	if status, _ := w.s.Do(http.MethodGet, "/api/hookline/piezas?cuenta=pamela", w.editor, nil); status != http.StatusNotFound {
++		t.Fatalf("pamela after the change: %d", status)
++	}
++}
++
++func authed(t *testing.T, target, token string) *http.Request {
++	t.Helper()
++	req, err := http.NewRequest(http.MethodGet, target, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	req.Header.Set("Authorization", "Bearer "+token)
++	return req
++}
++
++// What the accounts' models are is read once a minute, not on every
++// request.
++func TestCuentasAreKept(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for range 4 {
++		w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/stats?cuenta=pamela", w.editor, nil, nil)
++	}
++	if n := w.f.count(http.MethodGet, "/api/estado"); n != 1 {
++		t.Fatalf("the state was read %d times", n)
++	}
++	// Many thumbnails, few reads of the pieces.
++	for range 6 {
++		w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/mini?p=para-subir/pamela/a.jpg", w.editor, nil, nil)
++	}
++	if n := w.f.count(http.MethodGet, "/api/piezas"); n != 1 {
++		t.Fatalf("the pieces were read %d times", n)
++	}
++}
++
++// Only the operations on the list go through, each with its own fields.
++func TestOperations(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for _, body := range []map[string]any{
++		{"op": "publicar", "id": "p1"}, {"op": "borrar", "id": "p1"}, {"op": "", "id": "p1"}, {"id": "p1"},
++		{"op": "JUECES", "id": "p1"}, {"op": "caption", "id": "p1"}, {"op": "caption", "id": "p1", "caption": strings.Repeat("a", 2201)},
++		{"op": "programar", "id": "p1"}, {"op": "programar", "id": "p1", "cuando": "mañana"}, {"op": "programar", "id": "p1", "cuando": "2026-11-20 20:00"},
++	} {
++		if status, raw := w.s.Do(http.MethodPost, "/api/hookline/pieza", w.editor, body); status != http.StatusBadRequest {
++			t.Errorf("pieza %v: %d %s", body, status, raw)
++		}
++	}
++	for _, body := range []map[string]any{
++		{"op": "borrar", "cuenta": "pamela", "comentario": "c1"}, {"op": "responder", "cuenta": "pamela", "comentario": "c1"},
++		{"op": "ocultar", "cuenta": "pamela", "comentario": "../x"}, {"op": "ocultar", "cuenta": "pamela"},
++	} {
++		if status, raw := w.s.Do(http.MethodPost, "/api/hookline/comentario", w.editor, body); status != http.StatusBadRequest {
++			t.Errorf("comentario %v: %d %s", body, status, raw)
++		}
++	}
++	if n := w.f.count(http.MethodPost, "/api/pieza") + w.f.count(http.MethodPost, "/api/comentario"); n != 0 {
++		t.Fatalf("an operation off the list reached Hookline %d times", n)
++	}
++
++	// What goes is the operation's fields, nothing the screen added.
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/pieza", w.editor, map[string]any{"op": "programar", "id": "p1", "cuando": "2026-11-20T20:00", "estado": "publicada", "cuenta": "otra"}, nil)
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/pieza", w.editor, map[string]any{"op": "caption", "id": "p1", "caption": "nuevo ✨", "cuando": "2026-11-20T20:00"}, nil)
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/comentario", w.editor, map[string]any{"op": "ocultar", "cuenta": "pamela", "comentario": "c1", "texto": "no va"}, nil)
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/comentario", w.editor, map[string]any{"op": "responder", "cuenta": "pamela", "comentario": "17890", "texto": "gracias!"}, nil)
++	var bodies []map[string]any
++	for _, c := range w.f.seen() {
++		if c.method == http.MethodPost {
++			var b map[string]any
++			json.Unmarshal([]byte(c.body), &b)
++			bodies = append(bodies, b)
++		}
++	}
++	want := []string{
++		`map[cuando:2026-11-20T20:00 id:p1 op:programar]`,
++		`map[caption:nuevo ✨ id:p1 op:caption]`,
++		`map[comentario:c1 cuenta:pamela op:ocultar]`,
++		`map[comentario:17890 cuenta:pamela op:responder texto:gracias!]`,
++	}
++	if len(bodies) != len(want) {
++		t.Fatalf("bodies %v", bodies)
++	}
++	for i := range want {
++		if got := fmt.Sprint(bodies[i]); got != want[i] {
++			t.Errorf("body %d: %s, want %s", i, got, want[i])
++		}
++	}
++
++	// What Hookline refuses reaches the screen as it came.
++	w.f.on("POST /api/pieza", func(w http.ResponseWriter, r *http.Request) {
++		web.RespondError(w, http.StatusBadRequest, "esa hora ya pasó")
++	})
++	status, raw := w.s.Do(http.MethodPost, "/api/hookline/pieza", w.editor, map[string]any{"op": "programar", "id": "p1", "cuando": "2020-01-01T10:00"})
++	if status != http.StatusBadRequest || !strings.Contains(string(raw), "esa hora ya pasó") {
++		t.Fatalf("refused: %d %s", status, raw)
++	}
++}
++
++// Every request says who it is for and goes with Hookline's token; the
++// CRM's token never leaves.
++func TestActorAndToken(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	w.s.Expect(http.StatusOK, http.MethodPost, "/api/hookline/pieza", w.editor, map[string]any{"op": "jueces", "id": "p1"}, nil)
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/cuentas", w.admin, nil, nil)
++	if _, err := w.s.DB.Exec(`UPDATE users SET name = 'Señora Ágata' || chr(10) || 'X-Evil: 1' WHERE id = $1`, w.lectID); err != nil {
++		t.Fatal(err)
++	}
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/stats?cuenta=pamela", w.lect, nil, nil)
++	seen := w.f.seen()
++	if len(seen) == 0 {
++		t.Fatal("nothing reached Hookline")
++	}
++	actors := map[string]bool{}
++	for _, c := range seen {
++		if c.header.Get("Authorization") != "Bearer "+hooklineToken {
++			t.Errorf("%s %s went with %q", c.method, c.path, c.header.Get("Authorization"))
++		}
++		for k, vs := range c.header {
++			for _, v := range vs {
++				for _, tok := range []string{w.editor, w.admin, w.lect} {
++					if strings.Contains(v, tok) {
++						t.Errorf("the CRM's token went in %s", k)
++					}
++				}
++			}
++		}
++		if c.header.Get("X-Evil") != "" {
++			t.Error("a name put a header")
++		}
++		actors[c.header.Get("X-Hookline-Actor")] = true
++	}
++	for _, want := range []string{
++		"reels (pyro:" + strconv.Itoa(w.editorID) + ")",
++		"jefa (pyro:" + strconv.Itoa(w.adminID) + ")",
++		"Senora Agata X-Evil: 1 (pyro:" + strconv.Itoa(w.lectID) + ")",
++	} {
++		if !actors[want] {
++			t.Errorf("no request for %q: %v", want, actors)
++		}
++	}
++}
++
++// A Hookline down answers 502 with its code, says nothing of why, and
++// touches nothing else; one that is gone is not tried again for a while.
++func TestHooklineDown(t *testing.T) {
++	w := newWorld(t)
++	w.connect()
++	for name, answer := range map[string]func(w http.ResponseWriter, r *http.Request){
++		"500": func(w http.ResponseWriter, r *http.Request) {
++			w.WriteHeader(http.StatusInternalServerError)
++			io.WriteString(w, `{"error":"secret detail of the failure"}`)
++		},
++		"html": func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "text/html")
++			io.WriteString(w, `<html>a page of a proxy</html>`)
++		},
++		"not json": func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "application/json")
++			io.WriteString(w, `{"cuentas": [`)
++		},
++		"empty": func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "application/json")
++		},
++		"redirect": func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Location", "https://otro.example.org/")
++			w.WriteHeader(http.StatusFound)
++		},
++	} {
++		w.f.on("GET /api/stats", answer)
++		status, raw := w.s.Do(http.MethodGet, "/api/hookline/stats?cuenta=pamela", w.admin, nil)
++		if status != http.StatusBadGateway || !strings.Contains(string(raw), `"hookline_down"`) || strings.Contains(string(raw), "secret detail") || strings.Contains(string(raw), "html") {
++			t.Errorf("%s: %d %s", name, status, raw)
++		}
++	}
++	w.f.on("GET /api/stats", func(w http.ResponseWriter, r *http.Request) {
++		web.RespondError(w, http.StatusForbidden, "rol")
++	})
++	if status, raw := w.s.Do(http.MethodGet, "/api/hookline/stats?cuenta=pamela", w.admin, nil); status != http.StatusBadGateway || !strings.Contains(string(raw), `"hookline_refused"`) {
++		t.Errorf("refused: %d %s", status, raw)
++	}
++	w.f.on("GET /mini", func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "text/html")
++		io.WriteString(w, `<script>alert(1)</script>`)
++	})
++	if status, raw := w.s.Do(http.MethodGet, "/api/hookline/mini?p=para-subir/pamela/a.jpg", w.admin, nil); status != http.StatusBadGateway {
++		t.Errorf("a thumbnail that is not one: %d %s", status, raw)
++	}
++	w.f.on("GET /mini", func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "image/jpeg")
++		w.Write(make([]byte, 5<<20+1))
++	})
++	if status, raw := w.s.Do(http.MethodGet, "/api/hookline/mini?p=para-subir/pamela/a.jpg", w.admin, nil); status != http.StatusBadGateway {
++		t.Errorf("a thumbnail too big: %d %.100s", status, raw)
++	}
++
++	// Gone: the connection fails, and the next one does not even try.
++	w.f.srv.Close()
++	start := time.Now()
++	for range 3 {
++		status, raw := w.s.Do(http.MethodGet, "/api/hookline/cuentas", w.admin, nil)
++		if status != http.StatusBadGateway || !strings.Contains(string(raw), `"hookline_down"`) {
++			t.Fatalf("gone: %d %s", status, raw)
++		}
++	}
++	if took := time.Since(start); took > 4*time.Second {
++		t.Fatalf("a Hookline that is gone took %v", took)
++	}
++	// Nothing else notices.
++	w.s.Expect(http.StatusOK, http.MethodGet, "/api/hookline/settings", w.admin, nil, nil)
++}
++
++// When the accounts cannot be read, nothing opens for who is not an admin.
++func TestScopeFailsClosed(t *testing.T) {
++	for name, answer := range map[string]func(w http.ResponseWriter, r *http.Request){
++		"no accounts": func(w http.ResponseWriter, r *http.Request) {
++			web.Respond(w, http.StatusOK, map[string]any{"piezas": []any{}})
++		},
++		"accounts that are not a list": func(w http.ResponseWriter, r *http.Request) {
++			web.Respond(w, http.StatusOK, map[string]any{"cuentas": "todas"})
++		},
++		"not json": func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Content-Type", "application/json")
++			io.WriteString(w, `nope`)
++		},
++		"404": func(w http.ResponseWriter, r *http.Request) {
++			web.RespondError(w, http.StatusNotFound, "no")
++		},
++	} {
++		t.Run(name, func(t *testing.T) {
++			w := newWorld(t)
++			w.connect()
++			w.f.on("GET /api/estado", answer)
++			for _, path := range []string{"/api/hookline/cuentas", "/api/hookline/piezas?cuenta=pamela", "/api/hookline/stats?cuenta=pamela", "/api/hookline/mini?p=para-subir/pamela/a.jpg"} {
++				if status, raw := w.s.Do(http.MethodGet, path, w.editor, nil); status != http.StatusBadGateway {
++					t.Errorf("%s: %d %s", path, status, raw)
++				}
++			}
++			if n := w.f.count(http.MethodGet, "/api/stats"); n != 0 {
++				t.Errorf("stats reached Hookline %d times", n)
++			}
++		})
++	}
++}
++
++// =============================================================================
++// Webhooks
++
++// hook sends a webhook to the agency, signed with secret at the time.
++func (w *world) hook(agency, secret string, at time.Time, body []byte) (int, []byte) {
++	w.t.Helper()
++	tiempo := strconv.FormatInt(at.Unix(), 10)
++	req, err := http.NewRequest(http.MethodPost, w.s.URL()+"/api/hookline/webhook/"+agency, strings.NewReader(string(body)))
++	if err != nil {
++		w.t.Fatal(err)
++	}
++	req.Header.Set("Content-Type", "application/json")
++	req.Header.Set("X-Hookline-Evento", "x")
++	req.Header.Set("X-Hookline-Tiempo", tiempo)
++	req.Header.Set("X-Hookline-Firma", hooklinebus.Sign(secret, tiempo, body))
++	res, err := w.s.Client().Do(req)
++	if err != nil {
++		w.t.Fatal(err)
++	}
++	defer res.Body.Close()
++	raw, _ := io.ReadAll(res.Body)
++	return res.StatusCode, raw
++}
++
++// told returns who has a notification of Hookline, and how many.
++func (w *world) told() map[int]int {
++	w.t.Helper()
++	rows, err := w.s.DB.Query(`SELECT user_id FROM notifications WHERE kind = $1`, hooklinebus.NotifKind)
++	if err != nil {
++		w.t.Fatal(err)
++	}
++	defer rows.Close()
++	out := map[int]int{}
++	for rows.Next() {
++		var id int
++		rows.Scan(&id)
++		out[id]++
++	}
++	return out
++}
++
++func event(id int, tipo string, model any) []byte {
++	raw, _ := json.Marshal(map[string]any{
++		"id": id, "tipo": tipo, "creado": "2026-11-20T23:00:05+00:00",
++		"datos": map[string]any{"pieza": "p1", "cuenta": "pamela", "pyro_modelo_id": model, "error": "Instagram dijo que no", "dias": 2.5},
++	})
++	return raw
++}
++
++// A webhook comes in only signed with the agency's secret, recently, and of
++// a size; the events that matter tell the admins and the model's people.
++func TestWebhook(t *testing.T) {
++	w := newWorld(t)
++	now := time.Now()
++
++	// No connection, no secret: nobody gets in.
++	if status, raw := w.hook("1", webhookSecret, now, event(1, "pieza.error", w.maite)); status != http.StatusUnauthorized {
++		t.Fatalf("no connection: %d %s", status, raw)
++	}
++	w.s.Expect(http.StatusOK, http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": w.f.srv.URL, "token": hooklineToken}, nil)
++	if status, raw := w.hook("1", webhookSecret, now, event(1, "pieza.error", w.maite)); status != http.StatusUnauthorized {
++		t.Fatalf("no secret: %d %s", status, raw)
++	}
++	w.s.Expect(http.StatusOK, http.MethodPut, "/api/hookline/settings", w.admin, map[string]string{"url": w.f.srv.URL, "webhookSecret": webhookSecret}, nil)
++
++	for name, try := range map[string]func() (int, []byte){
++		"another secret": func() (int, []byte) {
++			return w.hook("1", "another-secret-of-the-tests-0123", now, event(2, "pieza.error", w.maite))
++		},
++		"old": func() (int, []byte) {
++			return w.hook("1", webhookSecret, now.Add(-6*time.Minute), event(3, "pieza.error", w.maite))
++		},
++		"future": func() (int, []byte) {
++			return w.hook("1", webhookSecret, now.Add(6*time.Minute), event(4, "pieza.error", w.maite))
++		},
++		"another agency": func() (int, []byte) { return w.hook("2", webhookSecret, now, event(5, "pieza.error", w.maite)) },
++		"not an agency":  func() (int, []byte) { return w.hook("x", webhookSecret, now, event(6, "pieza.error", w.maite)) },
++		"a giant agency": func() (int, []byte) {
++			return w.hook("99999999999999999999999", webhookSecret, now, event(6, "pieza.error", w.maite))
++		},
++		"changed in path": func() (int, []byte) {
++			return w.raw(event(7, "pieza.error", w.maite), event(7, "pieza.error", w.otra), now)
++		},
++	} {
++		if status, raw := try(); status != http.StatusUnauthorized {
++			t.Errorf("%s: %d %s", name, status, raw)
++		}
++	}
++	for _, bad := range []map[string]string{
++		{"X-Hookline-Firma": ""}, {"X-Hookline-Firma": "sha256=zz"}, {"X-Hookline-Firma": "md5=00"}, {"X-Hookline-Tiempo": ""}, {"X-Hookline-Tiempo": "ayer"},
++	} {
++		if status, raw := w.rawWith(event(8, "pieza.error", w.maite), now, bad); status != http.StatusUnauthorized {
++			t.Errorf("%v: %d %s", bad, status, raw)
++		}
++	}
++	big := append(event(9, "pieza.error", w.maite), []byte(strings.Repeat(" ", 64<<10))...)
++	if status, raw := w.hook("1", webhookSecret, now, big); status != http.StatusRequestEntityTooLarge {
++		t.Errorf("too big: %d %s", status, raw)
++	}
++	if got := w.told(); len(got) != 0 {
++		t.Fatalf("told %v by webhooks that were not Hookline's", got)
++	}
++
++	// Signed, not JSON: 400.
++	if status, raw := w.hook("1", webhookSecret, now, []byte("nope")); status != http.StatusBadRequest {
++		t.Errorf("not json: %d %s", status, raw)
++	}
++
++	// An event that matters, of Maite's account: the admin and Maite's
++	// people with the permission; not who lacks it, nor another model's.
++	if status, raw := w.hook("1", webhookSecret, now, event(10, "pieza.error", w.maite)); status != http.StatusNoContent {
++		t.Fatalf("pieza.error: %d %s", status, raw)
++	}
++	got := w.told()
++	if got[w.adminID] != 1 || got[w.editorID] != 1 || got[w.lectID] != 1 || got[w.outsideID] != 0 || len(got) != 3 {
++		t.Fatalf("told %v", got)
++	}
++	var title, body string
++	if err := w.s.DB.QueryRow(`SELECT title, body FROM notifications WHERE kind = $1 AND user_id = $2`, hooklinebus.NotifKind, w.editorID).Scan(&title, &body); err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(title, "no se pudo publicar") || !strings.Contains(body, "@pamela") || !strings.Contains(body, "Instagram dijo que no") {
++		t.Fatalf("the note: %q %q", title, body)
++	}
++
++	// The same event again tells nobody again.
++	if status, _ := w.hook("1", webhookSecret, now, event(10, "pieza.error", w.maite)); status != http.StatusNoContent {
++		t.Fatal("again")
++	}
++	if got := w.told(); got[w.adminID] != 1 {
++		t.Fatalf("told twice %v", got)
++	}
++
++	// An account tied to no model: the admins alone.
++	if status, _ := w.hook("1", webhookSecret, now, event(11, "cuenta.token_vencido", nil)); status != http.StatusNoContent {
++		t.Fatal("token_vencido")
++	}
++	if got := w.told(); got[w.adminID] != 2 || got[w.editorID] != 1 {
++		t.Fatalf("told %v", got)
++	}
++	if status, _ := w.hook("1", webhookSecret, now, event(12, "cuenta.token_por_vencer", w.maite)); status != http.StatusNoContent {
++		t.Fatal("token_por_vencer")
++	}
++	if err := w.s.DB.QueryRow(`SELECT body FROM notifications WHERE kind = $1 AND user_id = $2 ORDER BY id DESC LIMIT 1`, hooklinebus.NotifKind, w.editorID).Scan(&body); err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(body, "2.5 días") {
++		t.Fatalf("token_por_vencer: %q", body)
++	}
++	if status, _ := w.hook("1", webhookSecret, now, event(13, "pieza.vencida", w.otra)); status != http.StatusNoContent {
++		t.Fatal("vencida")
++	}
++	if got := w.told(); got[w.adminID] != 4 || got[w.editorID] != 2 {
++		t.Fatalf("told %v", got)
++	}
++
++	// The rest is taken, and tells nobody.
++	before := w.told()
++	for i, tipo := range []string{"pieza.publicada", "pieza.juzgada", "cuenta.conectada", "copia.lista", "otra.cosa", ""} {
++		if status, raw := w.hook("1", webhookSecret, now, event(20+i, tipo, w.maite)); status != http.StatusNoContent {
++			t.Errorf("%s: %d %s", tipo, status, raw)
++		}
++	}
++	if got := w.told(); fmt.Sprint(got) != fmt.Sprint(before) {
++		t.Fatalf("told %v, before %v", got, before)
++	}
++	if got := w.f.seen(); len(got) != 0 {
++		t.Fatalf("a webhook called Hookline: %+v", got)
++	}
++}
++
++// raw sends body signed as if it were signed, another body.
++func (w *world) raw(signedBody, body []byte, at time.Time) (int, []byte) {
++	tiempo := strconv.FormatInt(at.Unix(), 10)
++	return w.rawWith(body, at, map[string]string{"X-Hookline-Firma": hooklinebus.Sign(webhookSecret, tiempo, signedBody)})
++}
++
++// rawWith sends a webhook signed well, with the headers in set changed.
++func (w *world) rawWith(body []byte, at time.Time, set map[string]string) (int, []byte) {
++	w.t.Helper()
++	tiempo := strconv.FormatInt(at.Unix(), 10)
++	req, _ := http.NewRequest(http.MethodPost, w.s.URL()+"/api/hookline/webhook/1", strings.NewReader(string(body)))
++	req.Header.Set("X-Hookline-Tiempo", tiempo)
++	req.Header.Set("X-Hookline-Firma", hooklinebus.Sign(webhookSecret, tiempo, body))
++	for k, v := range set {
++		req.Header.Set(k, v)
++	}
++	res, err := w.s.Client().Do(req)
++	if err != nil {
++		w.t.Fatal(err)
++	}
++	defer res.Body.Close()
++	raw, _ := io.ReadAll(res.Body)
++	return res.StatusCode, raw
++}
+-- 
+2.43.0
+

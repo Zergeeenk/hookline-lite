@@ -1,0 +1,76 @@
+From 334b6402ec577d2f9533c5de9a4dda4afe38c6dd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 02:28:11 +0000
+Subject: [PATCH 1/4] Hookline gets a permission of its own (hookline, view and
+ edit, the admins' preset) and a table for each agency's sealed connection to
+ it, migration 136, so the bridge to the models' Instagram community manager
+ can be turned on per agency without touching the server's env.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ business/domain/userbus/model.go     |  9 ++++++++-
+ business/sdk/migrate/sql/migrate.sql | 24 ++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/business/domain/userbus/model.go b/business/domain/userbus/model.go
+index 379927c..ab828b5 100644
+--- a/business/domain/userbus/model.go
++++ b/business/domain/userbus/model.go
+@@ -50,6 +50,13 @@ const (
+ 	// admins have it, and grant it in Equipo; view reads, edit configures
+ 	// the bot and approves or rejects the receipts.
+ 	SectionTelegramBot = "telegram_bot"
++	// SectionHookline is Hookline, the community manager of the models'
++	// Instagram accounts (its inbox of pieces, the judges, the scheduled
++	// publishing, the comments and the stats), reached through the bridge
++	// at /api/hookline: a permission of its own, that an admin gives by hand
++	// in Equipo; no preset has it but the admin's. View reads, edit runs the
++	// judges, writes captions, schedules, cancels and answers comments.
++	SectionHookline = "hookline"
+ )
+ 
+ // SalaryCurrencies are the currencies a fixed salary is paid in.
+@@ -61,7 +68,7 @@ var Sections = []string{
+ 	SectionDashboard, SectionMessages, SectionModels, SectionAgenda, SectionTasks,
+ 	SectionBoard, SectionNotes, SectionContent, SectionContentAI, SectionSocial, SectionPayments, SectionFans,
+ 	SectionTeam, SectionDevices, SectionCashbook, SectionAccess, SectionStore, SectionTelegramBot, SectionChannels,
+-	SectionLoraxMemory,
++	SectionLoraxMemory, SectionHookline,
+ }
+ 
+ // User is a member of an agency. FixedSalary is paid in SalaryCurrency, one
+diff --git a/business/sdk/migrate/sql/migrate.sql b/business/sdk/migrate/sql/migrate.sql
+index ed09169..bf25ea5 100644
+--- a/business/sdk/migrate/sql/migrate.sql
++++ b/business/sdk/migrate/sql/migrate.sql
+@@ -3698,3 +3698,27 @@ ALTER TABLE vip_bots ADD COLUMN flow JSONB;
+ ALTER TABLE vip_bot_fans
+     ADD COLUMN step TEXT   NOT NULL DEFAULT '',
+     ADD COLUMN tags TEXT[] NOT NULL DEFAULT '{}';
++
++-- Version: 136
++-- Description: Hookline, its permission and the sealed connection to it
++-- Hookline is the community manager of the models' Instagram accounts (its
++-- inbox of pieces, the judges, scheduled publishing, comments, stats): it
++-- stays where it runs and the API reaches it on a closed list of routes with
++-- the token of each agency's connection. Its address, that token and the
++-- secret its webhooks are signed with are sealed together with secretbox
++-- (connection) and neither of them ever comes back: token_hint is the
++-- token's last four characters, what the screen shows. No row is a section
++-- that is off: 503, and nothing else notices.
++CREATE TABLE hookline_settings (
++    agency_id  BIGINT      PRIMARY KEY REFERENCES agencies(id) ON DELETE CASCADE,
++    connection BYTEA       NOT NULL,
++    token_hint TEXT        NOT NULL DEFAULT '',
++    updated_by BIGINT      REFERENCES users(id) ON DELETE SET NULL,
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++-- Hookline: its own permission, that the admins grant in Equipo; every
++-- admin has it.
++INSERT INTO user_permissions (user_id, section, level)
++SELECT id, 'hookline', 'edit' FROM users WHERE role = 'admin'
++ON CONFLICT (user_id, section) DO NOTHING;
+-- 
+2.43.0
+
