@@ -30,6 +30,7 @@ def entorno(tmp_path, monkeypatch):
     db.crear_tablas()
     from hookline import auth, fuentes
     fuentes._indice.cache_clear()
+    fuentes._cache.update(v=None, lista=None)
     auth._fallidos.clear()
     yield tmp_path
     db.reiniciar_motor()

@@ -183,6 +183,18 @@ textarea.in { resize: vertical; min-height: 110px; line-height: 1.5; }
 /* ---------- bandeja ---------- */
 .drop { border: 2px dashed var(--bd2); border-radius: var(--r); padding: 22px; display: flex; align-items: center; gap: 16px; background: var(--sf); transition: border-color .15s, background .15s; }
 .drop.sobre { border-color: var(--ac); background: var(--acs); }
+.fu-grilla { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-top: 10px; }
+.card.fu { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.card.fu.fu-pre { border-color: var(--ac); box-shadow: 0 0 0 3px var(--acs); }
+.fu-muestra { min-height: 110px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 14px; border-radius: 12px; line-height: 1.15; overflow-wrap: anywhere; color: #fff; background: linear-gradient(135deg, #3a2430, #1c1218); text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+.fu-pie { display: flex; align-items: center; gap: 10px; }
+.fu-pie small { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fuTam { accent-color: var(--ac); }
+.fu-ctrl { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.fu-elegir { display: flex; gap: 6px; flex-wrap: wrap; }
+.fu-chip { border: 1px solid var(--bd2); background: var(--sf); color: var(--tx); border-radius: 10px; padding: 6px 10px; font-size: 15px; cursor: pointer; }
+.fu-chip.on { border-color: var(--ac); background: var(--acs); color: var(--ac); }
+@media (max-width: 640px) { .fu-ctrl .campo { width: 100% !important; } }
 .drop .ic { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; background: var(--acs); color: var(--ac); flex: none; }
 .drop .tt { display: block; font-size: 15px; font-weight: 700; }
 .drop .acc { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -666,6 +678,7 @@ table.tabla { width: 100%; border-collapse: collapse; }
   <div class="env"><textarea id="texto" placeholder="Escribile a Claude…" aria-label="Mensaje para Claude"></textarea><button class="btn prim" id="mandar"></button></div>
 </div>
 <input type="file" id="matArchivos" multiple hidden>
+<input type="file" id="fuArchivos" multiple accept=".ttf,.otf,.zip,font/ttf,font/otf,application/zip" hidden>
 <input type="file" id="cpArchivoEj" accept="video/mp4,video/quicktime,.mov" hidden>
 <input type="file" id="cpArchivoAudio" accept="audio/*,video/mp4,.m4a,.mp3,.wav" hidden>
 <input type="file" id="cpArchivoMod" accept="image/*,video/mp4,video/quicktime,.heic,.mov" hidden>
@@ -719,6 +732,7 @@ const IP = {
   loader: '<path d="M21 12a9 9 0 1 1-6.22-8.56"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
   trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  type: '<path d="M4 7V5h16v2M9 19h6M12 5v14"/>',
   pencil: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
   folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
@@ -767,17 +781,17 @@ let semana = 0, calTodas = false, CAL = { medios: [] }, calTs = 0, calClave = ""
 let ST = null, stTs = 0, stClave = "";
 let CM = { items: {} }, cmTs = 0, cmClave = "", filtroC = "nuevo";
 let TD = { items: [] }, tdTs = 0, tdClave = "";
-let AJ = null, PY = null;
+let AJ = null, PY = null, FU = null, fuTexto = "Cuando me dice «ya llego» 😅", fuTam = 44;
 let inFiltro = "libres", inCat = "", inCargando = false;
 let CP = null, cpTs = 0, cpSel = "", cpDraft = {}, cpZonas = true, cpCaras = {}, cpAutoFirma = {}, cpAutoT = 0, cpAjustar = false;
 let MT = null, mtTs = 0, mtClave = "", mtSec = "modelo", mtFiltro = "", mtMas = false;
 let abierta = null, prevIdx = 0;
 
 const PAGINAS = [
-  ["inicio", "Inicio", "home"], ["bandeja", "Bandeja", "inbox"], ["material", "Material", "folder"], ["inspiracion", "Memes / Inspiración", "sparkles"], ["copiar", "Copiar video", "copy"], ["calendario", "Calendario", "calendar"],
+  ["inicio", "Inicio", "home"], ["bandeja", "Bandeja", "inbox"], ["material", "Material", "folder"], ["inspiracion", "Memes / Inspiración", "sparkles"], ["copiar", "Copiar video", "copy"], ["fuentes", "Fuentes", "type"], ["calendario", "Calendario", "calendar"],
   ["tendencias", "Tendencias", "trending-up"], ["estadisticas", "Estadísticas", "bar-chart"],
   ["comentarios", "Comentarios", "message"], ["cuentas", "Cuentas", "users"], ["ajustes", "Ajustes", "settings"]];
-const SUBT = { inicio: "Lo de hoy, lo que falta aprobar y los avisos", bandeja: "Lo que subiste, listo para los jueces y para programar", material: "Fotos de la modelo, ejemplos de TikTok y música para inspirarte", inspiracion: "Todos los videos de ejemplo guardados: elegí cuáles copiar", copiar: "Pegá un video de ejemplo, poné a tu modelo y sale el video listo", calendario: "Lo programado y lo publicado, semana por semana", tendencias: "Qué está funcionando en tu nicho esta semana", estadisticas: "Seguidores, alcance y mejores horarios", comentarios: "Respuestas sugeridas: vos aprobás y se mandan", cuentas: "Tus cuentas de Instagram conectadas", ajustes: "App de Meta, herramientas y apariencia" };
+const SUBT = { inicio: "Lo de hoy, lo que falta aprobar y los avisos", bandeja: "Lo que subiste, listo para los jueces y para programar", material: "Fotos de la modelo, ejemplos de TikTok y música para inspirarte", inspiracion: "Todos los videos de ejemplo guardados: elegí cuáles copiar", copiar: "Pegá un video de ejemplo, poné a tu modelo y sale el video listo", fuentes: "Las letras de los textos de los reels: mirá cómo quedan, subí nuevas y sacá las que no sirven", calendario: "Lo programado y lo publicado, semana por semana", tendencias: "Qué está funcionando en tu nicho esta semana", estadisticas: "Seguidores, alcance y mejores horarios", comentarios: "Respuestas sugeridas: vos aprobás y se mandan", cuentas: "Tus cuentas de Instagram conectadas", ajustes: "App de Meta, herramientas y apariencia" };
 const TIPO = { historia: ["Historia", "circle"], reel: ["Reel", "video"], carrusel: ["Carrusel", "layers"], foto: ["Foto", "image"] };
 const EST = { nueva: ["Nueva", ""], jueces: ["Con los jueces", "info anim", "loader"], juzgada: ["Para aprobar", "ac"], programada: ["Programada", "info", "clock"], planificada: ["Planificada (sin conectar)", "ac", "calendar"], subiendo: ["Subiendo", "info anim", "loader"], publicada: ["Publicada", "ok", "check"], vencida: ["Vencida", "warn", "alert"], error: ["Error", "err", "alert"] };
 
@@ -997,7 +1011,7 @@ function render(forzar) {
   const [, n] = PAGINAS.find(p => p[0] === pagina) || PAGINAS[0];
   $("#titulo").textContent = n; $("#subtitulo").textContent = SUBT[pagina] || "";
   document.title = `${n} · Hookline`;
-  const f = { inicio: pInicio, bandeja: pBandeja, material: pMaterial, inspiracion: pInspiracion, copiar: pCopiar, calendario: pCalendario, tendencias: pTendencias, estadisticas: pEstadisticas, comentarios: pComentarios, cuentas: pCuentas, ajustes: pAjustes }[pagina] || pInicio;
+  const f = { inicio: pInicio, bandeja: pBandeja, material: pMaterial, inspiracion: pInspiracion, copiar: pCopiar, fuentes: pFuentes, calendario: pCalendario, tendencias: pTendencias, estadisticas: pEstadisticas, comentarios: pComentarios, cuentas: pCuentas, ajustes: pAjustes }[pagina] || pInicio;
   const h = f();
   if (h !== undefined) $("#contenido").innerHTML = h;
   if (pagina === "copiar") requestAnimationFrame(() => { cpPintarPrev(); cpAuto(true); });
@@ -1198,6 +1212,14 @@ async function bajarTikTok() {
   try { await api("/api/material", { op: "bajar", cuenta: activa().id, link }); inp.value = ""; inp.blur(); toast("Bajando… tarda unos segundos"); cargarMaterial(true); } catch (e) { fallo(e); }
 }
 $("#matArchivos").addEventListener("change", e => { subirMaterial(e.target.files); e.target.value = ""; });
+$("#fuArchivos").addEventListener("change", e => { subirFuentes(e.target.files); e.target.value = ""; });
+document.addEventListener("dragover", e => { if (pagina !== "fuentes" || !e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return; e.preventDefault(); const d = $("#fuDrop"); d && d.classList.add("sobre"); });
+document.addEventListener("dragleave", e => { if (pagina === "fuentes" && e.target.id === "fuDrop") e.target.classList.remove("sobre"); });
+document.addEventListener("drop", e => { if (pagina !== "fuentes" || !e.dataTransfer || !e.dataTransfer.files.length) return; e.preventDefault(); const d = $("#fuDrop"); d && d.classList.remove("sobre"); subirFuentes(e.dataTransfer.files); });
+document.addEventListener("input", e => {
+  if (e.target.id === "fuTexto") { fuTexto = e.target.value || " "; $$(".fu-muestra").forEach(m => m.textContent = fuTexto); }
+  if (e.target.id === "fuTam") { fuTam = +e.target.value; $$(".fu-muestra").forEach(m => m.style.fontSize = fuTam + "px"); }
+});
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "mtLink") bajarTikTok(); });
 
 // ----- Reproductor chiquito con botones propios (play/pausa, sonido, barra) -----
@@ -1256,7 +1278,7 @@ function cargarCopias(forzar) {
   if (!forzar && CP && Date.now() - cpTs < (ocupada ? 2500 : 20000)) return;
   cpTs = Date.now();
   api("/api/copias").then(d => {
-    const antes = JSON.stringify(CP); CP = d;
+    const antes = JSON.stringify(CP); CP = d; cargarCaras(d.opciones && d.opciones.fuentes);
     if (!cpSel || !d.items.some(c => c.id === cpSel)) cpSel = d.items[0] ? d.items[0].id : "";
     const ae = document.activeElement, editando = ae && ae.closest && ae.closest("#contenido") && /INPUT|TEXTAREA|SELECT/.test(ae.tagName);
     const sonando = [...$$("#contenido .rp video")].some(v => !v.paused && !v.muted);
@@ -1418,8 +1440,9 @@ function pCopiar() {
       <label class="cp-campo"><span>Que la música empiece en el segundo</span><input class="in" id="cpAudioDesde" type="number" min="0" step="0.5" value="${dr.audio_desde || 0}"></label>` : `<small class="muted">Elegí la música de tu Material o subí un audio.</small>`}
       <div class="fila"><button class="btn sm" id="cpSubirAudio">${icn("upload")}Subir audio</button>${ac ? `<button class="btn sm" id="cpElegirAudio">${icn("music")}Elegir de Música</button>` : ""}</div></div>` : "";
   const controles = `<div class="card cp-paso"><h3>Texto y audio</h3>
-    <small class="muted" style="margin-top:-4px">Letra blanca, la básica de Instagram, sin sombra.</small>
+    <small class="muted" style="margin-top:-4px">Letra blanca, sin sombra. La letra la elegís abajo (o en Fuentes).</small>
     <label class="cp-campo"><span>Texto en pantalla</span><textarea class="in" id="cpTexto" rows="2" style="min-height:60px">${esc(dr.texto || "")}</textarea></label>
+    <div class="cp-campo"><span>Letra <a href="#fuentes" data-ir="fuentes" style="font-weight:500">(ver todas)</a></span><div class="fu-elegir">${Object.entries(o.fuentes || {}).map(([k, f]) => `<button type="button" class="fu-chip ${dr.fuente === k ? "on" : ""}" data-cpset="fuente" data-cpval="${esc(k)}" style="font-family:'${esc(f.familia)}'">${esc(f.nombre)}</button>`).join("")}</div></div>
     <div class="cp-campo"><span>Tamaño <b id="cpTamLbl" style="color:var(--tx)"></b></span><input type="range" id="cpTam" min="2" max="9" step="0.1" value="${(dr.texto_tam * 100).toFixed(1)}"></div>
     <label class="cp-campo"><span>Segundos de tu modelo (después sigue el ejemplo)</span><input class="in" id="cpCorte" type="number" min="0.3" step="0.1" max="${c.duracion || 60}" value="${dr.corte || ""}"><small class="muted">El ejemplo dura ${String(c.duracion || 0).replace(".", ",")} s.</small></label>
     <div class="cp-campo"><span>Audio</span>${seg("audio", [["ejemplo", "Del ejemplo", "copy"], ["modelo", "De mi video", "video"], ["musica", "Otra música", "music"], ["ninguno", "Sin sonido", "volume-x"]])}</div>
@@ -1859,6 +1882,56 @@ function cargarCookies() {
   f.addEventListener("keydown", ev => { if (ev.key === "Escape") f.remove(); });
 }
 
+// ----- Fuentes -----
+const carasCargadas = new Set();
+function cargarCaras(fs) {
+  if (!fs) return;
+  const nuevas = (Array.isArray(fs) ? fs.map(f => [f.clave, f.url]) : Object.entries(fs).map(([k, f]) => [k, f.url])).filter(([k, u]) => u && !carasCargadas.has(k));
+  if (!nuevas.length) return;
+  const st = document.createElement("style");
+  st.textContent = nuevas.map(([k, u]) => { carasCargadas.add(k); return `@font-face{font-family:"hl-${k}";src:url("${u}");font-display:swap}`; }).join("\n");
+  document.head.appendChild(st);
+}
+function cargarFuentes(forzar) {
+  if (FU && !forzar) return;
+  api("/api/fuentes").then(d => { FU = d; cargarCaras(d.fuentes); if (pagina === "fuentes") render(true); }).catch(fallo);
+}
+const kb = n => n > 1048576 ? (n / 1048576).toFixed(1).replace(".", ",") + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+function pFuentes() {
+  if (!FU) { cargarFuentes(); return `<div class="card"><div class="vacio"><div class="ic">${icn("loader")}</div><b>Cargando…</b></div></div>`; }
+  const puede = ["admin", "editor"].includes((S.usuario || {}).rol), vis = FU.fuentes.filter(f => !f.oculta), ocu = FU.fuentes.filter(f => f.oculta);
+  const tarjeta = f => `<div class="card fu ${f.predeterminada ? "fu-pre" : ""}" data-fu="${esc(f.clave)}">
+      <div class="fu-muestra" style="font-family:'hl-${esc(f.clave)}';font-size:${fuTam}px">${esc(fuTexto)}</div>
+      <div class="fu-pie"><div style="min-width:0;flex:1"><b>${esc(f.nombre)}</b><small class="muted">${f.origen === "sistema" ? "Del sistema" : "Subida" + (f.por ? " por " + esc(f.por) : "")}${f.familia && f.familia !== f.nombre ? " · " + esc(f.familia) : ""} · ${kb(f.bytes)}</small></div>
+        ${f.predeterminada ? `<span class="chip ok">${icn("check", "sm")}Predeterminada</span>` : ""}</div>
+      ${puede ? `<div class="fila" style="flex-wrap:wrap">${f.oculta ? `<button class="btn sm" data-fumostrar="${esc(f.clave)}">${icn("eye", "sm")}Mostrar</button>`
+        : `${f.predeterminada ? "" : `<button class="btn sm" data-fupre="${esc(f.clave)}">${icn("check", "sm")}Usar por defecto</button>`}${f.origen === "subida" ? `<button class="btn sm fant" data-furenombrar="${esc(f.clave)}">${icn("pencil", "sm")}Nombre</button><button class="btn sm fant peligro" data-fuborrar="${esc(f.clave)}">${icn("trash", "sm")}Borrar</button>` : `<button class="btn sm fant" data-fuocultar="${esc(f.clave)}">${icn("eye-off", "sm")}Ocultar</button>`}`}</div>` : ""}
+    </div>`;
+  return `${puede ? `<div class="drop" id="fuDrop" style="margin-top:6px"><div class="ic">${icn("upload")}</div><div style="flex:1"><b>Subí fuentes nuevas</b><div class="muted" style="font-size:13px">Arrastrá acá archivos <b>.ttf</b> u <b>.otf</b>, o el <b>.zip</b> que te baja Google Fonts (dafont, fonts.google.com…). Quedan para todas las cuentas.</div></div><button class="btn prim" data-fusubir>${icn("upload")}Elegir archivos</button></div>` : ""}
+    <div class="card pad" style="margin-top:14px"><div class="fu-ctrl">
+      <label class="campo" style="flex:1;margin:0"><span>Probá con tu texto</span><input class="in" id="fuTexto" value="${esc(fuTexto)}" maxlength="120"></label>
+      <div class="campo" style="width:200px;margin:0"><span>Tamaño</span><input type="range" id="fuTam" min="20" max="90" value="${fuTam}"></div></div>
+      <div class="fila" style="margin-top:12px;align-items:flex-start"><span style="flex:1"><span>Que Claude elija la letra de cada reel</span><small class="muted" style="display:block;font-size:12.5px;margin-top:2px">${FU.claude ? "Prendido: Claude mira la letra del meme de ejemplo y usa la más parecida de estas. Si no está segura, usa la predeterminada." : "Apagado: los reels nuevos salen con la predeterminada (la podés cambiar a mano en Copiar video → Ajustar a mano)."}</small></span>
+      <div class="seg" role="group" aria-label="Claude elige la letra"><button class="${FU.claude ? "" : "on"}" data-fuclaude="0" ${puede ? "" : "disabled"}>No</button><button class="${FU.claude ? "on" : ""}" data-fuclaude="1" ${puede ? "" : "disabled"}>Sí</button></div></div></div>
+    <div class="sec" style="margin-top:18px"><b>${vis.length} ${vis.length === 1 ? "fuente" : "fuentes"} en uso</b><small class="muted">La predeterminada es la que usan los reels nuevos</small></div>
+    <div class="fu-grilla">${vis.map(tarjeta).join("")}</div>
+    ${ocu.length ? `<div class="sec" style="margin-top:22px"><b>Ocultas (${ocu.length})</b><small class="muted">Las del sistema no se borran: se ocultan y dejan de ofrecerse</small></div><div class="fu-grilla">${ocu.map(tarjeta).join("")}</div>` : ""}`;
+}
+async function subirFuentes(lista) {
+  const fs = [...lista]; if (!fs.length) return;
+  let nuevas = 0, rep = 0;
+  for (const [i, f] of fs.entries()) {
+    toast(`Subiendo ${i + 1} de ${fs.length}: ${f.name}`);
+    try { const r = await subirBytes(`/api/fuentes_subir?nombre=${encodeURIComponent(f.name)}`, f); nuevas += r.nuevas.length; rep += r.repetidas; if (r.errores.length) toast(r.errores[0], true); }
+    catch (e) { fallo(e); }
+  }
+  if (nuevas || rep) toast(nuevas ? `${nuevas} ${nuevas === 1 ? "fuente nueva lista" : "fuentes nuevas listas"}${rep ? ` (${rep} ya estaban)` : ""}` : "Esas fuentes ya estaban");
+  CP = null; cargarFuentes(true);
+}
+async function fuAccion(cuerpo, ok) {
+  try { FU = await api("/api/fuentes", cuerpo); cargarCaras(FU.fuentes); CP = null; if (ok) toast(ok); render(true); } catch (e) { fallo(e); }
+}
+
 // ----- Ajustes -----
 function pAjustes() {
   if (!AJ) { api("/api/ajustes").then(d => { AJ = d; if (pagina === "ajustes") render(true); }).catch(fallo); return `<div class="card"><div class="vacio"><div class="ic">${icn("loader")}</div><b>Cargando…</b></div></div>`; }
@@ -2084,6 +2157,13 @@ document.addEventListener("click", async e => {
     try { AJ = await api("/api/ajustes", { borrar_clave_claude: true }); toast("Clave quitada"); refrescar(true); render(true); } catch (er) { fallo(er); }
     return;
   }
+  if (d.fusubir !== undefined) return $("#fuArchivos").click();
+  if (d.fupre) return fuAccion({ op: "predeterminada", clave: d.fupre }, "Listo: los reels nuevos salen con esta letra");
+  if (d.fumostrar) return fuAccion({ op: "mostrar", clave: d.fumostrar }, "La fuente vuelve a estar en uso");
+  if (d.fuclaude !== undefined) return fuAccion({ op: "claude", valor: d.fuclaude === "1" });
+  if (d.fuocultar) { if (!(await confirmar({ titulo: "¿Ocultar esta fuente?", texto: "Es del sistema, así que no se borra: deja de ofrecerse. La podés volver a mostrar cuando quieras.", ok: "Ocultar" }))) return; return fuAccion({ op: "borrar", clave: d.fuocultar }, "Fuente oculta"); }
+  if (d.fuborrar) { if (!(await confirmar({ titulo: "¿Borrar esta fuente?", peligro: true, texto: "Se borra del servidor. Los reels que ya se armaron con ella no cambian; los que se rehagan van a usar la predeterminada.", ok: "Borrar" }))) return; return fuAccion({ op: "borrar", clave: d.fuborrar }, "Fuente borrada"); }
+  if (d.furenombrar) { const f = FU.fuentes.find(x => x.clave === d.furenombrar); const n = await dialogo({ tipo: "pedir", titulo: "Nombre de la fuente", icono: "type", ok: "Guardar", valor: f ? f.nombre : "" }); if (!n) return; return fuAccion({ op: "renombrar", clave: d.furenombrar, nombre: n }, "Nombre cambiado"); }
   if (t.id === "pyGuardar") {
     t.disabled = true;
     try { const r = await api("/api/pyro", { op: "guardar", url: $("#pyUrl").value, clave: $("#pyClave").value }); PY = r; toast(`Pyro conectado: ${r.n_modelos} modelos. Sincronizando…`); render(true); setTimeout(() => { PY = null; if (pagina === "ajustes") render(true); }, 8000); } catch (er) { fallo(er); t.disabled = false; }

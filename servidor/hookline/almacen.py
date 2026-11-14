@@ -27,6 +27,7 @@ SECCIONES = {
     "resultados": "resultados",
     "candidatos": "trabajo/candidatos",
     "navegador": "navegador",
+    "fuentes": "fuentes",         # fuentes/<clave>.ttf|otf (las subidas en la sección Fuentes)
 }
 
 

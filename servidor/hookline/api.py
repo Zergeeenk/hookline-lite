@@ -525,6 +525,60 @@ def publico(rel: str, v: str = "", f: str = ""):
     return FileResponse(p, media_type=tipo, headers={"Cache-Control": "no-store"})
 
 
+# --- Fuentes (sección Fuentes) -------------------------------------------------------------------------------------------------
+def _fuentes_estado() -> dict:
+    from . import fuentes
+    return {"fuentes": fuentes.lista(), "claude": fuentes.claude_elige(), "predeterminada": fuentes.predeterminada()}
+
+
+@app.get("/api/fuentes")
+def fuentes_get(q: Quien = requerir()):
+    return _fuentes_estado()
+
+
+@app.get("/api/fuente")
+def fuente_archivo(k: str, q: Quien = requerir()):
+    """El archivo de una fuente, para que el panel la muestre tal cual queda en el video."""
+    from . import fuentes
+    if not any(f["clave"] == k for f in fuentes.lista()):
+        raise HTTPException(404, "no existe")
+    p = fuentes.ruta(k)
+    if not p:
+        raise HTTPException(404, "no existe")
+    return FileResponse(p, media_type="font/otf" if p.suffix.lower() == ".otf" else "font/ttf",
+                        headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
+
+
+@app.post("/api/fuentes_subir")
+def fuentes_subir(nombre: str = "fuente.ttf", datos: bytes = Depends(_cuerpo), q: Quien = requerir("editor")):
+    from . import fuentes
+    if len(datos) > fuentes.MAX_ZIP_TOTAL:
+        raise HTTPException(400, "El archivo pesa más de 80 MB.")
+    r = fuentes.subir(nombre, datos, por=q.nombre or q.email)
+    if r["nuevas"]:
+        comun.actividad("fuentes", f"{len(r['nuevas'])} fuentes nuevas: " + ", ".join(f["nombre"] for f in r["nuevas"][:4]))
+    return {"ok": True, **r}
+
+
+@app.post("/api/fuentes")
+def fuentes_post(d: dict = Depends(_json), q: Quien = requerir("editor")):
+    from . import fuentes
+    op, k = d.get("op"), str(d.get("clave") or "")
+    if op == "borrar":
+        fuentes.borrar(k)
+    elif op == "mostrar":
+        fuentes.mostrar(k)
+    elif op == "predeterminada":
+        fuentes.elegir_predeterminada(k)
+    elif op == "renombrar":
+        fuentes.renombrar(k, str(d.get("nombre") or ""))
+    elif op == "claude":
+        fuentes.poner_claude(bool(d.get("valor")))
+    else:
+        raise HTTPException(400, "op")
+    return _fuentes_estado()
+
+
 # --- Pyro (Ajustes → Pyro) ------------------------------------------------------------------------------------------------------------
 @app.get("/api/pyro")
 def pyro_estado(q: Quien = requerir()):

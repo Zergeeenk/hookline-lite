@@ -118,6 +118,7 @@ class Lectura(_Base):
     noti: Noti | None = None
     textos: list[TextoSuelto] = Field(default_factory=list)
     recorte_remate: Recuadro | None = None
+    fuente: str | None = Field(default=None, description="clave de la fuente del muestrario más parecida a la del ejemplo")
 
 
 # --- juez del reel armado ----------------------------------------------------------------------------------------------------
