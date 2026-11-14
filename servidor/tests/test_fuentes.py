@@ -168,3 +168,75 @@ def test_claude_elige_la_letra_solo_si_esta_prendido(cliente_api, monkeypatch):
     assert "muestrario" in texto and "maquina" in texto
     assert "muestrario" not in prompts.lectura({"duracion": 5})
     assert "fuente" in esquemas.Lectura.model_json_schema()["properties"]
+
+
+# --- a romper ----------------------------------------------------------------------------------------------------------
+def test_subidas_y_borrados_a_la_vez_no_pierden_nada(cliente_api):
+    """Varias personas subiendo y borrando a la vez: ninguna fuente se pierde ni queda un archivo huérfano."""
+    import threading
+    from hookline import almacen, fuentes
+    datos = [TTF.read_bytes(), TTF2.read_bytes()]
+    # 8 fuentes distintas (mismo archivo con un byte de relleno distinto al final: otra huella, sigue siendo válida)
+    variantes = [datos[i % 2] + bytes([i]) * 4 for i in range(8)]
+    errores = []
+
+    def subir(b):
+        try:
+            fuentes.subir("x.ttf", b, "t")
+        except Exception as ex:
+            errores.append(ex)
+    hs = [threading.Thread(target=subir, args=(b,)) for b in variantes]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    assert not errores
+    subidas = [f for f in fuentes.lista() if f["origen"] == "subida"]
+    assert len(subidas) == 8
+    archivos = {p.stem for p in almacen.dir_de("fuentes").glob("f_*")}
+    assert archivos == {f["clave"] for f in subidas}
+    hs = [threading.Thread(target=fuentes.borrar, args=(f["clave"],)) for f in subidas[:5]]
+    [h.start() for h in hs]
+    [h.join() for h in hs]
+    quedan = [f for f in fuentes.lista() if f["origen"] == "subida"]
+    assert len(quedan) == 3
+    assert {p.stem for p in almacen.dir_de("fuentes").glob("f_*")} == {f["clave"] for f in quedan}
+
+
+def test_muestrario_con_muchas_fuentes_y_tras_cambios(cliente_api):
+    from hookline import fuentes
+    for i in range(12):
+        fuentes.subir("x.ttf", TTF2.read_bytes() + bytes([i]) * 3, "t")
+    img, vis = fuentes.muestrario()
+    from PIL import Image
+    with Image.open(img) as im:
+        assert im.height > 92 * len(vis)
+    fuentes.borrar(vis[-1]["clave"])
+    img2, _ = fuentes.muestrario()
+    assert img2 != img and not img.exists()                     # se regenera y el viejo no queda
+
+
+def test_fuzz_operaciones_de_fuentes_nunca_500(cliente_api):
+    from hypothesis import HealthCheck, given, settings, strategies as st
+    raro = st.one_of(st.none(), st.booleans(), st.integers(), st.text(max_size=300), st.lists(st.text(max_size=5), max_size=3),
+                     st.dictionaries(st.text(max_size=5), st.text(max_size=5), max_size=3))
+
+    @settings(max_examples=150, deadline=None, suppress_health_check=list(HealthCheck))
+    @given(op=st.one_of(st.sampled_from(["borrar", "mostrar", "predeterminada", "renombrar", "claude", "x"]), raro),
+           clave=st.one_of(st.sampled_from(["clasica", "maquina", "f_0000000000", "../x", ""]), raro),
+           nombre=raro, valor=raro)
+    def correr(op, clave, nombre, valor):
+        r = cliente_api.post("/api/fuentes", json={"op": op, "clave": clave, "nombre": nombre, "valor": valor})
+        assert r.status_code in (200, 400, 422), r.text
+        assert any(not f["oculta"] for f in cliente_api.get("/api/fuentes").json()["fuentes"])   # siempre queda una
+    correr()
+
+
+def test_fuzz_nombres_y_bytes_al_subir_nunca_500(cliente_api):
+    from hypothesis import HealthCheck, given, settings, strategies as st
+
+    @settings(max_examples=120, deadline=None, suppress_health_check=list(HealthCheck))
+    @given(nombre=st.text(max_size=200), datos=st.binary(max_size=3000),
+           cabeza=st.sampled_from([b"", b"\x00\x01\x00\x00", b"OTTO", b"true", b"PK\x03\x04", b"ttcf"]))
+    def correr(nombre, datos, cabeza):
+        r = cliente_api.post("/api/fuentes_subir", params={"nombre": nombre}, content=cabeza + datos)
+        assert r.status_code in (200, 400), r.text
+    correr()

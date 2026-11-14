@@ -244,6 +244,21 @@ def _archivos_de(nombre: str, datos: bytes) -> list[tuple[str, bytes]]:
     return [(nombre, datos)]
 
 
+def _con_candado(f):
+    """Los cambios leen y reescriben la lista de fuentes: con dos a la vez (o API y worker) se perdería una."""
+    import functools
+
+    @functools.wraps(f)
+    def envuelta(*a, **k):
+        from .comun import candado
+        with candado("fuentes"):
+            _cache["v"] = None
+            _cache["lista"] = None
+            return f(*a, **k)
+    return envuelta
+
+
+@_con_candado
 def subir(nombre: str, datos: bytes, por: str = "") -> dict:
     """Devuelve {"nuevas": [...], "repetidas": n, "errores": [...]}."""
     from .comun import iso_local
@@ -296,6 +311,7 @@ def _queda_otra(clave: str) -> None:
         raise ValueError("Tiene que quedar al menos una fuente: subí otra antes de sacar esta.")
 
 
+@_con_candado
 def borrar(clave: str) -> None:
     """Las subidas se borran; las del sistema se ocultan."""
     x = _existe(str(clave))
@@ -316,11 +332,13 @@ def borrar(clave: str) -> None:
         _guardar("fuente_predeterminada", "")
 
 
+@_con_candado
 def mostrar(clave: str) -> None:
     _existe(str(clave))
     _guardar("fuentes_ocultas", [k for k in _ajustes()["ocultas"] if k != clave])
 
 
+@_con_candado
 def elegir_predeterminada(clave: str) -> None:
     x = _existe(str(clave))
     if x["oculta"]:
@@ -328,6 +346,7 @@ def elegir_predeterminada(clave: str) -> None:
     _guardar("fuente_predeterminada", x["clave"])
 
 
+@_con_candado
 def renombrar(clave: str, nombre: str) -> None:
     x = _existe(str(clave))
     if x["origen"] != "subida":
