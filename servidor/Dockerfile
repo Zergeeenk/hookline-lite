@@ -23,14 +23,18 @@ ARG FUENTES_EXTRA="fonts-roboto fonts-open-sans fonts-lato fonts-croscore fonts-
     fonts-sil-charis fonts-sil-andika fonts-montserrat fonts-oswald fonts-anton fonts-bebas-neue fonts-pacifico \
     fonts-dancing-script fonts-nunito fonts-raleway fonts-ubuntu fonts-adf-accanthis fonts-adf-gillius \
     fonts-adf-baskervald fonts-adf-berenis fonts-adf-tribun fonts-adf-verana fonts-adf-universalis"
-RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        $(for p in $FUENTES_EXTRA; do apt-cache show "$p" >/dev/null 2>&1 && echo "$p"; done) \
-    && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
-    && (apt-get install -y --no-install-recommends ttf-mscorefonts-installer || echo "Sin las fuentes de Microsoft") \
-    && fc-cache -f >/dev/null 2>&1 || true \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -e; \
+    sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources; \
+    apt-get update; \
+    PAQUETES=""; \
+    for p in $FUENTES_EXTRA; do \
+        if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [^(]'; then PAQUETES="$PAQUETES $p"; \
+        else echo "No está en esta versión de Debian: $p"; fi; \
+    done; \
+    apt-get install -y --no-install-recommends $PAQUETES; \
+    echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections; \
+    apt-get install -y --no-install-recommends ttf-mscorefonts-installer || echo "Sin las fuentes de Microsoft"; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pyproject.toml ./
