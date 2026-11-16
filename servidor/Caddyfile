@@ -1,0 +1,15 @@
+# HTTPS automático (Let's Encrypt) delante de Hookline. Lo levanta `docker compose --profile https up -d`.
+# HOOKLINE_DOMINIO va en .env: un dominio propio (hookline.tuempresa.com, con su registro A apuntando al droplet)
+# o, sin comprar nada, el de sslip.io con la IP del droplet con guiones: 146-190-215-178.sslip.io
+{$HOOKLINE_DOMINIO} {
+	encode zstd gzip
+	reverse_proxy api:8000 {
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}
+
+# Si alguien entra por http://, Caddy lo manda solo a https://
