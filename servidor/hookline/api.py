@@ -636,7 +636,8 @@ def pyro_post(d: dict = Depends(_json), q: Quien = requerir()):
     elif op == "atar":
         svc_pyro.atar(_cuenta(str(d.get("cuenta") or "")), d.get("modelo_id"))
     elif op == "crear_cuenta":
-        return {"ok": True, "id": svc_pyro.crear_cuenta(str(d.get("usuario") or ""), d.get("modelo_id"))}
+        cid = svc_pyro.crear_cuenta(str(d.get("usuario") or ""), d.get("modelo_id"))
+        return {"ok": True, "id": cid, **svc_pyro.estado()}
     else:
         raise HTTPException(400, "op")
     return {"ok": True, **svc_pyro.estado()}
