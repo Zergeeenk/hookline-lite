@@ -283,3 +283,19 @@ def test_crear_usuario_recorta_el_nombre(cliente_api):
     assert r.status_code == 200
     u = next(u for u in cliente_api.get("/api/usuarios").json()["usuarios"] if u["email"] == "larga@x.com")
     assert len(u["nombre"]) == 120 and "\x07" not in u["nombre"]
+
+
+def test_callback_de_instagram_explica_cada_caso(cliente_api):
+    """Lo que vio la evaluadora: volver sin código, o con un error de Meta. Siempre un mensaje claro y escapado."""
+    from fastapi.testclient import TestClient
+    from hookline import api
+    c = TestClient(api.app)                     # sin login: es Instagram el que vuelve
+    r = c.get("/instagram/callback")
+    assert r.status_code == 200 and "Instagram app ID" in r.text and "OAuth redirect" in r.text
+    r = c.get("/instagram/callback", params={"error": "access_denied", "error_reason": "user_denied"})
+    assert "Se canceló el permiso" in r.text
+    r = c.get("/instagram/callback", params={"error": "invalid_request",
+                                              "error_description": "<script>alert(1)</script> Invalid platform app"})
+    assert "Invalid platform app" in r.text and "<script>alert" not in r.text
+    r = c.get("/instagram/callback", params={"code": "abc", "state": "inventado"})
+    assert "expiró" in r.text

@@ -273,10 +273,22 @@ def _pagina(titulo: str, texto: str, ok: bool = True) -> HTMLResponse:
 
 
 @app.get("/instagram/callback", include_in_schema=False)
-def ig_callback(code: str = "", state: str = "", error: str = ""):
+def ig_callback(code: str = "", state: str = "", error: str = "", error_reason: str = "",
+                error_description: str = ""):
     """Sin login a propósito: lo protege el `state` (obligatorio, de un uso, guardado en la base)."""
     if error:
-        return _pagina("No se conectó", "Se canceló el permiso en Instagram.", False)
+        if error_reason == "user_denied" or error == "access_denied":
+            return _pagina("No se conectó", "Se canceló el permiso en Instagram.", False)
+        detalle = " ".join(f"{error_description or error_reason or error}".split())[:200]
+        return _pagina("No se conectó", f"Instagram respondió con un error: {detalle}", False)
+    if not code:
+        log.warning("instagram/callback sin code ni error (state %s)", "presente" if state else "ausente")
+        return _pagina("No se pudo conectar",
+                       "Instagram volvió sin el código de autorización. Casi siempre es la configuración de la app "
+                       "de Meta: en Ajustes tiene que estar el «Instagram app ID» y su «Instagram app secret» (de "
+                       "Casos de uso → API setup with Instagram login, no los de Configuración → Básica), y la "
+                       "dirección de vuelta de Ajustes tiene que estar en «Business login settings → OAuth redirect "
+                       "URIs». Revisalo y tocá Conectar cuenta de nuevo.", False)
     try:
         usuario, _tipo = svc_cuentas.conectar_con_codigo(code, state)
         return _pagina(f"@{usuario} conectada", "Listo. Ya podés cerrar esta pestaña y volver al panel.")
