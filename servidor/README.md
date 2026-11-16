@@ -79,6 +79,24 @@ Modelos por defecto: `claude-opus-5-5` (jueces, lectura de memes, juez, filtro, 
 (respuestas). Tendencias usa la búsqueda web de Anthropic. Si Claude se niega a un pedido, queda en error con el motivo
 y no se reintenta. El costo por pedido queda en `/api/tareas_ia` (tokens).
 
+## Link con HTTPS para cualquier celular (Caddy)
+
+`docker-compose.yml` trae un servicio `caddy` (perfil `https`) que pone HTTPS con Let's Encrypt delante de la API y
+se renueva solo. Sin comprar dominio sirve el de [sslip.io](https://sslip.io), que apunta a la IP que lleva en el nombre:
+
+```sh
+# en .env
+HOOKLINE_DOMINIO=146-190-215-178.sslip.io
+HOOKLINE_URL_PUBLICA=https://146-190-215-178.sslip.io
+HOOKLINE_COOKIE_SEGURA=1
+COMPOSE_PROFILES=https              # así cualquier `docker compose up -d` incluye Caddy
+docker compose up -d --build
+```
+
+Hacen falta los puertos 80 y 443 abiertos (si el droplet tiene `ufw`: `ufw allow 80,443/tcp`). Cuando ande, conviene
+`HOOKLINE_PUERTO=127.0.0.1:8000` para que el 8000 deje de estar abierto a internet (todo entra por Caddy). Con un
+dominio propio es lo mismo: registro A apuntando a la IP y `HOOKLINE_DOMINIO=hookline.tuempresa.com`.
+
 ## Fuentes (tipografías de los reels)
 
 Sección **Fuentes** del panel: muestra cada letra escrita en sí misma (con un texto de prueba), deja subir `.ttf`/`.otf`

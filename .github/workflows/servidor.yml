@@ -67,6 +67,12 @@ jobs:
             -e HOOKLINE_CLAVE_SESION=ci-clave-de-sesion-123 hookline:ci api
           for i in $(seq 1 30); do curl -sf localhost:8000/api/salud && exit 0; sleep 2; done
           docker logs hl; exit 1
+      - name: Caddyfile y compose válidos (HTTPS)
+        run: |
+          docker run --rm -e HOOKLINE_DOMINIO=146-190-215-178.sslip.io -v "$PWD/servidor/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          cd servidor && cp .env.ejemplo .env && POSTGRES_PASSWORD=x HOOKLINE_DOMINIO=ejemplo.sslip.io \
+            docker compose --profile https config --quiet
       - name: Las fuentes del catálogo están instaladas
         run: |
           docker run --rm --entrypoint python hookline:ci -c "

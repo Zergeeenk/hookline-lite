@@ -4,6 +4,8 @@
 #   docker compose run --rm api db migrar
 #   docker compose run --rm api crear-usuario duena@ejemplo.com
 # El panel queda en http://localhost:8000. Para Instagram hace falta HTTPS público (ver README: proxy o túnel).
+# Con HTTPS (link para cualquier celular, Caddy + Let's Encrypt): poné HOOKLINE_DOMINIO en .env y
+#   docker compose --profile https up -d
 services:
   db:
     image: postgres:16-alpine
@@ -27,7 +29,7 @@ services:
     environment:
       HOOKLINE_BASE_DATOS: postgresql+psycopg://hookline:${POSTGRES_PASSWORD}@db:5432/hookline
     ports:
-      - "8000:8000"
+      - "${HOOKLINE_PUERTO:-8000}:8000"    # con HTTPS andando: HOOKLINE_PUERTO=127.0.0.1:8000 (solo por Caddy)
     volumes:
       - datos:/datos
     depends_on:
@@ -48,6 +50,24 @@ services:
       db:
         condition: service_healthy
 
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      HOOKLINE_DOMINIO: ${HOOKLINE_DOMINIO:-}   # en .env, por ejemplo 146-190-215-178.sslip.io
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data            # los certificados: no se pierden al reiniciar
+      - caddy_config:/config
+    depends_on:
+      - api
+
 volumes:
   pg:
   datos:
+  caddy_data:
+  caddy_config:
