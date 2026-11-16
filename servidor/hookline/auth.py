@@ -49,8 +49,10 @@ def crear_usuario(email: str, clave: str, nombre: str = "", rol: str = "admin") 
     email = str(email or "").strip().lower()
     if len(email) > 200 or not re.fullmatch(r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+\.[^@\s\x00-\x1f\x7f]+", email):
         raise ValueError("Escribí un email válido.")
-    if not isinstance(clave, str) or not 10 <= len(clave) <= 200:
-        raise ValueError("La contraseña tiene que tener entre 10 y 200 caracteres.")
+    from .config import config
+    minimo = config().clave_minima
+    if not isinstance(clave, str) or not minimo <= len(clave) <= 200:
+        raise ValueError(f"La contraseña tiene que tener entre {minimo} y 200 caracteres.")
     nombre = re.sub(r"[\x00-\x1f\x7f]", "", str(nombre or "")).strip()[:120] or email.split("@")[0][:120]
     with sesion() as s:
         if s.scalar(select(Usuario).where(Usuario.email == email)):

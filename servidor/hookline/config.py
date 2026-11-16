@@ -34,6 +34,7 @@ class Config:
     base_datos: str = ""                              # postgresql+psycopg://... ; vacío = SQLite en datos/hookline.db
     clave_secreta: str = ""                           # Fernet (32 bytes base64) para cifrar tokens y el App Secret
     clave_sesion: str = ""                            # firma de cookies de sesión y URLs públicas (cualquier texto largo)
+    clave_minima: int = 10                            # largo mínimo de las contraseñas (4 a 64)
     cookie_segura: bool = False                       # True en producción (solo https)
     origenes_permitidos: tuple[str, ...] = ()         # CORS para Pyro (vacío = ninguno)
 
@@ -132,6 +133,7 @@ def desde_entorno(env: dict | None = None) -> Config:
         esfuerzo=g("HOOKLINE_ESFUERZO", "medium"),
         anthropic_api_key_presente=bool(g("ANTHROPIC_API_KEY")),
         worker_hilos=_int(g("HOOKLINE_WORKER_HILOS"), 6),
+        clave_minima=max(4, min(64, _int(g("HOOKLINE_CLAVE_MINIMA"), 10))),
         max_render=_int(g("HOOKLINE_MAX_RENDER"), 2),
         max_descargas=_int(g("HOOKLINE_MAX_DESCARGAS"), 3),
         max_publicando=_int(g("HOOKLINE_MAX_PUBLICANDO"), 2),

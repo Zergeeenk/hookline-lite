@@ -62,8 +62,13 @@ def cmd_clave(a):
 def cmd_usuario(a):
     _base()
     from .auth import crear_usuario
-    clave = a.clave or getpass.getpass("Contraseña (10+ caracteres): ")
-    uid = crear_usuario(a.email, clave, a.nombre or "", a.rol)
+    from .config import config
+    clave = a.clave or getpass.getpass(f"Contraseña ({config().clave_minima}+ caracteres): ")
+    try:
+        uid = crear_usuario(a.email, clave, a.nombre or "", a.rol)
+    except ValueError as ex:               # un mensaje claro, sin el bloque de texto técnico
+        print(f"No se creó el usuario: {ex}")
+        raise SystemExit(1)
     print(f"Usuario {a.email} creado (id {uid}, rol {a.rol}).")
 
 
