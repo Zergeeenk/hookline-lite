@@ -53,8 +53,10 @@ _N, _R, _P = 2 ** 14, 8, 1
 
 
 def hash_clave(clave: str) -> str:
-    if len(clave) < 10:
-        raise ValueError("La contraseña tiene que tener al menos 10 caracteres.")
+    from .config import config
+    minimo = config().clave_minima
+    if len(clave) < minimo:
+        raise ValueError(f"La contraseña tiene que tener al menos {minimo} caracteres.")
     sal = secrets.token_bytes(16)
     h = hashlib.scrypt(clave.encode(), salt=sal, n=_N, r=_R, p=_P, dklen=32)
     return f"scrypt${_N}${_R}${_P}${base64.b64encode(sal).decode()}${base64.b64encode(h).decode()}"

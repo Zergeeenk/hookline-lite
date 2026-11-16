@@ -299,3 +299,30 @@ def test_callback_de_instagram_explica_cada_caso(cliente_api):
     assert "Invalid platform app" in r.text and "<script>alert" not in r.text
     r = c.get("/instagram/callback", params={"code": "abc", "state": "inventado"})
     assert "expiró" in r.text
+
+
+@pytest.mark.parametrize("minima,clave,ok", [
+    (None, "corta", False), (None, "diez-letra", True),          # por defecto: 10
+    ("5", "abcd", False), ("5", "abcde", True),                 # bajada a 5
+    ("2", "abc", False), ("2", "abcd", True),                   # nunca menos de 4
+    ("100", "x" * 63, False), ("100", "x" * 64, True),          # ni más de 64
+    ("basura", "corta", False),
+])
+def test_largo_minimo_de_contrasena_configurable(cliente_api, monkeypatch, minima, clave, ok):
+    from hookline import config
+    if minima is not None:
+        monkeypatch.setenv("HOOKLINE_CLAVE_MINIMA", minima)
+    config.recargar()
+    r = cliente_api.post("/api/usuarios", json={"op": "crear", "email": "nuevo@x.com", "clave": clave, "rol": "editor"})
+    assert (r.status_code == 200) is ok, r.text
+    if not ok:
+        assert "caracteres" in r.json()["error"]
+
+
+def test_crear_usuario_por_consola_con_error_no_muestra_traceback(capsys, monkeypatch):
+    from types import SimpleNamespace
+    from hookline import cli
+    monkeypatch.setattr(cli, "_base", lambda: None)
+    with pytest.raises(SystemExit):
+        cli.cmd_usuario(SimpleNamespace(email="EMAIL_DE_ZERGEN", clave="clave-larga-123", nombre="", rol="admin"))
+    assert "No se creó el usuario: Escribí un email válido." in capsys.readouterr().out
