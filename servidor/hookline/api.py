@@ -191,6 +191,7 @@ def _ajustes() -> dict:
     return {"tiene_clave_claude": bool(clave), "clave_claude_fin": clave[-4:] if len(clave) > 12 else "",
             "clave_claude_por_entorno": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
             "app_id": app_id, "tiene_secret": bool(secret), "app_por_entorno": bool(cfg.meta_app_id),
+            "config_id": comun.config_id_meta(),
             "redirect": cfg.redirect_instagram, "redirect_defecto": cfg.redirect_instagram, "cloudflared": "",
             "ffmpeg": bool(medios.ffmpeg()), "carpeta": "", "version": cfg.ig_version, "url_publica": cfg.url_publica,
             "motor_ia": tareas.motor_actual(), "modelo": cfg.modelo, "modelo_rapido": cfg.modelo_rapido,
@@ -205,7 +206,9 @@ def ajustes_get(q: Quien = requerir()):
 @app.post("/api/ajustes")
 def ajustes_set(d: dict = Depends(_json), q: Quien = requerir("admin")):
     if "app_id" in d:
-        comun.guardar_ajuste("meta_app_id", "".join(ch for ch in str(d["app_id"] or "") if ch.isdigit()))
+        comun.guardar_ajuste("meta_app_id", "".join(ch for ch in str(d["app_id"] or "") if ch.isdigit())[:30])
+    if "config_id" in d:
+        comun.guardar_ajuste("meta_config_id", "".join(ch for ch in str(d["config_id"] or "") if ch.isdigit())[:30])
     if d.get("app_secret"):
         comun.guardar_ajuste("meta_app_secret", str(d["app_secret"]).strip(), cifrado=True)
     if "motor_ia" in d:
@@ -284,11 +287,11 @@ def ig_callback(code: str = "", state: str = "", error: str = "", error_reason: 
     if not code:
         log.warning("instagram/callback sin code ni error (state %s)", "presente" if state else "ausente")
         return _pagina("No se pudo conectar",
-                       "Instagram volvió sin el código de autorización. Casi siempre es la configuración de la app "
-                       "de Meta: en Ajustes tiene que estar el «Instagram app ID» y su «Instagram app secret» (de "
-                       "Casos de uso → API setup with Instagram login, no los de Configuración → Básica), y la "
-                       "dirección de vuelta de Ajustes tiene que estar en «Business login settings → OAuth redirect "
-                       "URIs». Revisalo y tocá Conectar cuenta de nuevo.", False)
+                       "Meta volvió sin el código de autorización. Casi siempre es la configuración de la app: en las "
+                       "apps nuevas, Ajustes necesita el Identificador de la app y su clave secreta (Configuración → "
+                       "Básica) más el ID de configuración de «API setup with Unified login»; en las viejas, el "
+                       "Instagram app ID y su secret. Y la dirección de vuelta de Ajustes tiene que estar registrada "
+                       "en Meta como URL de redireccionamiento. Revisalo y tocá Conectar cuenta de nuevo.", False)
     try:
         usuario, _tipo = svc_cuentas.conectar_con_codigo(code, state)
         return _pagina(f"@{usuario} conectada", "Listo. Ya podés cerrar esta pestaña y volver al panel.")

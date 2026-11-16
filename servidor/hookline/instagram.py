@@ -26,6 +26,8 @@ from .db import sesion
 from .modelos import CredencialIG
 
 GRAPH = "https://graph.instagram.com"
+GRAPH_FB = "https://graph.facebook.com"             # inicio de sesión unificado (apps nuevas de Meta)
+DIALOGO_FB = "https://www.facebook.com"
 AUTORIZAR = "https://www.instagram.com/oauth/authorize"
 TOKEN_CORTO = "https://api.instagram.com/oauth/access_token"
 RUPLOAD = "https://rupload.facebook.com/ig-api-upload"
@@ -115,6 +117,82 @@ def canjear_codigo(app_id: str, app_secret: str, redirect: str, code: str) -> di
             "obtenido": t, "refrescado": t, "vence": t + int(l.get("expires_in") or DURACION_TOKEN) - 3600}
 
 
+# --- inicio de sesión unificado (apps de Meta creadas desde fines de 2026) ---------------------------------------------
+# Meta ya no les da "Instagram API with Instagram Login" a las apps nuevas: les da "API setup with Unified login", que es
+# el inicio de sesión con Facebook para empresas con una configuración (config_id). El código se canjea en
+# graph.facebook.com por un token de usuario del sistema que no vence; las cuentas de Instagram que la persona eligió se
+# leen de /me/assigned_instagram_accounts y todo lo demás (publicar, comentarios, estadísticas) va a graph.facebook.com.
+EQUIVALENTES = {"instagram_basic": "instagram_business_basic",
+                "instagram_content_publish": "instagram_business_content_publish",
+                "instagram_manage_comments": "instagram_business_manage_comments",
+                "instagram_manage_insights": "instagram_business_manage_insights",
+                "instagram_manage_messages": "instagram_business_manage_messages"}
+NUNCA = 100 * 365 * 86400
+
+
+def normalizar_permisos(permisos) -> str:
+    """Los permisos del inicio de sesión unificado se llaman distinto (instagram_content_publish): se suman los
+    nombres de siempre (instagram_business_content_publish) para que el resto del sistema no cambie."""
+    lista = [p.strip() for p in (permisos.split(",") if isinstance(permisos, str) else (permisos or [])) if str(p).strip()]
+    out = []
+    for p in lista + [EQUIVALENTES[p] for p in lista if p in EQUIVALENTES]:
+        if p not in out:
+            out.append(p)
+    return ",".join(out)
+
+
+def url_login_unificado(app_id: str, config_id: str, redirect: str, state: str) -> str:
+    q = {"client_id": str(app_id).strip(), "config_id": str(config_id).strip(), "redirect_uri": redirect,
+         "response_type": "code", "override_default_response_type": "true", "state": state}
+    return f"{DIALOGO_FB}/{config().ig_version}/dialog/oauth?" + urllib.parse.urlencode(q)
+
+
+def canjear_codigo_unificado(app_id: str, app_secret: str, redirect: str, code: str) -> dict:
+    """code → token de usuario del sistema (no vence) con sus permisos, leídos de debug_token."""
+    code = (code or "").split("#")[0].strip()
+    v = config().ig_version
+    d = pedir("GET", f"{GRAPH_FB}/{v}/oauth/access_token",
+              {"client_id": str(app_id).strip(), "client_secret": str(app_secret).strip(), "redirect_uri": redirect,
+               "code": code})
+    tok = d.get("access_token")
+    if not tok:
+        raise RuntimeError("Meta no devolvió el permiso.")
+    t = time.time()
+    vence, permisos = 0, ""
+    try:
+        info = pedir("GET", f"{GRAPH_FB}/{v}/debug_token",
+                     {"input_token": tok, "access_token": f"{str(app_id).strip()}|{str(app_secret).strip()}"})
+        info = info.get("data") or {}
+        permisos = info.get("scopes") or ""
+        vence = int(info.get("expires_at") or 0)
+    except Exception:
+        pass        # sin debug_token igual se puede seguir: los permisos se descubren al usarlos
+    if not vence and d.get("expires_in"):
+        vence = int(t + int(d["expires_in"]))
+    return {"access_token": tok, "user_id": "", "permisos": normalizar_permisos(permisos), "obtenido": t,
+            "refrescado": t, "vence": (vence - 3600) if vence else t + NUNCA, "via": "unificado"}
+
+
+CAMPOS_PERFIL_FB = "id,username,name,profile_picture_url,followers_count,follows_count,media_count"
+
+
+def cuentas_unificado(token: str) -> list[dict]:
+    """Las cuentas de Instagram que la persona eligió al autorizar, cada una con su perfil."""
+    v = config().ig_version
+    d = pedir("GET", f"{GRAPH_FB}/{v}/me/assigned_instagram_accounts", {"access_token": token})
+    ids = []
+    for x in d.get("data") or []:
+        i = str((x or {}).get("id") or "").strip() if isinstance(x, dict) else ""
+        if re.fullmatch(r"\d{5,30}", i) and i not in ids:
+            ids.append(i)
+    out = []
+    for i in ids[:50]:
+        p = pedir("GET", f"{GRAPH_FB}/{v}/{i}", {"fields": CAMPOS_PERFIL_FB, "access_token": token})
+        if p.get("username"):
+            out.append({**p, "user_id": str(p.get("id") or i), "account_type": p.get("account_type") or ""})
+    return out
+
+
 def perfil_con_token(token: str) -> dict:
     return pedir("GET", f"{GRAPH}/{config().ig_version}/me",
                  {"fields": "user_id,username,name,account_type,profile_picture_url,followers_count,follows_count,"
@@ -125,6 +203,7 @@ def guardar_credencial(cuenta_id: str, tok: dict) -> None:
     with sesion() as s:
         c = s.get(CredencialIG, cuenta_id) or CredencialIG(cuenta_id=cuenta_id)
         c.token_cifrado = seguridad.cifrar(tok["access_token"])
+        c.via = tok.get("via") or "instagram"
         c.permisos = tok.get("permisos") or ""
         c.obtenido, c.refrescado, c.vence = tok["obtenido"], tok["refrescado"], tok["vence"]
         c.vencido = False
@@ -164,6 +243,10 @@ class Cliente:
         c = self.credencial()
         return (c.permisos or "") if c else ""
 
+    def unificado(self) -> bool:
+        c = self.credencial()
+        return bool(c and (c.via or "") == "unificado")
+
     def conectada(self) -> bool:
         c = self.credencial()
         return bool(c and not c.vencido and c.vence > time.time())
@@ -189,6 +272,8 @@ class Cliente:
                 self._marcar_vencido()
                 raise TokenVencido("vencido")
             tok = seguridad.descifrar(c.token_cifrado)
+            if (c.via or "") == "unificado":
+                return tok          # token de usuario del sistema: no se refresca (no vence)
             viejo = t - c.refrescado > 5 * 86400
             poco = c.vence - t < 20 * 86400
             if t - c.obtenido > 86400 and (forzar_refresco or viejo or poco):
@@ -210,7 +295,8 @@ class Cliente:
             return tok
 
     def _url(self, ruta: str) -> str:
-        return f"{GRAPH}/{self.version}/{ruta.lstrip('/')}"
+        base = GRAPH_FB if self.unificado() else GRAPH
+        return f"{base}/{self.version}/{ruta.lstrip('/')}"
 
     def get(self, ruta: str, **params) -> dict:
         return pedir("GET", self._url(ruta), {**params, "access_token": self.token()})
@@ -228,6 +314,11 @@ class Cliente:
 
     # datos -------------------------------------------------------------------------------------------------------
     def perfil(self) -> dict:
+        if self.unificado():                 # en graph.facebook.com /me es el usuario del sistema, no la cuenta
+            if self.ig_id() == "me":
+                raise RuntimeError("Falta el id de la cuenta de Instagram: reconectala desde Cuentas.")
+            p = self.get(self.ig_id(), fields=CAMPOS_PERFIL_FB)
+            return {**p, "user_id": str(p.get("id") or self.ig_id()), "account_type": p.get("account_type") or ""}
         return self.get("me", fields="user_id,username,name,account_type,profile_picture_url,followers_count,"
                                      "follows_count,media_count")
 

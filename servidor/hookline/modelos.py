@@ -101,6 +101,7 @@ class CredencialIG(Base):
     refrescado: Mapped[float] = mapped_column(Float)
     vence: Mapped[float] = mapped_column(Float)
     vencido: Mapped[bool] = mapped_column(Boolean, default=False)
+    via: Mapped[str] = mapped_column(String(20), default="instagram")   # instagram | unificado (apps nuevas de Meta)
 
 
 class MedioIG(Base):

@@ -54,6 +54,12 @@ def guardar_ajuste(clave: str, valor, cifrado: bool = False) -> None:
         s.add(a)
 
 
+def config_id_meta() -> str:
+    """El ID de configuración del inicio de sesión unificado (vacío = el inicio de sesión con Instagram de siempre)."""
+    import os
+    return os.environ.get("HOOKLINE_META_CONFIG_ID", "").strip() or str(ajuste("meta_config_id", "") or "")
+
+
 def app_meta() -> tuple[str, str]:
     """(app_id, app_secret): manda la variable de entorno; si no, lo cargado en Ajustes (cifrado)."""
     cfg = config()
