@@ -60,11 +60,15 @@ def estado() -> dict:
     e = ajuste("pyro_estado", {}) or {}
     with sesion() as s:
         atadas = len(s.scalars(select(Cuenta.id).where(Cuenta.pyro_modelo_id.is_not(None))).all())
+        existentes = {cli.limpiar_handle(x) for fila in s.execute(select(Cuenta.id, Cuenta.usuario_ig)) for x in fila if x}
+    # lo que Pyro tiene y acá no: se filtra con las cuentas de AHORA (si la crearon recién, ya no aparece)
+    sin_cuenta = [x for x in e.get("sin_cuenta", []) or []
+                  if isinstance(x, dict) and cli.limpiar_handle(x.get("usuario")) not in existentes]
     return {"conectado": bool(url and clave), "url": url, "clave_fin": clave[-4:] if clave else "",
             "por_entorno": bool(os.environ.get("HOOKLINE_PYRO_URL") or os.environ.get("HOOKLINE_PYRO_CLAVE")),
             "material_auto": bool(ajuste("pyro_material_auto", True)),
             "ultima": e.get("ultima", ""), "error": err_conf or e.get("error", ""), "modelos": e.get("modelos", []),
-            "sin_cuenta": e.get("sin_cuenta", []), "atadas": atadas,
+            "sin_cuenta": sin_cuenta, "atadas": atadas,
             "material": ajuste("pyro_material_estado", {}) or {}}
 
 

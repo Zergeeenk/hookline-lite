@@ -193,8 +193,14 @@ def test_sincronizar_ata_por_usuario_y_hereda_multicuentas(cliente_api, pyro):
 def test_crear_la_cuenta_que_falta(cliente_api, pyro):
     _conectar(cliente_api)
     cliente_api.post("/api/pyro", json={"op": "sincronizar"})
+    faltan = lambda: [x["usuario"] for x in cliente_api.get("/api/pyro").json()["sin_cuenta"]]
+    assert "pame.backup" in faltan() and len(faltan()) == 3
     r = cliente_api.post("/api/pyro", json={"op": "crear_cuenta", "usuario": "pame.backup", "modelo_id": 1})
     assert r.status_code == 200
+    assert "pame.backup" not in faltan() and len(faltan()) == 2             # ya no aparece, sin sincronizar de nuevo
+    assert "pame.backup" not in [x["usuario"] for x in r.json()["sin_cuenta"]]
+    assert cliente_api.post("/api/pyro", json={"op": "crear_cuenta", "usuario": "pame.backup",
+                                               "modelo_id": 1}).status_code == 400        # dos veces: avisa
     c = next(c for c in cliente_api.get("/api/estado").json()["cuentas"] if c["id"] == "pame.backup")
     assert c["pyro_modelo_id"] == 1 and not c["conectada"]
     assert cliente_api.post("/api/pyro", json={"op": "crear_cuenta", "usuario": "x", "modelo_id": 999}).status_code == 400
