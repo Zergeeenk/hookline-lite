@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 
 from .. import instagram as ig
-from ..comun import actividad, app_meta, aviso, evento, iso_local
+from ..comun import actividad, app_meta, aviso, config_id_meta, evento, iso_local
 from ..config import config
 from ..db import ahora, sesion
 from ..modelos import Cuenta, CredencialIG, EstadoOAuth, HistorialCuenta, MedioIG, Tendencias
@@ -143,6 +143,8 @@ def url_conectar(usuario_id: int | None = None) -> str:
     with sesion() as s:
         s.execute(delete(EstadoOAuth).where(EstadoOAuth.creado < ahora() - timedelta(hours=1)))
         s.add(EstadoOAuth(state=state, usuario_id=usuario_id))
+    if config_id_meta():
+        return ig.url_login_unificado(app_id, config_id_meta(), config().redirect_instagram, state)
     return ig.url_login(app_id, config().redirect_instagram, state)
 
 
@@ -156,12 +158,20 @@ def conectar_con_codigo(code: str, state: str) -> tuple[str, str]:
             raise ValueError("El inicio de sesión expiró: tocá Conectar cuenta de nuevo.")
         s.delete(e)
     app_id, secret = app_meta()
+    if config_id_meta():
+        tok = ig.canjear_codigo_unificado(app_id, secret, config().redirect_instagram, code)
+        perfiles = ig.cuentas_unificado(tok["access_token"])
+        if not perfiles:
+            raise ValueError("Meta no devolvió ninguna cuenta de Instagram. Al autorizar, elegí la cuenta de Instagram "
+                             "en la lista (y que sea profesional y evaluadora de la app mientras esté en prueba).")
+        hechas = [crear_desde_token({**tok, "user_id": p["user_id"]}, p) for p in perfiles]
+        return hechas[0][0], ("" if len(hechas) == 1 else f"{len(hechas)} cuentas")
     tok = ig.canjear_codigo(app_id, secret, config().redirect_instagram, code)
     return crear_desde_token(tok)
 
 
-def crear_desde_token(tok: dict) -> tuple[str, str]:
-    u = ig.perfil_con_token(tok["access_token"])
+def crear_desde_token(tok: dict, u: dict | None = None) -> tuple[str, str]:
+    u = u or ig.perfil_con_token(tok["access_token"])
     cid = limpiar_id(u.get("username") or "") or f"cuenta{tok.get('user_id', '')}"
     with sesion() as s:
         c = s.get(Cuenta, cid) or Cuenta(id=cid)

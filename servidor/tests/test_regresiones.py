@@ -291,7 +291,7 @@ def test_callback_de_instagram_explica_cada_caso(cliente_api):
     from hookline import api
     c = TestClient(api.app)                     # sin login: es Instagram el que vuelve
     r = c.get("/instagram/callback")
-    assert r.status_code == 200 and "Instagram app ID" in r.text and "OAuth redirect" in r.text
+    assert r.status_code == 200 and "ID de configuración" in r.text and "redireccionamiento" in r.text
     r = c.get("/instagram/callback", params={"error": "access_denied", "error_reason": "user_denied"})
     assert "Se canceló el permiso" in r.text
     r = c.get("/instagram/callback", params={"error": "invalid_request",
