@@ -652,3 +652,43 @@ def test_migracion_0004_sobre_una_base_vieja(tmp_path, monkeypatch):
     con.close()
     command.downgrade(cfg, "0003")
     command.upgrade(cfg, "head")
+
+
+def test_el_espacio_noticias_tiene_todo_el_camino_hasta_publicar():
+    """Noticia → guion → video grabado en la Bandeja → programado en el Calendario → publicado. Si falta una página
+    del camino en el menú de Noticias, el guion aprobado no tiene cómo salir."""
+    import re
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "hookline" / "panel" / "index.html").read_text(encoding="utf-8")
+    m = re.search(r"const PAG_NOTICIAS = (\[.*?\]\]);", html, re.S)
+    assert m
+    paginas = re.findall(r'\["(\w+)", "', m.group(1))
+    for p in ("noticias", "bandeja", "calendario", "estadisticas", "comentarios", "cuentas", "costos", "ajustes"):
+        assert p in paginas, p
+    funciones = dict(re.findall(r"(\w+): (p[A-Z]\w+)", re.search(r"const f = \{(.*?)\}\[pagina\]", html).group(1)))
+    for p in paginas:
+        assert p in funciones and f"function {funciones[p]}(" in html, p
+
+
+def test_una_cuenta_de_noticias_publica_como_cualquier_otra(cuenta_noticias, meta, foto):
+    """El video grabado con el guion se sube a la Bandeja de la cuenta de noticias y se publica igual."""
+    import shutil
+    import time
+    from hookline import almacen, instagram as ig, trabajos
+    from hookline.db import sesion
+    from hookline.modelos import Cuenta, Pieza
+    from hookline.servicios import piezas
+    with sesion() as s:
+        s.get(Cuenta, CID).ig_user_id = "1790"
+    t = time.time()
+    ig.guardar_credencial(CID, {"access_token": "TOKEN-NT", "permisos": ig.SCOPES, "obtenido": t, "refrescado": t,
+                                "vence": t + 50 * 86400})
+    shutil.copy(foto, almacen.dir_de("subir", CID) / "reel.jpg")
+    piezas.escanear()
+    pid = piezas.listar(CID)[0]["id"]
+    piezas.accion({"op": "programar", "id": pid})
+    piezas.revisar_cola()
+    while (tr := trabajos.tomar("w", ["publicar"])):
+        trabajos.correr(tr)
+    with sesion() as s:
+        assert s.get(Pieza, pid).estado == "publicada"
