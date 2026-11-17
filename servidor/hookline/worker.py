@@ -31,7 +31,7 @@ PERIODO_COLA = 30
 def _importar_manejadores() -> None:
     """Registra todos los @manejador (los módulos de servicios se importan acá)."""
     from .ia import tareas  # noqa: F401
-    from .servicios import comentarios, cuentas, jueces, piezas  # noqa: F401
+    from .servicios import comentarios, cuentas, jueces, noticias, piezas  # noqa: F401
     for mod in ("material", "fabrica", "buscador", "repartir", "pyro"):
         try:
             __import__(f"hookline.servicios.{mod}")
@@ -80,6 +80,11 @@ def periodicas() -> None:
         encolar("refrescar_token", {"cuenta": cid}, clave=f"refrescar:{cid}:{dia}")
     encolar("tendencias_semanales", {}, clave=f"tendencias:{hora}")
     encolar("mantenimiento", {}, clave=f"mantenimiento:{dia}")
+    try:
+        from .servicios import noticias
+        noticias.periodicas()
+    except Exception as ex:
+        log.warning("noticias: %s", ex)
     try:
         from .servicios import pyro
         pyro.periodicas(hora, dia)

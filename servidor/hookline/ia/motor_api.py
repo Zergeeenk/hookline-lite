@@ -19,7 +19,7 @@ from .. import almacen
 from ..config import config
 from ..modelos import TareaIA
 from .esquemas import ESQUEMAS
-from .prompts import SISTEMA
+from .prompts import sistema_de
 
 log = logging.getLogger("hookline.ia.api")
 BETA_FALLBACK = "server-side-fallback-2026-07-01"
@@ -102,8 +102,11 @@ def _uso(r) -> dict:
     u = getattr(r, "usage", None)
     if not u:
         return {}
-    return {"modelo": getattr(r, "model", ""), "entrada": getattr(u, "input_tokens", 0),
-            "salida": getattr(u, "output_tokens", 0), "cache": getattr(u, "cache_read_input_tokens", 0) or 0}
+    stu = getattr(u, "server_tool_use", None)
+    return {"modelo": getattr(r, "model", ""), "entrada": getattr(u, "input_tokens", 0) or 0,
+            "salida": getattr(u, "output_tokens", 0) or 0, "cache": getattr(u, "cache_read_input_tokens", 0) or 0,
+            "cache_escrita": getattr(u, "cache_creation_input_tokens", 0) or 0,
+            "busquedas": (getattr(stu, "web_search_requests", 0) or 0) if stu else 0}
 
 
 def _revisar_rechazo(r) -> None:
@@ -118,7 +121,7 @@ def _revisar_rechazo(r) -> None:
 def _comunes(t: TareaIA, cfg) -> dict:
     return {"model": cfg.modelo_rapido if t.entrada.get("rapido") else cfg.modelo,
             "max_tokens": 16000,
-            "system": [{"type": "text", "text": SISTEMA, "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": sistema_de(t.tipo), "cache_control": {"type": "ephemeral"}}],
             "output_config": {"effort": "low" if t.entrada.get("rapido") else cfg.esfuerzo}}
 
 
@@ -144,16 +147,17 @@ def _con_web(c, kw, mensajes, esquema, fallback) -> tuple[dict, dict]:
     herramientas = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 8},
                     {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 4}]
     try:
-        r = _bucle_pausa(lambda m: c.beta.messages.parse(messages=m, output_format=esquema, tools=herramientas,
-                                                          **kw, **fallback), mensajes)
+        r, u = _bucle_pausa(lambda m: c.beta.messages.parse(messages=m, output_format=esquema, tools=herramientas,
+                                                             **kw, **fallback), mensajes)
         _revisar_rechazo(r)
         if r.parsed_output is not None:
-            return r.parsed_output.model_dump(), _uso(r)
+            return r.parsed_output.model_dump(), u
     except anthropic.BadRequestError as ex:
         log.info("web + structured outputs no aceptado (%s): voy en dos pasos", str(ex)[:120])
     # 1) buscar libre  2) ordenar en el esquema
     kw_libre = {k: v for k, v in kw.items() if k != "output_config"}
-    r1 = _bucle_pausa(lambda m: c.beta.messages.create(messages=m, tools=herramientas, **kw_libre, **fallback), mensajes)
+    r1, u1 = _bucle_pausa(lambda m: c.beta.messages.create(messages=m, tools=herramientas, **kw_libre, **fallback),
+                          mensajes)
     _revisar_rechazo(r1)
     texto = "\n".join(b.text for b in r1.content if getattr(b, "type", "") == "text")
     r2 = c.beta.messages.parse(messages=[{"role": "user", "content": "Pasá esto al formato pedido, sin inventar nada:\n\n"
@@ -162,21 +166,34 @@ def _con_web(c, kw, mensajes, esquema, fallback) -> tuple[dict, dict]:
     _revisar_rechazo(r2)
     if r2.parsed_output is None:
         raise ErrorIA("Claude no devolvió el JSON esperado.")
-    u1, u2 = _uso(r1), _uso(r2)
-    return r2.parsed_output.model_dump(), {k: (u1.get(k, 0) or 0) + (u2.get(k, 0) or 0) if k != "modelo" else u1.get(k)
-                                            for k in u1 | u2}
+    return r2.parsed_output.model_dump(), sumar_uso(u1, _uso(r2))
+
+
+def sumar_uso(*usos: dict) -> dict:
+    """Suma los tokens (y búsquedas) de varias llamadas; el modelo es el de la primera que lo diga."""
+    total: dict = {}
+    for u in usos:
+        for k, v in (u or {}).items():
+            if k == "modelo":
+                total.setdefault("modelo", v)
+            else:
+                total[k] = (total.get(k, 0) or 0) + (v or 0)
+    return total
 
 
 def _bucle_pausa(llamar, mensajes, max_vueltas: int = 5):
-    """Las herramientas del servidor (búsqueda web) pueden pausar el turno: se continúa hasta que termine."""
+    """Las herramientas del servidor (búsqueda web) pueden pausar el turno: se continúa hasta que termine.
+    Devuelve la última respuesta y el uso de TODAS las vueltas (cada vuelta se paga)."""
     m = list(mensajes)
     r = llamar(m)
+    usos = [_uso(r)]
     for _ in range(max_vueltas):
         if getattr(r, "stop_reason", "") != "pause_turn":
-            return r
+            break
         m = m + [{"role": "assistant", "content": r.content}]
         r = llamar(m)
-    return r
+        usos.append(_uso(r))
+    return r, sumar_uso(*usos)
 
 
 def extraer_json(texto: str) -> dict:

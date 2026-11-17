@@ -24,6 +24,7 @@ from .modelos import MensajeChat, TokenAPI, Usuario
 from .servicios import comentarios as svc_com
 from .servicios import cuentas as svc_cuentas
 from .servicios import jueces as svc_jueces
+from .servicios import noticias as svc_noticias
 from .servicios import piezas as svc_piezas
 
 log = logging.getLogger("hookline.api")
@@ -178,7 +179,8 @@ def estado(q: Quien = requerir()):
     return {"cuentas": svc_cuentas.listar(), "piezas": svc_piezas.listar(), "chat": list(reversed(chat)),
             "claude": tareas.estado_puente(),
             "app": {"configurada": bool(app_id and secret), "cloudflared": True, "ffmpeg": bool(medios.ffmpeg())},
-            "ahora": comun.iso_local(comun.ahora()), "carpeta": "", "usuario": q.dict()}
+            "ahora": comun.iso_local(comun.ahora()), "carpeta": "", "usuario": q.dict(),
+            "espacios": svc_noticias.nombres_espacios()}
 
 
 # --- ajustes (admin) ------------------------------------------------------------------------------------------------------------
@@ -235,7 +237,8 @@ def ajustes_set(d: dict = Depends(_json), q: Quien = requerir("admin")):
 def cuenta(d: dict = Depends(_json), q: Quien = requerir()):
     cid, op = str(d.get("id", "")), d.get("op")
     if op == "crear_local":
-        return {"ok": True, "id": svc_cuentas.crear_local(cid, str(d.get("main") or ""))}
+        return {"ok": True, "id": svc_cuentas.crear_local(cid, str(d.get("main") or ""),
+                                                          str(d.get("espacio") or "modelos"))}
     _cuenta(cid)
     if op == "guardar":
         svc_cuentas.guardar(cid, d)
@@ -357,6 +360,49 @@ def tendencias_get(cuenta: str, q: Quien = requerir()):
 @app.post("/api/tendencias")
 def tendencias_post(d: dict = Depends(_json), q: Quien = requerir()):
     return svc_jueces.pedir_tendencias(_cuenta(str(d.get("cuenta", ""))))
+
+
+# --- noticias (espacio "Noticias"): radar, guiones con jurado y costos ---------------------------------------------------------------
+@app.get("/api/noticias")
+def noticias_get(cuenta: str, q: Quien = requerir()):
+    return svc_noticias.listar(_cuenta(cuenta))
+
+
+@app.post("/api/noticias")
+def noticias_post(d: dict = Depends(_json), q: Quien = requerir()):
+    op = str(d.get("op") or "")
+    if op == "radar":
+        return svc_noticias.pedir_radar(_cuenta(str(d.get("cuenta", ""))))
+    if op in ("guion", "descartar_tema"):
+        nid = svc_noticias.id_valido(d.get("noticia"), "el tema")
+        if op == "guion":
+            return svc_noticias.pedir_guion(nid)
+        svc_noticias.descartar_noticia(nid)
+        return {"ok": True}
+    if op in ("editar", "aprobar", "descartar", "jurado", "reescribir"):
+        return svc_noticias.accion_guion(d)
+    if op == "config":
+        if auth.NIVEL[q.rol] < auth.NIVEL["admin"]:
+            raise HTTPException(403, "Solo un admin cambia las reglas de los guiones y el presupuesto.")
+        return {"ok": True, "config": svc_noticias.guardar_conf(d.get("config") or {})}
+    raise HTTPException(400, "op")
+
+
+@app.post("/api/espacios")
+def espacios_post(d: dict = Depends(_json), q: Quien = requerir("admin")):
+    return {"ok": True, "espacios": svc_noticias.guardar_nombres(d.get("nombres") or {})}
+
+
+@app.post("/api/noticias/chequear")
+def noticias_chequear(d: dict = Depends(_json), q: Quien = requerir()):
+    """El chequeo sin IA (para ver en vivo mientras se edita el texto)."""
+    fuentes = d.get("fuentes") if isinstance(d.get("fuentes"), list) else []
+    return svc_noticias.chequear(str(d.get("texto") or "")[:6000], fuentes)
+
+
+@app.get("/api/costos")
+def costos(dias: int = 30, q: Quien = requerir("editor")):
+    return svc_noticias.costos(dias)
 
 
 @app.post("/api/chat")

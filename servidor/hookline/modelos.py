@@ -89,6 +89,8 @@ class Cuenta(Base):
     # la modelo de Pyro a la que pertenece (la sincronización con Pyro la ata por el usuario de Instagram)
     pyro_modelo_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     pyro_modelo: Mapped[str] = mapped_column(String(200), default="")
+    # en qué espacio de trabajo aparece: "modelos" (creadoras) o "noticias" (reels de noticias, ej. @loqueborraron)
+    espacio: Mapped[str] = mapped_column(String(20), default="modelos", index=True)
 
 
 class CredencialIG(Base):
@@ -345,3 +347,47 @@ class FuenteBusqueda(Base):
     sirven: Mapped[int] = mapped_column(Integer, default=0)
     activa: Mapped[bool] = mapped_column(Boolean, default=True)
     creado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora)
+
+
+# --- noticias (espacio "Noticias": radar → guion → jurado) ------------------------------------------------------------
+class Noticia(Base):
+    """Un tema que encontró el Radar. Estados: nueva → elegida (tiene guion) | descartada."""
+    __tablename__ = "noticias"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cuenta_id: Mapped[str] = mapped_column(ForeignKey("cuentas.id", ondelete="CASCADE"), index=True)
+    area: Mapped[str] = mapped_column(String(80), default="")
+    titulo: Mapped[str] = mapped_column(String(300))
+    resumen: Mapped[str] = mapped_column(Text, default="")
+    por_que: Mapped[str] = mapped_column(Text, default="")
+    datos: Mapped[list] = mapped_column(JSONTexto, default=list)        # cifras/hechos verificables
+    fuentes: Mapped[list] = mapped_column(JSONTexto, default=list)      # URLs
+    urgencia: Mapped[int] = mapped_column(Integer, default=0)            # 1-10
+    potencial: Mapped[int] = mapped_column(Integer, default=0)           # 1-10
+    puntaje: Mapped[float] = mapped_column(Float, default=0)
+    estado: Mapped[str] = mapped_column(String(15), default="nueva", index=True)
+    tarea_id: Mapped[str] = mapped_column(String(40), default="")         # la TareaIA del radar (para el costo)
+    creado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora, index=True)
+
+
+class Guion(Base):
+    """El guion de un reel de noticias. Estados: escribiendo → jurado → listo | descartado | error."""
+    __tablename__ = "guiones"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cuenta_id: Mapped[str] = mapped_column(ForeignKey("cuentas.id", ondelete="CASCADE"), index=True)
+    noticia_id: Mapped[int | None] = mapped_column(ForeignKey("noticias.id", ondelete="SET NULL"), nullable=True,
+                                                   index=True)
+    titulo: Mapped[str] = mapped_column(String(300), default="")
+    texto: Mapped[str] = mapped_column(Text, default="")                 # la locución completa
+    original: Mapped[str] = mapped_column(Text, default="")              # antes de las mejoras del jurado
+    caption: Mapped[str] = mapped_column(Text, default="")
+    hashtags: Mapped[list] = mapped_column(JSONTexto, default=list)
+    fuentes: Mapped[list] = mapped_column(JSONTexto, default=list)
+    datos: Mapped[list] = mapped_column(JSONTexto, default=list)         # los datos que usa (para no repetirlos)
+    chequeo: Mapped[dict | None] = mapped_column(JSONTexto, nullable=True)
+    jurado: Mapped[dict | None] = mapped_column(JSONTexto, nullable=True)
+    nota: Mapped[float | None] = mapped_column(Float, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    estado: Mapped[str] = mapped_column(String(15), default="escribiendo", index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    creado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora, index=True)
+    actualizado: Mapped[datetime] = mapped_column(FechaUTC, default=_ahora)

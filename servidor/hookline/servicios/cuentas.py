@@ -68,6 +68,7 @@ def como_dict(c: Cuenta) -> dict:
             "limite": c.limite or {}, "cuenta_28d": c.insights_28d or {},
             "tendencias_fecha": iso_local(tend.fecha) if tend else "",
             "pyro_modelo_id": c.pyro_modelo_id, "pyro_modelo": c.pyro_modelo or "",
+            "espacio": c.espacio or "modelos",
             "perfil": f"https://www.instagram.com/{c.usuario_ig or c.id}/"}
 
 
@@ -77,7 +78,7 @@ def listar() -> list[dict]:
     return [como_dict(c) for c in cs]
 
 
-def crear_local(cid: str, main: str = "") -> str:
+def crear_local(cid: str, main: str = "", espacio: str = "modelos") -> str:
     """Cuenta sin conectar todavía (para ir cargando contenido). Se conecta después."""
     cid = limpiar_id(cid)
     if not cid:
@@ -90,7 +91,10 @@ def crear_local(cid: str, main: str = "") -> str:
             m = s.get(Cuenta, main)
             if not m or m.main_id:
                 raise ValueError("La cuenta main elegida no existe (o es una multicuenta).")
-        s.add(Cuenta(id=cid, main_id=main or None))
+            espacio = m.espacio or "modelos"           # la multicuenta va al mismo espacio que su main
+        if espacio not in ("modelos", "noticias"):
+            raise ValueError("El espacio tiene que ser 'modelos' o 'noticias'.")
+        s.add(Cuenta(id=cid, main_id=main or None, espacio=espacio))
     return cid
 
 
@@ -102,6 +106,10 @@ def guardar(cid: str, d: dict) -> None:
         for k in ("nicho", "tono", "apodo"):
             if k in d:
                 setattr(c, k, str(d[k] or "").strip()[:300])
+        if "espacio" in d:
+            if d["espacio"] not in ("modelos", "noticias"):
+                raise ValueError("El espacio tiene que ser 'modelos' o 'noticias'.")
+            c.espacio = d["espacio"]
         if "activa_desde" in d:
             v = str(d["activa_desde"] or "")[:10]
             if v:

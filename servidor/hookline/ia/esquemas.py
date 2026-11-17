@@ -148,7 +148,47 @@ class RespuestaChat(_Base):
     respuesta: str
 
 
+# --- noticias: radar, guion y jurado ---------------------------------------------------------------------------------------
+class TemaRadar(_Base):
+    area: str = Field(description="una de las áreas pedidas, tal cual")
+    titulo: str = Field(description="el hecho en una línea, sin opinión")
+    resumen: str = Field(description="2-4 frases: qué pasó, quién, cuándo")
+    por_que: str = Field(description="por qué le importa a la gente hoy (1 frase)")
+    datos: list[str] = Field(description="1-5 cifras o hechos verificables, cada uno con su fuente entre paréntesis")
+    fuentes: list[str] = Field(description="1-4 URLs de medios u organismos donde se publicó")
+    urgencia: int = Field(description="1-10: qué tan de hoy es")
+    potencial: int = Field(description="1-10: qué tanto se va a ver y compartir")
+
+
+class RadarRes(_Base):
+    items: list[TemaRadar] = Field(description="Entre 3 y 9, de mayor a menor puntaje")
+
+
+class GuionRes(_Base):
+    titulo: str = Field(description="título corto para la tapa del reel")
+    texto: str = Field(description="la locución completa, de corrido, lista para leer")
+    caption: str = Field(description="texto del posteo: 1-3 líneas, sin hashtags")
+    hashtags: list[str] = Field(description="3 a 6")
+    fuentes: list[str] = Field(description="las URLs que respaldan cada dato")
+    datos: list[str] = Field(description="los datos (cifras/hechos) que usa el guion")
+
+
+class Persona(_Base):
+    nombre: str = Field(description="el nombre del perfil, tal cual se pidió")
+    nota: int = Field(description="1-10")
+    se_iria: int | None = Field(default=None, description="segundo en que dejaría de mirar, o null si lo mira entero")
+    comentario: str = Field(description="1-2 frases, en primera persona, como hablaría ese perfil")
+
+
+class JuradoRes(_Base):
+    personas: list[Persona] = Field(description="Exactamente los 10 perfiles pedidos")
+    mejoras: list[str] = Field(description="Las 3 mejoras más importantes, concretas")
+    texto_mejorado: str = Field(description="el guion con las 3 mejoras aplicadas, sin agregar datos nuevos")
+    resumen: str = Field(description="una línea: qué funciona y qué no")
+
+
 ESQUEMAS: dict[str, type[_Base]] = {
     "jueces": Veredicto, "respuestas": Respuestas, "tendencias": TendenciasRes, "lectura": Lectura,
     "juez": Juicio, "filtrar": Filtro, "chat": RespuestaChat,
+    "radar": RadarRes, "guion": GuionRes, "jurado": JuradoRes,
 }
