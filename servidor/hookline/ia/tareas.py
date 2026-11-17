@@ -80,7 +80,7 @@ def crear(tipo: str, datos: dict, referencia: str = "", imagenes: list[str] | No
 def _materializar(tid: str, tipo: str, entrada: dict) -> None:
     """Para Claude Code: un pedido.json que se entiende solo (rutas absolutas a las imágenes y el JSON Schema)."""
     d = dir_tarea(tid)
-    pedido = {"id": tid, "tipo": tipo, "sistema": prompts.SISTEMA, "instrucciones": entrada["instrucciones"],
+    pedido = {"id": tid, "tipo": tipo, "sistema": prompts.sistema_de(tipo), "instrucciones": entrada["instrucciones"],
               "imagenes": [str(almacen.ruta(r)) for r in entrada["imagenes"]],
               "buscar_en_internet": entrada["web"], "esquema": ESQUEMAS[tipo].model_json_schema(),
               "escribir_en": str(d / "resultado.json")}

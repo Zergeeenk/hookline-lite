@@ -105,6 +105,30 @@ reels nuevos). En **Copiar video → Ajustar a mano** se elige la letra de cada 
 prendido, Claude recibe un muestrario y usa la más parecida a la del meme de ejemplo. Las subidas viven en
 `datos/fuentes/` (el volumen compartido) y se validan dibujándolas antes de aceptarlas (`hookline/fuentes.py`).
 
+## Espacios: Modelos y Noticias
+
+Al entrar, el panel pregunta en qué espacio vas a trabajar (se cambia desde arriba a la izquierda; un admin les puede
+cambiar el nombre). Cada cuenta está en uno: Cuentas → Editar → Espacio (las multicuentas siguen a su main).
+
+**Modelos** es lo de siempre. **Noticias** (cuentas como @loqueborraron) tiene:
+
+- **Radar** (`radar`, con búsqueda web): todos los días a la hora configurada (8 h) o con «Buscar noticias ahora».
+  Temas de las últimas 12-24 h en las áreas de la cuenta (Casa Rosada y Congreso · Provincias y gobernadores · Bolsillo
+  y economía), con urgencia, potencial, datos y fuentes. No repite temas ni datos de las últimas 2 semanas.
+- **Guion** (`guion`): reel hablado de 60-75 s, gancho de 3 s, «Seguime y dale like» entre el segundo 33 y el 43,
+  cierre con un dato. `noticias.chequear()` lo revisa sin IA (palabras, frases repetidas, palabras prohibidas, datos ya
+  usados, fuentes).
+- **Jurado** (`jurado`): 10 personas (edades, libertarios, peronistas, un indeciso...) ponen nota y dicen en qué segundo
+  se irían; se aplican las 3 mejoras más importantes (solo si no empeoran el chequeo ni agregan cifras). Debajo de 5,5
+  se descarta.
+- **Costos**: cada pedido guarda sus tokens y búsquedas (`TareaIA.uso`); la página Costos muestra el gasto por etapa,
+  por día, por reel y del mes contra un presupuesto (al 80 % avisa, al 100 % frena lo automático). Precios por defecto:
+  Opus 5.5 US$ 4 / 20 por millón (entrada / salida), Haiku 5.5 US$ 0,10 / 0,50, búsqueda web US$ 0,01; se pueden cambiar.
+
+Las reglas de la redacción (solo hechos con fuente, presunción de inocencia, no hacer campaña) están en
+`prompts.SISTEMA_NOTICIAS`. Nada se publica solo: el guion aprobado queda listo para las próximas etapas (voz y
+render). Las reglas de los guiones y el presupuesto se cambian en Costos (solo admin).
+
 ## Integración con Pyro
 
 El plan completo (qué tiene Pyro, cómo se conectan los dos y cómo encenderlo) está en
