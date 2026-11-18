@@ -312,7 +312,28 @@ def guardar_links(texto, usados: dict | None = None) -> int:
 
 @manejador("fichas")
 def _fichas(_datos_trabajo: dict) -> None:
-    """Título, duración y miniatura de cada link guardado (para verlos en Inspiración)."""
+    """Título, duración y miniatura de cada link guardado (para verlos en Inspiración). De a uno por vez: si ya hay
+    otro trabajo de fichas corriendo, este no hace nada (antes se juntaban varios, repetían los mismos links y
+    ocupaban todos los lugares de descargas, así que tampoco se bajaban los ejemplos de Copiar video)."""
+    try:
+        with candado("fichas", espera=1):
+            _hacer_fichas()
+    except TimeoutError:
+        return
+
+
+def _opciones_ytdlp() -> dict:
+    """Las mismas para fichas, previas y descargas: con la sesión "para mirar" (Instagram casi nunca deja sin ella) y
+    con tiempo máximo, así un link colgado no frena todo."""
+    from .material import COOKIES_REL
+    o = {"quiet": True, "no_warnings": True, "socket_timeout": 20, "retries": 2}
+    cookies = almacen.raiz() / COOKIES_REL
+    if cookies.is_file():
+        o["cookiefile"] = str(cookies)
+    return o
+
+
+def _hacer_fichas() -> None:
     import urllib.request
     import yt_dlp
     from PIL import Image
@@ -325,7 +346,7 @@ def _fichas(_datos_trabajo: dict) -> None:
         link = sin[0].link
         ficha = {"ficha": "error"}
         try:
-            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
+            with yt_dlp.YoutubeDL({**_opciones_ytdlp(), "skip_download": True}) as y:
                 info = y.extract_info(link, download=False)
             nombre = f"{re.sub(r'[^0-9A-Za-z_-]', '', str(info.get('id') or uuid.uuid4().hex))[:40]}.jpg"
             ficha = {"ficha": "ok", "dur": round(float(info.get("duration") or 0), 1)}

@@ -12,6 +12,7 @@ selectores se rompen cuando cambian las páginas. Se puede apagar con HOOKLINE_B
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import threading
@@ -33,6 +34,7 @@ from ..modelos import FuenteBusqueda, LinkBanco
 from ..trabajos import encolar, manejador
 from . import fabrica
 
+log = logging.getLogger("hookline.buscador")
 PUERTO = 9333
 POR_TANDA = 40          # miniaturas por hoja que mira Claude
 MAX_CANDIDATOS = 400
@@ -174,35 +176,135 @@ def _contexto(p):
     return br, (br.contexts[0] if br.contexts else br.new_context())
 
 
+REDES = {"instagram": ".instagram.com", "tiktok": ".tiktok.com"}
+SESION_DE = {"instagram": "sessionid", "tiktok": "sessionid"}          # sin esta cookie no hay sesión iniciada
+NOMBRES_TIKTOK = ("tt_", "ttwid", "sid_tt", "sid_guard", "msToken", "tt_chain_token", "passport_")
+
+
+def _red(dominio: str) -> str:
+    d = str(dominio or "").lower()
+    return next((r for r in REDES if r in d), "")
+
+
+def _ruta_cookies() -> Path:
+    from .material import COOKIES_REL
+    return almacen.raiz() / COOKIES_REL
+
+
+def leer_cookies(texto: str) -> list[dict]:
+    """Las cookies de Instagram/TikTok en cualquiera de los formatos que dan las extensiones del navegador:
+    cookies.txt (Netscape, con tabs o con espacios), la línea del encabezado "Cookie: a=1; b=2" o el JSON de
+    Cookie-Editor / EditThisCookie. Devuelve dicts como los que usa Playwright."""
+    import json
+    texto = str(texto or "").replace("\ufeff", "").strip()
+    out: list[dict] = []
+    if texto.startswith(("[", "{")):
+        try:
+            datos = json.loads(texto)
+        except ValueError:
+            raise ValueError("El texto parece JSON pero está cortado o mal copiado: copialo entero.") from None
+        for x in datos if isinstance(datos, list) else (datos.get("cookies") or [] if isinstance(datos, dict) else []):
+            if not isinstance(x, dict) or not x.get("name"):
+                continue
+            c = {"name": str(x["name"]), "value": str(x.get("value") or ""), "domain": str(x.get("domain") or ""),
+                 "path": str(x.get("path") or "/"), "secure": bool(x.get("secure", True)),
+                 "httpOnly": bool(x.get("httpOnly", False))}
+            vence = x.get("expirationDate") or x.get("expires")
+            if isinstance(vence, (int, float)) and vence > 0:
+                c["expires"] = int(vence)
+            out.append(c)
+    else:
+        tabla = False
+        for r in texto.splitlines():
+            r = r.strip("\r")
+            if not r.strip() or (r.startswith("#") and not r.startswith("#HttpOnly_")):
+                continue
+            partes = r.split("\t") if "\t" in r else r.split(None, 6)
+            if len(partes) < 7 or partes[1].upper() not in ("TRUE", "FALSE") or "." not in partes[0]:
+                continue
+            tabla = True
+            dominio, _, ruta, segura, vence, nombre, valor = [x.strip() for x in partes[:7]]
+            c = {"name": nombre, "value": valor, "domain": dominio.replace("#HttpOnly_", ""), "path": ruta or "/",
+                 "secure": segura.upper() == "TRUE", "httpOnly": dominio.startswith("#HttpOnly_")}
+            if vence.isdigit() and int(vence) > 0:
+                c["expires"] = int(vence)
+            out.append(c)
+        if not tabla and "=" in texto:
+            linea = re.sub(r"^\s*cookie\s*:\s*", "", " ".join(texto.split()), flags=re.I)
+            pares = [x.strip() for x in linea.split(";") if "=" in x]
+            nombres = [x.split("=", 1)[0].strip() for x in pares]
+            red = "tiktok" if any(n.startswith(NOMBRES_TIKTOK) for n in nombres) else "instagram"
+            for x in pares:
+                n, v = x.split("=", 1)
+                if re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}", n.strip()):
+                    out.append({"name": n.strip(), "value": v.strip(), "domain": REDES[red], "path": "/",
+                                "secure": True, "httpOnly": False})
+    out = [c for c in out if _red(c["domain"]) and len(c["value"]) <= 4096]
+    if not out:
+        raise ValueError("No encontré cookies de Instagram o TikTok en ese texto. Pegá lo que exporta la extensión "
+                         "(cookies.txt, JSON o la línea «nombre=valor; ...») con la cuenta iniciada.")
+    redes = {_red(c["domain"]) for c in out}
+    for red in redes:
+        if not any(_red(c["domain"]) == red and c["name"] == SESION_DE[red] and c["value"] for c in out):
+            raise ValueError(f"En las cookies de {red.title()} falta «{SESION_DE[red]}»: exportalas con la cuenta "
+                             "«para mirar» iniciada en ese navegador.")
+    return out
+
+
+def _netscape(cookies: list[dict]) -> str:
+    renglones = ["# Netscape HTTP Cookie File"]
+    for c in cookies:
+        dominio = ("#HttpOnly_" if c.get("httpOnly") else "") + c["domain"]
+        renglones.append("\t".join([dominio, "TRUE" if c["domain"].startswith(".") else "FALSE", c.get("path") or "/",
+                                    "TRUE" if c.get("secure") else "FALSE", str(int(max(0, c.get("expires") or 0))),
+                                    c["name"], c["value"]]))
+    return "\n".join(renglones) + "\n"
+
+
+def cookies_guardadas() -> list[dict]:
+    f = _ruta_cookies()
+    if not f.is_file():
+        return []
+    try:
+        return leer_cookies(f.read_text(encoding="utf-8", errors="replace"))
+    except ValueError:
+        return []
+
+
 def importar_cookies(texto: str) -> int:
-    """Carga la sesión de Instagram/TikTok (cookies.txt formato Netscape) en el perfil del buscador."""
-    cookies = []
-    for r in str(texto or "").splitlines():
-        if not r.strip() or (r.startswith("#") and not r.startswith("#HttpOnly_")):
-            continue
-        partes = r.split("\t")
-        if len(partes) < 7:
-            continue
-        dominio, _, ruta, segura, vence, nombre, valor = partes[:7]
-        http_only = dominio.startswith("#HttpOnly_")
-        dominio = dominio.replace("#HttpOnly_", "")
-        if not any(k in dominio for k in ("instagram", "tiktok")):
-            continue
-        c = {"name": nombre, "value": valor.strip(), "domain": dominio, "path": ruta or "/",
-             "secure": segura.upper() == "TRUE", "httpOnly": http_only}
-        if vence.strip().isdigit() and int(vence) > 0:
-            c["expires"] = int(vence)
-        cookies.append(c)
-    if not cookies:
-        raise ValueError("No encontré cookies de Instagram o TikTok en ese texto (formato cookies.txt).")
-    sync_playwright = _playwright()
-    abrir()
-    with sync_playwright() as p:
-        _, ctx = _contexto(p)
-        ctx.add_cookies(cookies)
-    # también para yt-dlp (bajar reels de Instagram con la misma sesión)
-    exportar_cookies(almacen.raiz() / "navegador" / "cookies.txt")
-    return len(cookies)
+    """Guarda la sesión de la cuenta "para mirar" en datos/navegador/cookies.txt (lo leen el buscador, que corre en el
+    worker, y las descargas con yt-dlp). No necesita abrir un navegador: la API y el worker son procesos distintos."""
+    nuevas = leer_cookies(texto)
+    redes = {_red(c["domain"]) for c in nuevas}
+    with candado("cookies"):
+        quedan = [c for c in cookies_guardadas() if _red(c["domain"]) not in redes]   # la otra red queda como estaba
+        todas = quedan + nuevas
+        f = _ruta_cookies()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(_netscape(todas), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(f)
+    if _abierto():                       # si el navegador del buscador ya está abierto en esta máquina, también
+        try:
+            sync_playwright = _playwright()
+            with sync_playwright() as p:
+                _, ctx = _contexto(p)
+                ctx.add_cookies(nuevas)
+        except Exception as ex:          # no es grave: el buscador las carga solo al arrancar
+            log.info("no pude pasar las cookies al navegador abierto: %s", ex)
+    return len(nuevas)
+
+
+def estado_sesion() -> dict:
+    cs = cookies_guardadas()
+    return {r: any(_red(c["domain"]) == r and c["name"] == SESION_DE[r] for c in cs) for r in REDES}
+
+
+def _cargar_sesion(ctx) -> None:
+    cs = cookies_guardadas()
+    if cs:
+        ctx.add_cookies(cs)
 
 
 def exportar_cookies(destino) -> int:
@@ -250,6 +352,7 @@ def _buscar(_d: dict) -> None:
         cands, sin_sesion = [], set()
         with sync_playwright() as p:
             _, ctx = _contexto(p)
+            _cargar_sesion(ctx)
             pg = ctx.new_page()
             estado(mensaje="Mirando de quién son los buenos…")
             _autores(pg)

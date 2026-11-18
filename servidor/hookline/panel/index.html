@@ -2104,15 +2104,16 @@ async function moverMultis(main, esp) {   // las multicuentas siguen a su main
 function cargarCookies() {
   const f = document.createElement("div"); f.className = "dlg-fondo";
   f.innerHTML = `<div class="dlg ancho" role="dialog" aria-modal="true"><div class="dlg-cab"><span class="dlg-ic">${icn("key")}</span><h2>Cargar sesión de Instagram/TikTok</h2></div>
-    <div class="dlg-tx">El buscador mira Instagram y TikTok con una cuenta "para mirar" (no la de las modelos). En tu navegador, con esa cuenta iniciada, instalá la extensión <b>Get cookies.txt</b>, exportá las cookies de instagram.com (y tiktok.com) y pegá acá el texto entero.</div>
-    <textarea class="in" id="ckTexto" rows="9" placeholder="# Netscape HTTP Cookie File" style="font-family:monospace;font-size:12px"></textarea>
+    <div class="dlg-tx">El buscador y las descargas miran Instagram y TikTok con una cuenta "para mirar" (no la de las modelos). En tu navegador, con esa cuenta iniciada, exportá las cookies de instagram.com (y de tiktok.com, aparte) con una extensión como <b>Get cookies.txt</b> o <b>Cookie-Editor</b> y pegá acá el texto entero. Sirve cookies.txt, JSON o la línea «nombre=valor; …».</div>
+    <div class="dlg-tx" style="color:var(--warn)">${icn("alert", "sm")} Ese texto es la sesión abierta de la cuenta: pegalo solo acá. No lo mandes por chat ni le saques captura (con eso cualquiera entra a la cuenta).</div>
+    <textarea class="in" id="ckTexto" rows="9" placeholder="# Netscape HTTP Cookie File   ·   o   [{&quot;name&quot;: ...}]   ·   o   sessionid=...; csrftoken=..." style="font-family:monospace;font-size:12px" autocomplete="off" spellcheck="false"></textarea>
     <div class="dlg-pie"><button class="btn" data-x>Cancelar</button><button class="btn prim" data-ok>${icn("check")}Guardar</button></div></div>`;
   document.body.appendChild(f); f.querySelector("#ckTexto").focus();
   f.addEventListener("click", async ev => {
     if (ev.target === f || ev.target.closest("[data-x]")) return f.remove();
     if (ev.target.closest("[data-ok]")) {
       const texto = f.querySelector("#ckTexto").value.trim(); if (!texto) return toast("Pegá el texto de cookies.txt", true);
-      try { const r = await api("/api/copiar", { op: "importar_cookies", texto }); f.remove(); toast(`Sesión guardada (${r.n} cookies)`); } catch (e) { fallo(e); }
+      try { const r = await api("/api/copiar", { op: "importar_cookies", texto }); f.remove(); toast(`Sesión guardada (${r.n} cookies)${r.redes && r.redes.length ? " de " + r.redes.join(" y ") : ""}`); } catch (e) { fallo(e); }
     }
   });
   f.addEventListener("keydown", ev => { if (ev.key === "Escape") f.remove(); });
