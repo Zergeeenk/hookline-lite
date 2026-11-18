@@ -187,6 +187,119 @@ class JuradoRes(_Base):
     resumen: str = Field(description="una línea: qué funciona y qué no")
 
 
+# --- versiones "para la API" ---------------------------------------------------------------------------------------------
+# Structured outputs compila el esquema a una gramática y rechaza los muy complejos ("Schema is too complex for
+# compilation", 400): pesan sobre todo los campos opcionales y los que aceptan dos tipos (x | None). La lectura del
+# ejemplo tiene muchos, así que a la API se le pide una versión con TODO obligatorio y valores "vacíos" (-1, 0, "", [])
+# en vez de null; `desde_api` la pasa a la forma de siempre (Lectura) antes de validar y guardar.
+class _MensajeChatAPI(_Base):
+    de: Literal["yo", "otro", "aviso"]
+    texto: str
+    hora: str = Field(description='"" si no se ve')
+
+
+class _ChatAPI(_Base):
+    mensajes: list[_MensajeChatAPI] = Field(description="[] si no hay captura de chat para dibujar")
+    x0: float
+    x1: float
+    y0: float
+
+
+class _RecuadroAPI(_Base):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class _PegarAPI(_Base):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    cuadro: float = Field(description="segundo del ejemplo donde la captura se ve completa")
+    a_y0: float = Field(description="a qué altura pegarla en la foto nueva (0-1); -1 = la misma")
+
+
+class _NotiAPI(_Base):
+    texto: str = Field(description='"" si no hay notificación')
+    titulo: str
+    x0: float = Field(description="-1 si no se sabe")
+    x1: float = Field(description="-1 si no se sabe")
+    y0: float = Field(description="-1 si no se sabe")
+
+
+class _TextoAPI(_Base):
+    texto: str
+    x: float
+    y: float
+    tam: float = Field(description="0 = tamaño normal")
+
+
+class LecturaAPI(_Base):
+    descartar: Literal["", "menor"] = Field(description='"menor" si la persona del ejemplo puede ser menor de edad; si no, ""')
+    corte: float = Field(description="segundo donde termina la parte de la persona y empieza el remate")
+    texto: str
+    texto_y: float = Field(description="0-1, dónde empieza el texto (arriba = 0); -1 si no hay texto")
+    texto_tam: float = Field(description="alto de letra / alto del video, ej. 0.042; 0 si no hay texto")
+    modelo: int = Field(description="número de la foto de la modelo que mejor encaja; 0 si no hay hoja de fotos")
+    notas: str
+    marca_agua: bool
+    chat: _ChatAPI
+    pegar: list[_PegarAPI] = Field(description="[] si no hay capturas reales para pegar")
+    noti: _NotiAPI
+    textos: list[_TextoAPI] = Field(description="[] si no hay textos sueltos")
+    recorte_remate: _RecuadroAPI = Field(description="todo en 0 si no hay que recortar")
+    fuente: str = Field(description='clave de la fuente del muestrario más parecida; "" si no estás segura')
+
+
+def _o_nada(v, minimo=None, maximo=None):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v != v or (minimo is not None and v < minimo) or (maximo is not None and v > maximo):
+        return None
+    return v
+
+
+def _lectura_desde_api(d: dict) -> dict:
+    if d.get("descartar") == "menor":
+        return {"descartar": "menor"}
+    out = {"texto": d.get("texto") or "", "notas": d.get("notas") or "", "marca_agua": bool(d.get("marca_agua"))}
+    out["corte"] = _o_nada(d.get("corte"), 0)
+    out["texto_y"] = _o_nada(d.get("texto_y"), 0, 1)
+    out["texto_tam"] = _o_nada(d.get("texto_tam"), 1e-9)
+    m = d.get("modelo")
+    out["modelo"] = m if isinstance(m, int) and not isinstance(m, bool) and m > 0 else None
+    ch = d.get("chat") or {}
+    if ch.get("mensajes"):
+        out["chat"] = {"mensajes": [{"de": x["de"], "texto": x["texto"], "hora": x.get("hora") or ""}
+                                    for x in ch["mensajes"]], "x0": ch["x0"], "x1": ch["x1"], "y0": ch["y0"]}
+    out["pegar"] = [{**{k: b[k] for k in ("x0", "y0", "x1", "y1", "cuadro")}, "a_y0": _o_nada(b.get("a_y0"), 0, 1)}
+                    for b in d.get("pegar") or []]
+    nt = d.get("noti") or {}
+    if str(nt.get("texto") or "").strip():
+        out["noti"] = {"texto": nt["texto"], "titulo": nt.get("titulo") or "Instagram",
+                       **{k: _o_nada(nt.get(k), 0) for k in ("x0", "x1", "y0")}}
+    out["textos"] = [{"texto": t["texto"], "x": t["x"], "y": t["y"], "tam": _o_nada(t.get("tam"), 1e-9)}
+                     for t in d.get("textos") or []]
+    rr = d.get("recorte_remate") or {}
+    if all(isinstance(rr.get(k), (int, float)) for k in ("x0", "y0", "x1", "y1")) and rr["x1"] > rr["x0"] \
+            and rr["y1"] > rr["y0"]:
+        out["recorte_remate"] = {k: rr[k] for k in ("x0", "y0", "x1", "y1")}
+    out["fuente"] = str(d.get("fuente") or "").strip() or None
+    return out
+
+
+# tipo → (lo que se le pide a la API, cómo se pasa a la forma de ESQUEMAS)
+PARA_API: dict[str, tuple[type[_Base], object]] = {"lectura": (LecturaAPI, _lectura_desde_api)}
+
+
+def para_api(tipo: str):
+    return PARA_API.get(tipo, (ESQUEMAS[tipo], None))
+
+
 ESQUEMAS: dict[str, type[_Base]] = {
     "jueces": Veredicto, "respuestas": Respuestas, "tendencias": TendenciasRes, "lectura": Lectura,
     "juez": Juicio, "filtrar": Filtro, "chat": RespuestaChat,

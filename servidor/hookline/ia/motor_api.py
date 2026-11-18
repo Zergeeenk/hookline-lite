@@ -18,7 +18,7 @@ import re
 from .. import almacen
 from ..config import config
 from ..modelos import TareaIA
-from .esquemas import ESQUEMAS
+from .esquemas import para_api
 from .prompts import sistema_de
 
 log = logging.getLogger("hookline.ia.api")
@@ -126,8 +126,26 @@ def _comunes(t: TareaIA, cfg) -> dict:
 
 
 def resolver(t: TareaIA) -> tuple[dict, dict]:
+    import anthropic
+    esquema, desde_api = para_api(t.tipo)
+    try:
+        resultado, uso = _resolver(t, esquema)
+    except anthropic.BadRequestError as ex:      # 400: el pedido está mal armado; reintentar no lo arregla
+        raise ErrorIA(f"La API de Claude rechazó el pedido: {_motivo(ex)}") from None
+    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as ex:
+        raise ErrorIA(f"La API de Claude rechazó la clave: {_motivo(ex)}. Revisala en Ajustes.") from None
+    return (desde_api(resultado) if desde_api else resultado), uso
+
+
+def _motivo(ex) -> str:
+    try:
+        return str(((ex.body or {}).get("error") or {}).get("message") or ex.message)[:300]
+    except AttributeError:
+        return str(ex)[:300]
+
+
+def _resolver(t: TareaIA, esquema) -> tuple[dict, dict]:
     cfg = config()
-    esquema = ESQUEMAS[t.tipo]
     c = cliente()
     kw = _comunes(t, cfg)
     mensajes = [{"role": "user", "content": _contenido(t)}]

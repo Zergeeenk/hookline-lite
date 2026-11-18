@@ -252,7 +252,8 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
     carpeta_destino.mkdir(parents=True, exist_ok=True)
     opts = {"outtmpl": str(carpeta_destino / f"{nombre}.%(ext)s"), "restrictfilenames": True,
             "format": "b[vcodec^=h264]/b[vcodec^=avc]/b", "noplaylist": True, "quiet": True,
-            "no_warnings": True, "noprogress": True, "logger": _Callado(), "ffmpeg_location": medios.ffmpeg()}
+            "no_warnings": True, "noprogress": True, "logger": _Callado(), "ffmpeg_location": medios.ffmpeg(),
+            "socket_timeout": 20, "retries": 2}
     cookies = almacen.raiz() / COOKIES_REL
     if cookies.is_file():
         opts["cookiefile"] = str(cookies)
@@ -267,8 +268,8 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
         if "photo" in txt:
             raise ValueError("Ese link es de fotos (no video): sacales captura y subilas.")
         if "instagram" in link and any(k in txt for k in ("login", "cookie", "rate", "empty media")):
-            raise ValueError("Instagram no dejó bajar ese video sin iniciar sesión. Cargá las cookies del buscador en "
-                             "Ajustes o subilo con el botón «Subir video».")
+            raise ValueError("Instagram no dejó bajar ese video: hace falta la sesión de la cuenta «para mirar» (Memes → "
+                             "«Cargar sesión de Instagram/TikTok») o subilo con el botón «Subir video».")
         raise ValueError("No se pudo bajar. Fijate que el link sea de un video público.")
     return video, info
 

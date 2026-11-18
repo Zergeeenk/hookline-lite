@@ -97,6 +97,15 @@ async def _runtime(_req, ex):
     return JSONResponse({"error": str(ex)[:300]}, status_code=400)
 
 
+@app.exception_handler(Exception)
+async def _inesperado(_req, ex: Exception):
+    """Lo que no se esperaba: JSON con el tipo de error (el panel lo muestra en vez de «Algo falló») y el detalle
+    completo solo en el log del servidor."""
+    log.exception("error inesperado: %s", ex)
+    return JSONResponse({"error": f"Algo falló en el servidor ({type(ex).__name__}). Avisale a quien lo administra: "
+                                  "el detalle quedó en los logs."}, status_code=500)
+
+
 @app.exception_handler(HTTPException)
 async def _http(_req, ex: HTTPException):
     return JSONResponse({"error": ex.detail}, status_code=ex.status_code)
@@ -500,7 +509,9 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
         _mod(svc_buscador, "buscador").buscar()
         return {"ok": True}
     if op == "importar_cookies":
-        return {"ok": True, "n": _mod(svc_buscador, "buscador").importar_cookies(str(d.get("texto") or ""))}
+        b = _mod(svc_buscador, "buscador")
+        n = b.importar_cookies(str(d.get("texto") or "")[:200_000])
+        return {"ok": True, "n": n, "redes": [r.title() for r, ok in b.estado_sesion().items() if ok]}
     if op == "votar":
         f.votar(link, d.get("voto"), d.get("motivo"))
         return {"ok": True}
