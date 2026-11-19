@@ -124,8 +124,41 @@ def sumar_fuentes(nuevas) -> int:
 
 def fuentes() -> list[dict]:
     with sesion() as s:
-        return [{"red": f.red, "consulta": f.consulta, "vistos": f.vistos, "sirven": f.sirven, "activa": f.activa}
+        return [{"id": f.id, "red": f.red, "consulta": f.consulta, "vistos": f.vistos, "sirven": f.sirven,
+                 "activa": f.activa, "texto": f"{f.red} {f.consulta}" if f.consulta.startswith(("@", "#"))
+                 else f"{f.red}: {f.consulta}"}
                 for f in s.scalars(select(FuenteBusqueda).order_by(FuenteBusqueda.id))]
+
+
+def fuente(fid, activa=None, borrar: bool = False) -> None:
+    try:
+        fid = int(fid)
+    except (TypeError, ValueError):
+        raise ValueError("Esa fuente no existe.") from None
+    with sesion() as s:
+        f = s.get(FuenteBusqueda, fid)
+        if not f:
+            raise ValueError("Esa fuente no existe.")
+        if borrar:
+            s.delete(f)
+        elif activa is not None:
+            f.activa = bool(activa)
+
+
+def sembrar_desde_banco() -> int:
+    """Si no hay dónde buscar, se arranca por las cuentas de los memes que ya guardaron (las que mejor funcionan)."""
+    with sesion() as s:
+        ls = s.scalars(select(LinkBanco)).all()
+    nuevas = []
+    for l in ls:
+        m = re.search(r"tiktok\.com/@([\w.]{2,40})", l.link)
+        if m:
+            nuevas.append(f"tt @{m.group(1)}")
+            continue
+        usuario = str((l.datos or {}).get("usuario") or "")
+        if "instagram.com" in l.link and re.fullmatch(r"[\w.]{2,30}", usuario):
+            nuevas.append(f"ig @{usuario}")
+    return sumar_fuentes(nuevas)
 
 
 def _elegir() -> list[tuple[str, str, str]]:
@@ -331,8 +364,9 @@ def buscar(objetivo: int = 30) -> dict:
         raise ValueError("El buscador de memes está apagado en este servidor (HOOKLINE_BUSCADOR=0).")
     if estado()["estado"] in ("buscando", "filtrando"):
         raise ValueError("Ya está buscando: esperá a que termine.")
-    if not _elegir():
-        raise ValueError("No hay fuentes para buscar: agregá cuentas o frases en Memes → Fuentes.")
+    if not _elegir() and not sembrar_desde_banco():
+        raise ValueError("Todavía no hay dónde buscar: en Memes → «Dónde busca» pegá cuentas (ig @cuenta, tt @cuenta) "
+                         "o frases (ig: pov soltera), o guardá links de memes que te gusten.")
     e = estado(estado="buscando", mensaje="Abriendo el navegador…", juntados=0, nuevos=0, error="",
                objetivo=max(1, int(objetivo or 30)), vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
     encolar("buscar", {}, clave=f"buscar:{time.time():.0f}", max_intentos=1)

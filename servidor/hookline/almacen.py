@@ -28,6 +28,7 @@ SECCIONES = {
     "candidatos": "trabajo/candidatos",
     "navegador": "navegador",
     "fuentes": "fuentes",         # fuentes/<clave>.ttf|otf (las subidas en la sección Fuentes)
+    "stickers": "stickers",       # stickers/<nombre>.png (emojis de iPhone, logos...: se pegan sobre el video)
 }
 
 

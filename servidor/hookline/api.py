@@ -7,6 +7,7 @@ Documentación automática en /docs (OpenAPI).
 from __future__ import annotations
 
 import logging
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -31,7 +32,7 @@ log = logging.getLogger("hookline.api")
 PANEL = Path(__file__).parent / "panel" / "index.html"
 MAX_SUBIDA = 1024 * 1024 * 1024
 # desde dónde se pueden ver archivos por /mini y /media
-SECCIONES_VISIBLES = ("subir", "material", "copias", "resultados", "jueces", "candidatos")
+SECCIONES_VISIBLES = ("subir", "material", "copias", "resultados", "jueces", "candidatos", "stickers")
 
 app = FastAPI(title="Hookline", version=__version__,
               description="Community manager de Instagram multi-cuenta. Auth: cookie de sesión (panel) o "
@@ -477,7 +478,20 @@ def material_post(d: dict = Depends(_json), q: Quien = requerir()):
 def copias(q: Quien = requerir()):
     f = _mod(svc_fabrica, "fábrica")
     return {"items": f.listar(), "opciones": f.opciones(), "links": f.links(),
-            "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."}}
+            "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."},
+            "fuentes_busqueda": svc_buscador.fuentes() if svc_buscador else []}
+
+
+@app.get("/api/copia_capa")
+def copia_capa(id: str, que: str, k: int = 0, q: Quien = requerir()):
+    """La imagen de una capa del editor (captura recortada, chat o notificación) para verla y moverla."""
+    p = _mod(svc_fabrica, "fábrica").capa(id, que, k)
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/sticker_subir")
+def sticker_subir(nombre: str = "sticker.png", datos: bytes = Depends(_cuerpo), q: Quien = requerir()):
+    return {"ok": True, "sticker": _mod(svc_fabrica, "fábrica").subir_sticker(nombre, datos)}
 
 
 @app.post("/api/copiar_subir")
@@ -507,6 +521,20 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
         return {"ok": True, "n": f.guardar_links(d.get("link"))}
     if op == "buscar":
         _mod(svc_buscador, "buscador").buscar()
+        return {"ok": True}
+    if op == "sumar_fuentes":
+        b = _mod(svc_buscador, "buscador")
+        renglones = [r for r in str(d.get("texto") or "")[:20000].splitlines() if r.strip()]
+        n = b.sumar_fuentes(renglones)
+        if renglones and not n and not any(re.match(r"\s*(ig|tt)\b", r, re.I) for r in renglones):
+            raise ValueError("Escribí una por renglón, así: «ig @cuenta», «tt @cuenta», «ig: frase» o «ig #hashtag».")
+        return {"ok": True, "n": n, "fuentes": b.fuentes()}
+    if op == "fuente_busqueda":
+        b = _mod(svc_buscador, "buscador")
+        b.fuente(d.get("fuente"), activa=d.get("activa"), borrar=bool(d.get("borrar")))
+        return {"ok": True, "fuentes": b.fuentes()}
+    if op == "borrar_sticker":
+        f.borrar_sticker(str(d.get("archivo") or ""))
         return {"ok": True}
     if op == "importar_cookies":
         b = _mod(svc_buscador, "buscador")

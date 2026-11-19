@@ -238,9 +238,9 @@ class _Cliente:
 
 LECTURA_API = {"descartar": "", "corte": 2.4, "texto": "Cuando me dice «ya llego»", "texto_y": 0.18,
                "texto_tam": 0.042, "modelo": 3, "notas": "remate de perro", "marca_agua": False,
-               "chat": {"mensajes": [], "x0": 0, "x1": 0, "y0": 0},
+               "chat": {"hay": False, "mensajes": [], "x0": 0, "x1": 0, "y0": 0},
                "pegar": [{"x0": 0.1, "y0": 0.2, "x1": 0.9, "y1": 0.4, "cuadro": 1.5, "a_y0": -1}],
-               "noti": {"texto": "", "titulo": "", "x0": -1, "x1": -1, "y0": -1},
+               "noti": {"hay": False, "texto": "", "titulo": "", "x0": -1, "x1": -1, "y0": -1},
                "textos": [{"texto": "jaja", "x": 0.5, "y": 0.8, "tam": 0}],
                "recorte_remate": {"x0": 0, "y0": 0, "x1": 0, "y1": 0}, "fuente": ""}
 
@@ -265,8 +265,9 @@ def test_la_lectura_va_a_la_api_simple_y_vuelve_en_la_forma_de_siempre(monkeypat
     falso.salida = {**LECTURA_API, "descartar": "menor"}
     assert motor_api.resolver(_tarea_lectura())[0] == {"descartar": "menor"}
     falso.salida = {**LECTURA_API, "modelo": 0, "corte": -1, "texto_y": -1, "texto_tam": 0, "fuente": "meme",
-                    "chat": {"mensajes": [{"de": "yo", "texto": "hola", "hora": ""}], "x0": 0.1, "x1": 0.9, "y0": 0.3},
-                    "noti": {"texto": "te siguió", "titulo": "", "x0": -1, "x1": 0.9, "y0": 0.1},
+                    "chat": {"hay": True, "mensajes": [{"de": "yo", "texto": "hola", "hora": ""}], "x0": 0.1, "x1": 0.9,
+                             "y0": 0.3},
+                    "noti": {"hay": True, "texto": "te siguió", "titulo": "", "x0": -1, "x1": 0.9, "y0": 0.1},
                     "recorte_remate": {"x0": 0, "y0": 0.1, "x1": 1, "y1": 0.9}}
     r = motor_api.resolver(_tarea_lectura())[0]
     assert r["modelo"] is None and r["corte"] is None and r["texto_y"] is None and r["texto_tam"] is None
@@ -282,11 +283,11 @@ _num = st.floats(min_value=-5, max_value=5, allow_nan=False)
 @given(st.fixed_dictionaries({
     "descartar": st.sampled_from(["", "menor"]), "corte": _num, "texto": st.text(max_size=40), "texto_y": _num,
     "texto_tam": _num, "modelo": st.integers(-3, 40), "notas": st.text(max_size=20), "marca_agua": st.booleans(),
-    "chat": st.fixed_dictionaries({"mensajes": st.lists(st.fixed_dictionaries({
+    "chat": st.fixed_dictionaries({"hay": st.booleans(), "mensajes": st.lists(st.fixed_dictionaries({
         "de": st.sampled_from(["yo", "otro", "aviso"]), "texto": st.text(max_size=10), "hora": st.text(max_size=5)}),
         max_size=3), "x0": _num, "x1": _num, "y0": _num}),
     "pegar": st.lists(st.fixed_dictionaries({k: _num for k in ("x0", "y0", "x1", "y1", "cuadro", "a_y0")}), max_size=3),
-    "noti": st.fixed_dictionaries({"texto": st.text(max_size=10), "titulo": st.text(max_size=10),
+    "noti": st.fixed_dictionaries({"hay": st.booleans(), "texto": st.text(max_size=10), "titulo": st.text(max_size=10),
                                    "x0": _num, "x1": _num, "y0": _num}),
     "textos": st.lists(st.fixed_dictionaries({"texto": st.text(max_size=10), "x": _num, "y": _num, "tam": _num}),
                        max_size=3),

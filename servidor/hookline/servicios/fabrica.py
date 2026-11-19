@@ -46,6 +46,8 @@ ANCHO_MAX = 0.72      # el texto se parte en renglones para no pasar el 72 % del
 INTERLINEA = 1.25
 CAJA_PAD = 0.28
 MAX_VERSIONES = 15
+MAX_STICKERS = 8
+STICKER_LADO = 512        # se guardan a 512 px como mucho (un emoji no necesita más)
 IG_ARRIBA, IG_ABAJO = 0.11, 0.81     # lo que tapa Instagram en un reel: usuario arriba, texto y botones abajo
 ESCALA_TEXTO = 1.2                   # la letra un 20 % más grande que la del ejemplo
 NOTA_MIN, REINTENTOS = 3, 2          # juez: nota 1-5; menos de 3 se rehace (hasta 2 veces)
@@ -128,9 +130,14 @@ def normalizar(c: dict) -> dict:
     if c.get("texto_y") is None:
         c["texto_y"] = VIEJAS_POS.get(c.get("texto_pos"), 0.17)
     c.setdefault("texto_x", 0.5)
-    # siempre letra blanca, sin sombra ni fondo. La fuente: la elegida (a mano o por Claude) si sigue existiendo;
-    # si no, la predeterminada de la sección Fuentes (la Clásica de Instagram si nadie eligió otra)
-    c.update(estilo="nada", color="blanco")
+    # estilo y color: los que eligieron (borde, sombra, caja...); por defecto letra blanca sin nada, como Instagram.
+    # La fuente: la elegida (a mano o por Claude) si sigue existiendo; si no, la predeterminada de la sección Fuentes
+    if not isinstance(c.get("estilo"), str) or c["estilo"] not in ESTILOS:
+        c["estilo"] = "nada"
+    if not isinstance(c.get("color"), str) or c["color"] not in COLORES:
+        c["color"] = "blanco"
+    st = c.get("stickers")
+    c["stickers"] = [x for x in st if isinstance(x, dict) and isinstance(x.get("archivo"), str)] if isinstance(st, list) else []
     if not c.get("fuente") or not fuentes.ruta(c["fuente"]):
         c["fuente"] = fuentes.predeterminada()
     c.setdefault("audio", "ejemplo")
@@ -202,7 +209,90 @@ def listar() -> list[dict]:
 
 def opciones() -> dict:
     return {"fuentes": fuentes.disponibles(), "colores": COLORES, "ancho_max": ANCHO_MAX, "interlinea": INTERLINEA,
-            "caja_pad": CAJA_PAD}
+            "caja_pad": CAJA_PAD, "escala_texto": ESCALA_TEXTO, "estilos": list(ESTILOS), "stickers": stickers()}
+
+
+# --- stickers (emojis de iPhone, logos...): imágenes PNG que se pegan sobre la parte de la modelo -----------------------------
+def _dir_stickers() -> Path:
+    return almacen.dir_de("stickers")
+
+
+def stickers() -> list[dict]:
+    d = _dir_stickers()
+    return [{"archivo": p.name, "nombre": p.stem, "url": almacen.relativa(p)}
+            for p in sorted(d.glob("*.png"), key=lambda p: p.stat().st_mtime)]
+
+
+def subir_sticker(nombre: str, datos: bytes) -> dict:
+    """PNG/WebP/JPG/GIF → PNG con transparencia, 512 px como mucho. Para emojis de iPhone: sacales captura o bajalos en PNG."""
+    from io import BytesIO
+    from PIL import Image, UnidentifiedImageError
+    if not datos or len(datos) > 8 * 1024 * 1024:
+        raise ValueError("El sticker tiene que ser una imagen de menos de 8 MB.")
+    try:
+        im = Image.open(BytesIO(datos))
+        im.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError):
+        raise ValueError("Eso no es una imagen: subí un PNG (mejor con fondo transparente).") from None
+    if im.width * im.height > 40_000_000:
+        raise ValueError("La imagen es demasiado grande.")
+    im = im.convert("RGBA")
+    caja = im.getbbox()                     # sin bordes transparentes de sobra
+    if caja:
+        im = im.crop(caja)
+    im.thumbnail((STICKER_LADO, STICKER_LADO))
+    base = re.sub(r"[^0-9A-Za-z_-]+", "-", Path(str(nombre or "sticker")).stem).strip("-")[:40] or "sticker"
+    d = _dir_stickers()
+    destino = d / f"{base}.png"
+    i = 2
+    while destino.exists():
+        destino = d / f"{base}-{i}.png"
+        i += 1
+    tmp = destino.with_suffix(".tmp")
+    im.save(tmp, "PNG")
+    tmp.replace(destino)
+    return {"archivo": destino.name, "nombre": destino.stem, "url": almacen.relativa(destino)}
+
+
+def borrar_sticker(archivo: str) -> None:
+    p = _dir_stickers() / Path(str(archivo)).name
+    if p.suffix == ".png" and p.is_file():
+        p.unlink()
+
+
+# --- capas del editor: la imagen de cada cosa que se pega (para verla y moverla en la vista previa) -----------------------------
+def capa(cid: str, que: str, k: int = 0) -> Path:
+    c = _datos(cid)
+    d = _dir(cid) / "_capas"
+    d.mkdir(exist_ok=True)
+    w = int(c.get("ancho") or 720)
+    if que == "chat" and isinstance(c.get("chat"), dict) and c["chat"].get("mensajes"):
+        ch = c["chat"]
+        ancho = max(60, int(w * (_num(ch.get("x1"), 0.82, 0, 1) - _num(ch.get("x0"), 0.18, 0, 1))))
+        chat_img.dibujar(ch["mensajes"], ancho, d / "chat.png")
+        return d / "chat.png"
+    if que == "noti" and isinstance(c.get("noti"), dict) and c["noti"].get("texto"):
+        nt = c["noti"]
+        ancho = max(60, int(w * (_num(nt.get("x1"), 0.88, 0, 1) - _num(nt.get("x0"), 0.12, 0, 1))))
+        chat_img.notificacion(nt["texto"], ancho, d / "noti.png", nt.get("titulo") or "Instagram")
+        return d / "noti.png"
+    if que == "pegar":
+        pg = [b for b in (c.get("pegar") or []) if isinstance(b, dict)]
+        if not (0 <= k < len(pg)) or not c.get("ejemplo"):
+            raise ValueError("Esa captura ya no está.")
+        from PIL import Image
+        b, h = pg[k], int(c.get("alto") or 1280)
+        dur = float(c.get("duracion") or 1)
+        t = _num(b.get("cuadro"), dur * 0.5, 0, max(0.0, dur - 0.1))
+        cuadro = d / f"cuadro-{k}.jpg"
+        if not medios.cuadro(_dir(cid) / c["ejemplo"], t, cuadro, w):
+            raise ValueError("No pude sacar el cuadro del ejemplo.")
+        im = Image.open(cuadro).convert("RGB").resize((w, h))
+        x0, y0 = int(w * _num(b.get("x0"), 0, 0, 1)), int(h * _num(b.get("y0"), 0, 0, 1))
+        x1, y1 = max(x0 + 2, int(w * _num(b.get("x1"), 1, 0, 1))), max(y0 + 2, int(h * _num(b.get("y1"), 1, 0, 1)))
+        im.crop((x0, y0, x1, y1)).save(d / f"pegar-{k}.png")
+        return d / f"pegar-{k}.png"
+    raise ValueError("Esa capa no existe.")
 
 
 def _nueva(**campos) -> str:
@@ -351,6 +441,10 @@ def _hacer_fichas() -> None:
             nombre = f"{re.sub(r'[^0-9A-Za-z_-]', '', str(info.get('id') or uuid.uuid4().hex))[:40]}.jpg"
             ficha = {"ficha": "ok", "dur": round(float(info.get("duration") or 0), 1)}
             autor = str(info.get("uploader") or info.get("channel") or "")[:60]
+            m = re.search(r"tiktok\.com/@([\w.]{2,40})", link)
+            usuario = m.group(1) if m else str((info.get("channel") if "instagram.com" in link else info.get("uploader")) or "")
+            if re.fullmatch(r"[\w.]{2,40}", usuario or ""):
+                ficha["usuario"] = usuario
             if info.get("title"):
                 ficha["titulo_orig"] = str(info["title"])[:160]
             if info.get("thumbnail"):
@@ -636,10 +730,22 @@ def _limpiar_campos(l: dict, dur) -> dict:
     if isinstance(l.get("pegar"), list) and not (out.get("chat") or {}).get("mensajes"):
         out["pegar"] = [{**{k: round(_num(b.get(k), 0, 0, 1), 4) for k in ("x0", "y0", "x1", "y1")},
                          **{k: round(_num(b[k], 0, 0, 600), 2) for k in ("cuadro", "aparece") if b.get(k) not in (None, "")},
-                         **({"a_y0": round(_num(b["a_y0"], 0, 0, 1), 4)} if b.get("a_y0") not in (None, "") else {})}
+                         **({k: round(_num(b[k], 0, -0.5, 1), 4) for k in ("a_x0", "a_y0") if b.get(k) not in (None, "")}),
+                         **({"a_ancho": round(_num(b["a_ancho"], 0.5, 0.05, 1.5), 4)} if b.get("a_ancho") not in (None, "") else {})}
                         for b in l["pegar"][:3] if isinstance(b, dict)]
     if l.get("texto") is not None:
         out["texto"] = str(l["texto"]).replace("\\n", "\n")[:300]
+    if isinstance(l.get("estilo"), str) and l["estilo"] in ESTILOS:
+        out["estilo"] = l["estilo"]
+    if isinstance(l.get("color"), str) and l["color"] in COLORES:
+        out["color"] = l["color"]
+    if isinstance(l.get("stickers"), list):
+        hay = {x["archivo"] for x in stickers()}
+        out["stickers"] = [{"archivo": str(s["archivo"]), "x0": round(_num(s.get("x0"), 0.4, -0.5, 1), 4),
+                            "y0": round(_num(s.get("y0"), 0.4, -0.5, 1), 4),
+                            "ancho": round(_num(s.get("ancho"), 0.2, 0.03, 1.5), 4)}
+                           for s in l["stickers"][:MAX_STICKERS] if isinstance(s, dict) and isinstance(s.get("archivo"), str)
+                           and s["archivo"] in hay]
     if isinstance(l.get("fuente"), str) and l["fuente"] in fuentes.claves_disponibles():
         out["fuente"] = l["fuente"]
     l = {k: v for k, v in (l or {}).items() if isinstance(k, str)}
@@ -1046,10 +1152,14 @@ def _render_ya(datos: dict) -> None:
                 x0, y0 = int(w * _num(b.get("x0"), 0, 0, 1)), int(h * _num(b.get("y0"), 0, 0, 1))
                 cw_, ch_ = max(2, int(w * _num(b.get("x1"), 1, 0, 1)) - x0), max(2, int(h * _num(b.get("y1"), 1, 0, 1)) - y0)
                 t = _num(b.get("cuadro"), min(dur * 0.5, max(0.0, corte - 0.3)), 0, max(0.0, dur - 0.1))
+                # dónde y de qué tamaño se pega (lo que movieron en el editor); si no, en el mismo lugar del ejemplo
+                ax = int(w * _num(b.get("a_x0"), x0 / w, -0.5, 1))
+                ay = int(h * _num(b.get("a_y0"), y0 / h, -0.5, 1))
+                aw = max(2, int(w * _num(b.get("a_ancho"), cw_ / w, 0.02, 1.5))) // 2 * 2
                 base += (f"[0:v]trim=start={t:.2f},setpts=PTS-STARTPTS,scale={w}:{h},fps=30,setsar=1,"
-                         f"crop={cw_}:{ch_}:{x0}:{y0},trim=end_frame=1,loop=loop=-1:size=1:start=0,"
+                         f"crop={cw_}:{ch_}:{x0}:{y0},scale={aw}:-2,trim=end_frame=1,loop=loop=-1:size=1:start=0,"
                          f"setpts=N/30/TB,trim=0:{corte:.2f}[p{k}];"
-                         f"[m{k}][p{k}]overlay={x0}:{int(h * _num(b.get('a_y0'), y0 / h, 0, 1))}[m{k + 1}];")
+                         f"[m{k}][p{k}]overlay={ax}:{ay}[m{k + 1}];")
             base += f"[m{len(pegar)}]null"
         nt = c.get("noti") if isinstance(c.get("noti"), dict) else None
         if nt and nt.get("texto"):
@@ -1068,6 +1178,16 @@ def _render_ya(datos: dict) -> None:
             entradas += ["-loop", "1", "-i", str(d / "_chat.png")]
             base += (f"[cb];[{ni}:v]format=rgba,trim=0:{corte:.2f},setpts=PTS-STARTPTS[chat];"
                      f"[cb][chat]overlay={int(w * cx0)}:{cy0},null")
+        for k, st in enumerate(c.get("stickers") or []):      # emojis de iPhone, logos: PNG con transparencia
+            sp = _dir_stickers() / Path(str(st.get("archivo") or "")).name
+            if not sp.is_file():
+                continue
+            sw = max(4, int(w * _num(st.get("ancho"), 0.2, 0.03, 1.5))) // 2 * 2
+            ni = entradas.count("-i")
+            entradas += ["-loop", "1", "-i", str(sp)]
+            base += (f"[sb{k}];[{ni}:v]format=rgba,scale={sw}:-2,trim=0:{corte:.2f},setpts=PTS-STARTPTS[st{k}];"
+                     f"[sb{k}][st{k}]overlay={int(w * _num(st.get('x0'), 0.4, -0.5, 1))}:"
+                     f"{int(h * _num(st.get('y0'), 0.4, -0.5, 1))},null")
         p_cl = fuentes.ruta_obligatoria("clasica")
         f_cl = _esc_ff(p_cl)
         for k, tx in enumerate(t for t in (c.get("textos") or []) if isinstance(t, dict) and t.get("texto")):
@@ -1150,6 +1270,13 @@ def _render_ya(datos: dict) -> None:
         return
     actividad("listo", "Reel armado: pasa al juez" if c.get("juzgar") else "Reel armado",
               img=almacen.relativa(salida), copia=cid, cuenta=c.get("cuenta", ""))
+    try:
+        from ..comun import aviso
+        titulo = (c.get("texto") or "").strip().splitlines()[0][:70] if (c.get("texto") or "").strip() else cid
+        aviso(f"🎬 Video listo: «{titulo}»" + (f" para @{c['cuenta']}" if c.get("cuenta") else "")
+              + (". Ahora lo revisa el juez." if c.get("juzgar") else ". Miralo en Copiar video."), copia=cid)
+    except Exception as ex:
+        log.warning("aviso de video listo %s: %s", cid, ex)
     try:
         a_resultados(cid)
     except Exception as ex:
