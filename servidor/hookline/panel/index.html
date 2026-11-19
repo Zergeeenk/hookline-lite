@@ -273,6 +273,8 @@ textarea.in { resize: vertical; min-height: 110px; line-height: 1.5; }
 .cp-mini-foto img { width: 44px; height: 55px; object-fit: cover; border-radius: 6px; }
 .cp-nota { margin: 0; font-size: 12.5px; color: var(--tx2); background: var(--sf2); padding: 8px 10px; border-radius: 10px; }
 @media (max-width: 1000px) { .cp-flujo { grid-template-columns: 1fr 1fr; } .cp-f-flecha { display: none; } .cp-f-info { grid-column: 1 / -1; } }
+.cp-flujo > *, .cp-grid > * { min-width: 0; }
+@media (max-width: 640px) { .cp-flujo { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 12px; gap: 10px; } }
 .cp-grid.ajustar { grid-template-columns: minmax(340px, 1fr) 340px; }
 @media (max-width: 1000px) { .cp-grid.ajustar { grid-template-columns: 1fr; } }
 .cp-h.sel { border-color: var(--ac); box-shadow: 0 0 0 2px var(--acs); }
@@ -316,6 +318,23 @@ textarea.in { resize: vertical; min-height: 110px; line-height: 1.5; }
 .cp-txt:hover, .cp-txt.arr { outline-color: rgba(255, 255, 255, .7); }
 .cp-txt.arr { cursor: grabbing; }
 .cp-txt .cp-l { width: fit-content; margin-left: auto; margin-right: auto; }
+.cp-capa { position: absolute; z-index: 2; cursor: grab; touch-action: none; outline: 1.5px dashed rgba(255, 255, 255, .5); outline-offset: 2px; }
+.cp-capa img { display: block; width: 100%; height: auto; pointer-events: none; }
+.cp-capa.arr { cursor: grabbing; outline-color: #fff; }
+.cp-capa .cp-tirador { opacity: 1; }
+.cp-capa-x { position: absolute; top: -11px; right: -11px; width: 22px; height: 22px; border-radius: 50%; border: 0; background: #e23b5a; color: #fff; font-weight: 700; cursor: pointer; line-height: 22px; padding: 0; box-shadow: 0 1px 4px rgba(0, 0, 0, .4); }
+.cp-capa-n { position: absolute; left: 0; top: -20px; font-size: 10.5px; color: #fff; background: rgba(0, 0, 0, .55); padding: 1px 6px; border-radius: 6px; white-space: nowrap; pointer-events: none; }
+.cp-colores { display: flex; flex-wrap: wrap; gap: 6px; }
+.cp-colores button { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--bd); cursor: pointer; padding: 0; }
+.cp-colores button.on { outline: 2.5px solid var(--ac); outline-offset: 2px; }
+.cp-stk { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cp-stk-it { position: relative; width: 46px; height: 46px; border-radius: 10px; border: 1px solid var(--bd); background: var(--sf2) center/contain no-repeat; cursor: pointer; padding: 0; }
+.cp-stk-it img { width: 100%; height: 100%; object-fit: contain; }
+.cp-stk-it .x { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; border-radius: 50%; background: var(--sf); border: 1px solid var(--bd); font-size: 11px; line-height: 16px; display: none; }
+.cp-stk-it:hover .x { display: block; }
+.bu-fu { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.bu-fu .chip { gap: 6px; }
+.bu-fu .chip button { border: 0; background: none; cursor: pointer; padding: 0; color: inherit; font-size: 13px; }
 .cp-guia { position: absolute; z-index: 2; opacity: 0; pointer-events: none; transition: opacity .15s; }
 .cp-guia.v { left: 50%; top: 0; bottom: 0; border-left: 1.5px dashed #ff5fa2; }
 .cp-guia.h { left: 0; right: 0; border-top: 1.5px dashed #5cc8ff; }
@@ -733,6 +752,7 @@ table.tabla { width: 100%; border-collapse: collapse; }
 <input type="file" id="cpArchivoEj" accept="video/mp4,video/quicktime,.mov" hidden>
 <input type="file" id="cpArchivoAudio" accept="audio/*,video/mp4,.m4a,.mp3,.wav" hidden>
 <input type="file" id="cpArchivoMod" accept="image/*,video/mp4,video/quicktime,.heic,.mov" hidden>
+<input type="file" id="stArchivo" accept="image/png,image/webp,image/jpeg,image/gif" hidden>
 <input type="file" id="cpArchivoRemate" accept="video/mp4,video/quicktime,.mov,.m4v" hidden>
 <input type="file" id="archivos" multiple accept="image/*,video/mp4,video/quicktime,.heic,.mov" hidden>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -1011,7 +1031,7 @@ function pintarSide() {
   const venc = S.piezas.filter(p => ["vencida", "error"].includes(p.estado)).length;
   const nom = S.espacios || {};
   $("#esp").innerHTML = espacio ? `<button class="esp-btn" data-cambiaresp title="Cambiar de espacio">${icn(espacio === "noticias" ? "globe" : "users", "sm")}<span>${esc(nom[espacio] || espacio)}</span>${icn("chevrons", "sm")}</button>` : "";
-  $("#menu").innerHTML = paginas().map(([k, n, i]) => `<button class="nv ${pagina === k ? "on" : ""}" data-ir="${k}">${icn(i)}<span>${n}</span>${k === "bandeja" && pend ? `<span class="n">${pend}</span>` : k === "inicio" && venc ? `<span class="n">${venc}</span>` : ""}</button>`).join("");
+  $("#menu").innerHTML = `<button class="nv" data-abrirchat>${icn("message")}<span>Chat con Claude</span>${$("#badge") && $("#badge").classList.contains("on") ? `<span class="n">•</span>` : ""}</button>` + paginas().map(([k, n, i]) => `<button class="nv ${pagina === k ? "on" : ""}" data-ir="${k}">${icn(i)}<span>${n}</span>${k === "bandeja" && pend ? `<span class="n">${pend}</span>` : k === "inicio" && venc ? `<span class="n">${venc}</span>` : ""}</button>`).join("");
   $("#cta").innerHTML = S.cuentas.length ? `<button class="cta-btn" id="ctaBtn" aria-haspopup="menu" aria-expanded="false">${avatar(c)}<span class="cta-t"><b>@${esc(c.usuario)}</b><small>${c.main ? `subcuenta de @${esc((cuenta(c.main) || {}).usuario || c.main)}` : "main · oficial"}${c.conectada ? "" : " · sin conectar"}</small></span>${icn("chevrons", "sm")}</button>
     <div class="cta-menu" id="ctaMenu" role="menu"><div class="cta-cab">Cuentas</div>
     ${S.cuentas.filter(x => !x.main).map(m => [m, ...S.cuentas.filter(x => x.main === m.id)].map(x => `<button class="cta-it ${x.main ? "sub" : ""} ${x.id === c.id ? "on" : ""}" data-cuenta="${esc(x.id)}" role="menuitem">${avatar(x, "sm")}<span class="cta-t"><b>@${esc(x.usuario)}</b><small>${x.main ? "subcuenta" : "main · oficial (la que se cuida)"}${x.conectada ? "" : " · sin conectar"}</small></span>${x.id === c.id ? icn("check", "sm") : ""}</button>`).join("")).join('<div class="cta-sep"></div>')}
@@ -1333,7 +1353,7 @@ const CP_PRESETS = {
   rosa: { fuente: "fuerte", estilo: "sombra", color: "rosa", n: "Rosa" },
   amarilla: { fuente: "moderna", estilo: "caja", color: "amarillo", n: "Amarilla" },
 };
-const CP_CAMPOS = ["ubicacion_auto", "texto", "texto_x", "texto_y", "texto_tam", "fuente", "estilo", "color", "corte", "audio", "audio_desde"];
+const CP_CAMPOS = ["ubicacion_auto", "texto", "texto_x", "texto_y", "texto_tam", "fuente", "estilo", "color", "corte", "audio", "audio_desde", "pegar", "chat", "noti", "stickers"];
 function cargarCopias(forzar) {
   const ocupada = CP && (CP.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((CP.busqueda || {}).estado));
   if (!forzar && CP && Date.now() - cpTs < (ocupada ? 2500 : 20000)) return;
@@ -1373,7 +1393,7 @@ function cpRenglones(texto, fuente, px, max) {
 }
 function cpPintarPrev() {
   const c = cpCopia(), prev = $("#cpPrev"), txt = $("#cpTxt"); if (!c || !prev || !txt) return;
-  const dr = cpDr(c), W = prev.clientWidth, H = prev.clientHeight, px = Math.max(6, dr.texto_tam * H), o = CP.opciones;
+  const dr = cpDr(c), W = prev.clientWidth, H = prev.clientHeight, o = CP.opciones, px = Math.max(6, dr.texto_tam * H * (o.escala_texto || 1));
   const pad = px * o.caja_pad, caja = dr.estilo === "caja", oscuro = dr.color === "negro";
   const lineas = cpRenglones(dr.texto, dr.fuente, px, W * o.ancho_max);
   txt.style.cssText = cpCss(dr, px) + `line-height:${o.interlinea};top:${dr.texto_y * H + (caja ? pad : 0) - px * (o.interlinea - 1) / 2}px;`;
@@ -1382,6 +1402,7 @@ function cpPintarPrev() {
   txt.style.left = Math.max(pad + 4 * W / (c.ancho || 720), Math.min(dr.texto_x * W - bw / 2, W - bw - pad)) + "px";
   const lbl = $("#cpTamLbl"); if (lbl) lbl.textContent = (dr.texto_tam * 100).toFixed(1).replace(".", ",") + " %";
   const rng = $("#cpTam"); if (rng && document.activeElement !== rng) rng.value = (dr.texto_tam * 100).toFixed(1);
+  cpPintarCapas(c, dr, W, H);
   const arriba = txt.offsetTop / H, abajo = (txt.offsetTop + txt.offsetHeight) / H, av = $("#cpAvisoZona");
   const cc = cpCaras[c.id], capa = $("#cpCaras");
   if (capa) capa.innerHTML = cc ? cc.caras.map(b => `<div class="cp-cara" style="left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%"><span>cara</span></div>`).join("") : "";
@@ -1389,6 +1410,74 @@ function cpPintarPrev() {
   if (av) av.innerHTML = lineas.length && (arriba < 0.11 || abajo > 0.81) ? `<span class="chip warn">${icn("alert", "sm")}${arriba < 0.11 ? "Arriba lo tapa tu usuario" : "Abajo lo tapan el texto y los botones de Instagram"}: subilo o bajalo un poco</span>` : "";
 }
 window.addEventListener("resize", () => { if (pagina === "copiar") cpPintarPrev(); });
+function cpCapas(c, dr) {
+  const out = [], v = encodeURIComponent(c.id + (c.render_n || 0)), url = (que, k) => `/api/copia_capa?id=${encodeURIComponent(c.id)}&que=${que}&k=${k || 0}&v=${v}`;
+  (dr.pegar || []).forEach((b, k) => out.push({ tipo: "pegar", k, n: `Captura ${k + 1}`, img: url("pegar", k), x: b.a_x0 ?? b.x0, y: b.a_y0 ?? b.y0, ancho: b.a_ancho ?? (b.x1 - b.x0), max: 1.5 }));
+  if (dr.chat && (dr.chat.mensajes || []).length) { const x0 = dr.chat.x0 ?? 0.18; out.push({ tipo: "chat", n: "Chat", img: url("chat") + "&w=" + (dr.chat.mensajes.length), x: x0, y: dr.chat.y0 ?? 0.6, ancho: (dr.chat.x1 ?? 0.82) - x0, max: 1 }); }
+  if (dr.noti && dr.noti.texto) { const x0 = dr.noti.x0 ?? 0.12; out.push({ tipo: "noti", n: "Notificación", img: url("noti"), x: x0, y: dr.noti.y0 ?? 0.25, ancho: (dr.noti.x1 ?? 0.88) - x0, max: 1 }); }
+  const lib = Object.fromEntries(((CP.opciones || {}).stickers || []).map(x => [x.archivo, x]));
+  (dr.stickers || []).forEach((st, k) => lib[st.archivo] && out.push({ tipo: "sticker", k, n: "Sticker", img: `/media?p=${encodeURIComponent(lib[st.archivo].url)}`, x: st.x0, y: st.y0, ancho: st.ancho, max: 1.5 }));
+  return out;
+}
+function cpPintarCapas(c, dr, W, H) {
+  const capa = $("#cpCapas"); if (!capa) return;
+  const firma = JSON.stringify([dr.pegar, dr.chat, dr.noti, dr.stickers, W, H]);
+  if (capa.dataset.firma === firma) return; capa.dataset.firma = firma;
+  capa.innerHTML = cpCapas(c, dr).map(x => `<div class="cp-capa" data-capa="${x.tipo}" data-k="${x.k ?? 0}" style="left:${x.x * W}px;top:${x.y * H}px;width:${Math.max(12, x.ancho * W)}px"><span class="cp-capa-n">${x.n}</span><img src="${x.img}" alt="" draggable="false"><button type="button" class="cp-capa-x" data-capax="${x.tipo}" data-k="${x.k ?? 0}" title="Sacar del video" aria-label="Sacar del video">×</button><span class="cp-tirador cp-capa-tir" title="Tirá para agrandar o achicar"></span></div>`).join("");
+}
+function cpCapaSet(tipo, k, pos) {
+  const c = cpCopia(); if (!c) return; const dr = cpDr(c);
+  const x = +pos.x.toFixed(4), y = +pos.y.toFixed(4), an = +pos.ancho.toFixed(4);
+  if (tipo === "pegar") { const a = (dr.pegar || []).map(b => ({ ...b })); if (a[k]) Object.assign(a[k], { a_x0: x, a_y0: y, a_ancho: an }); cpSet({ pegar: a }); }
+  if (tipo === "chat") cpSet({ chat: { ...dr.chat, x0: x, x1: +(x + an).toFixed(4), y0: y } });
+  if (tipo === "noti") cpSet({ noti: { ...dr.noti, x0: x, x1: +(x + an).toFixed(4), y0: y } });
+  if (tipo === "sticker") { const a = (dr.stickers || []).map(b => ({ ...b })); if (a[k]) Object.assign(a[k], { x0: x, y0: y, ancho: an }); cpSet({ stickers: a }); }
+}
+function cpCapaSacar(tipo, k) {
+  const c = cpCopia(); if (!c) return; const dr = cpDr(c);
+  if (tipo === "pegar") cpSet({ pegar: (dr.pegar || []).filter((_, i) => i !== k) });
+  if (tipo === "chat") cpSet({ chat: null });
+  if (tipo === "noti") cpSet({ noti: null });
+  if (tipo === "sticker") cpSet({ stickers: (dr.stickers || []).filter((_, i) => i !== k) });
+  cpPintarPrev();
+}
+let cpCap = null;
+document.addEventListener("pointerdown", e => {
+  const el = e.target.closest(".cp-capa"); if (!el || e.target.closest(".cp-capa-x")) return;
+  const c = cpCopia(), prev = $("#cpPrev"); if (!c || !prev) return;
+  const tipo = el.dataset.capa, k = +el.dataset.k, x = cpCapas(c, cpDr(c)).find(z => z.tipo === tipo && (z.k ?? 0) === k); if (!x) return;
+  cpCap = { el, tipo, k, x0: e.clientX, y0: e.clientY, ini: { x: x.x, y: x.y, ancho: x.ancho }, max: x.max, tam: !!e.target.closest(".cp-capa-tir"), W: prev.clientWidth, H: prev.clientHeight };
+  el.setPointerCapture(e.pointerId); el.classList.add("arr"); e.preventDefault();
+});
+document.addEventListener("pointermove", e => {
+  if (!cpCap) return; const g = cpCap, dx = (e.clientX - g.x0) / g.W, dy = (e.clientY - g.y0) / g.H;
+  const pos = { ...g.ini };
+  if (g.tam) pos.ancho = Math.max(0.04, Math.min(g.max, g.ini.ancho + dx));
+  else { pos.x = g.ini.x + dx; pos.y = g.ini.y + dy; }
+  if (g.max <= 1) pos.x = Math.max(0, Math.min(1 - pos.ancho, pos.x));     // chat y notificación: dentro del video
+  else pos.x = Math.max(-0.5, Math.min(1, pos.x));
+  pos.y = Math.max(-0.5, Math.min(1, pos.y));
+  g.el.style.left = pos.x * g.W + "px"; g.el.style.top = pos.y * g.H + "px"; g.el.style.width = Math.max(12, pos.ancho * g.W) + "px";
+  g.pos = pos;
+});
+document.addEventListener("pointerup", () => {
+  if (!cpCap) return; const g = cpCap; cpCap = null; g.el.classList.remove("arr");
+  if (g.pos) { cpCapaSet(g.tipo, g.k, g.pos); const cap = $("#cpCapas"); if (cap) cap.dataset.firma = ""; cpPintarPrev(); }
+});
+function cpSumarSticker(archivo) {
+  const c = cpCopia(); if (!c) return; const dr = cpDr(c), n = (dr.stickers || []).length;
+  if (n >= 8) return toast("Hasta 8 stickers por video", true);
+  cpSet({ stickers: [...(dr.stickers || []), { archivo, x0: 0.4 + (n % 3) * 0.05, y0: 0.42 + (n % 3) * 0.05, ancho: 0.2 }] });
+  cpPintarPrev(); toast("Sticker agregado: movelo y achicalo en la vista previa");
+}
+async function cpSubirSticker(f) {
+  if (!f) return;
+  try {
+    const r = await subirBytes(`/api/sticker_subir?nombre=${encodeURIComponent(f.name)}`, f);
+    CP.opciones.stickers = [...(CP.opciones.stickers || []), r.sticker];
+    cpSumarSticker(r.sticker.archivo); render();
+  } catch (er) { fallo(er); }
+}
 function cpAuto(ya) {
   clearTimeout(cpAutoT);
   if (!ya) { cpAutoT = setTimeout(() => cpAuto(true), 450); return; }
@@ -1413,7 +1502,7 @@ document.addEventListener("pointerdown", e => {
   const t = e.target.closest("#cpTxt"); if (!t) return;
   const c = cpCopia(); if (!c) return; const dr = cpDr(c);
   cpArr = { x: e.clientX, y: e.clientY, cx: dr.texto_x, cy: dr.texto_y, tam: dr.texto_tam, alto: t.offsetHeight, esquina: !!e.target.closest("#cpTirador") };
-  if (!cpArr.esquina) cpManual();
+  cpManual();
   t.setPointerCapture(e.pointerId); t.classList.add("arr"); e.preventDefault();
 });
 document.addEventListener("pointermove", e => {
@@ -1486,10 +1575,11 @@ function pCopiar() {
   const seg = (campo, ops) => `<div class="seg">${ops.map(([k, n, i]) => `<button type="button" class="${dr[campo] === k ? "on" : ""}" data-cpset="${campo}" data-cpval="${k}">${i ? icn(i, "sm") : ""}${n}</button>`).join("")}</div>`;
   const esFotoMod = /\.(jpe?g|png|webp|heic|bmp|gif)$/i.test(c.modelo || "");
   const fondoPrev = c.modelo_url ? (esFotoMod ? `<img src="${mini(c.modelo_url)}" alt="">` : reproductor(media(c.modelo_url), { auto: true })) : `<div class="vacio" style="color:#bbb"><div class="ic">${icn("image")}</div><p>Elegí una foto de la modelo</p></div>`;
-  const editor = `<div class="card cp-paso cp-editor"><h3>Texto sobre tu modelo<span class="cp-ayuda">${dr.ubicacion_auto !== false ? `${icn("sparkles", "sm")}Se ubica solo, sin tapar la cara · si lo movés, queda donde lo pongas` : `${icn("grip", "sm")}Arrastrá el texto · tirá de la esquina para agrandarlo`}</span></h3>
+  const editor = `<div class="card cp-paso cp-editor"><h3>Texto sobre tu modelo<span class="cp-ayuda">${dr.ubicacion_auto !== false ? `${icn("sparkles", "sm")}Se ubica solo, sin tapar la cara · si lo movés, queda donde lo pongas` : `${icn("grip", "sm")}Arrastrá el texto · tirá de la esquina para agrandarlo`} · las capturas, el chat y los stickers también se mueven y se achican</span></h3>
     <div class="cp-media cp-prev ${cpZonas ? "zonas" : ""}" id="cpPrev" style="${prop}">${fondoPrev}
       <div class="cp-zona arriba"><span>Acá va tu usuario</span></div><div class="cp-zona abajo"><span>Texto y botones de Instagram</span></div><div class="cp-zona der"></div>
       <div class="cp-caras" id="cpCaras"></div><div class="cp-guia v"></div><div class="cp-guia h" id="cpGuiaH"></div>
+      <div id="cpCapas"></div>
       <div class="cp-txt" id="cpTxt"><div class="cp-lineas"></div><span class="cp-tirador" id="cpTirador" title="Tirá para agrandar o achicar"></span></div></div>
     <div class="cp-barra" role="toolbar" aria-label="Texto">
       <button type="button" id="cpAutoBtn" data-cpauto class="${dr.ubicacion_auto !== false ? "on" : ""}">${icn("sparkles", "sm")}${dr.ubicacion_auto !== false ? "Ubicado solo" : "Ubicar solo"}</button><span class="sep"></span>
@@ -1501,9 +1591,12 @@ function pCopiar() {
       <label class="cp-campo"><span>Que la música empiece en el segundo</span><input class="in" id="cpAudioDesde" type="number" min="0" step="0.5" value="${dr.audio_desde || 0}"></label>` : `<small class="muted">Elegí la música de tu Material o subí un audio.</small>`}
       <div class="fila"><button class="btn sm" id="cpSubirAudio">${icn("upload")}Subir audio</button>${ac ? `<button class="btn sm" id="cpElegirAudio">${icn("music")}Elegir de Música</button>` : ""}</div></div>` : "";
   const controles = `<div class="card cp-paso"><h3>Texto y audio</h3>
-    <small class="muted" style="margin-top:-4px">Letra blanca, sin sombra. La letra la elegís abajo (o en Fuentes).</small>
+    <small class="muted" style="margin-top:-4px">Elegí la letra, el estilo y el color. Lo que ves en la vista previa es lo que sale.</small>
     <label class="cp-campo"><span>Texto en pantalla</span><textarea class="in" id="cpTexto" rows="2" style="min-height:60px">${esc(dr.texto || "")}</textarea>${c.faltan ? `<small style="color:var(--warn,#b8700f)">${icn("alert", "sm")} Esto no sale en el video con esta letra: ${esc(c.faltan)} (se saca solo)</small>` : ""}</label>
     <div class="cp-campo"><span>Letra <a href="#fuentes" data-ir="fuentes" style="font-weight:500">(ver todas)</a></span><div class="fu-elegir">${Object.entries(o.fuentes || {}).map(([k, f]) => `<button type="button" class="fu-chip ${dr.fuente === k ? "on" : ""}" data-cpset="fuente" data-cpval="${esc(k)}" style="font-family:'${esc(f.familia)}'">${esc(f.nombre)}</button>`).join("")}</div></div>
+    <div class="cp-campo"><span>Estilo</span>${seg("estilo", [["nada", "Sin nada"], ["sombra", "Sombra"], ["contorno", "Borde"], ["caja", "Caja"]])}</div>
+    <div class="cp-campo"><span>Color</span><div class="cp-colores">${Object.entries(o.colores || {}).map(([k, hx]) => `<button type="button" class="${dr.color === k ? "on" : ""}" data-cpset="color" data-cpval="${esc(k)}" style="background:#${esc(hx)}" title="${esc(k)}" aria-label="Color ${esc(k)}"></button>`).join("")}</div></div>
+    <div class="cp-campo"><span>Stickers y emojis</span><div class="cp-stk">${(o.stickers || []).map(x => `<button type="button" class="cp-stk-it" data-cpsticker="${esc(x.archivo)}" title="Agregar ${esc(x.nombre)} al video"><img src="/media?p=${encodeURIComponent(x.url)}" alt="${esc(x.nombre)}"><span class="x" data-cpstickerborrar="${esc(x.archivo)}" title="Borrar de la lista">×</span></button>`).join("")}<button type="button" class="btn sm" id="cpSubirSticker">${icn("upload", "sm")}Subir PNG</button></div><small class="muted">Para emojis de iPhone: subilos en PNG (mejor con fondo transparente). Quedan guardados para todos los videos.</small></div>
     <div class="cp-campo"><span>Tamaño <b id="cpTamLbl" style="color:var(--tx)"></b></span><input type="range" id="cpTam" min="2" max="9" step="0.1" value="${(dr.texto_tam * 100).toFixed(1)}"></div>
     <label class="cp-campo"><span>Segundos de tu modelo (después sigue el ejemplo)</span><input class="in" id="cpCorte" type="number" min="0.3" step="0.1" max="${c.duracion || 60}" value="${dr.corte || ""}"><small class="muted">El ejemplo dura ${String(c.duracion || 0).replace(".", ",")} s.</small></label>
     <div class="cp-campo"><span>Audio</span>${seg("audio", [["ejemplo", "Del ejemplo", "copy"], ["modelo", "De mi video", "video"], ["musica", "Otra música", "music"], ["ninguno", "Sin sonido", "volume-x"]])}</div>
@@ -1532,7 +1625,7 @@ function cpLeerCampos() {
 }
 document.addEventListener("input", e => {
   if (pagina !== "copiar") return;
-  if (e.target.id === "cpTam") { cpSet({ texto_tam: +e.target.value / 100 }); cpPintarPrev(); return cpAuto(); }
+  if (e.target.id === "cpTam") { cpManual(); cpSet({ texto_tam: +e.target.value / 100 }); return cpPintarPrev(); }
   if (["cpTexto", "cpCorte", "cpAudioDesde"].includes(e.target.id)) { cpLeerCampos(); if (e.target.id === "cpTexto") { cpPintarPrev(); cpAuto(); } }
 });
 document.addEventListener("change", e => { if (e.target.id === "cpFuente") { cpSet({ fuente: e.target.value }); render(); } });
@@ -1553,7 +1646,11 @@ function pInspiracion() {
     <div class="cp-hero-in"><textarea class="in" id="cpLink" rows="2" placeholder="Pegá links de TikTok o Instagram (uno por renglón)" autocomplete="off"></textarea>
       <div class="cp-hero-bt"><button class="btn prim" data-inbuscar ${busy ? "disabled" : ""}>${icn(busy ? "loader" : "search")}${busy ? "Buscando…" : "Buscar memes"}</button><button class="btn" id="cpGuardarLinks">${icn("download")}Guardar</button><button class="btn sm fant" data-incookies>${icn("key")}Cargar sesión de Instagram/TikTok</button>${libres ? [1, 10, 30].filter(n => n < libres).map(n => `<button class="btn sm" data-cphacer="${n}">Hacer ${n}</button>`).join("") : ""}</div></div></div>`;
   const filtros = `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:14px">${chip("libres", `Sin usar (${libres})`, inFiltro === "libres", "data-infiltro")}${chip("hechos", `Ya hechos (${ls.length - libres})`, inFiltro === "hechos", "data-infiltro")}${chip("todos", "Todos", inFiltro === "todos", "data-infiltro")}${cats.length ? `<span style="width:10px"></span>${chip("", "Todas", !inCat, "data-incat")}${cats.map(k => chip(k, IN_CAT[k] || k, inCat === k, "data-incat")).join("")}` : ""}</div>`;
-  if (!ls.length) return cab + `<div class="card" style="margin-top:14px"><div class="vacio"><div class="ic">${icn("sparkles")}</div><b>Todavía no hay memes guardados</b><p>Pegá arriba links de videos que te gusten.</p></div></div>`;
+  const fb = CP.fuentes_busqueda || [];
+  const dondeBusca = `<div class="card pad" style="margin-top:14px"><b>${icn("search")} Dónde busca</b><small class="muted" style="display:block;margin-top:4px">Una por renglón: <code>ig @cuenta</code>, <code>tt @cuenta</code>, <code>ig: pov soltera</code> o <code>ig #hashtag</code>. Las cuentas que suben este tipo de memes son lo que mejor funciona. Las cuentas de los memes que guardás se suman solas.</small>
+    <div class="fila" style="margin-top:8px;align-items:flex-start"><textarea class="in" id="buFuentes" rows="3" style="flex:1;min-width:220px;font-family:monospace;font-size:12.5px" placeholder="ig @cuenta_de_memes&#10;tt @otra_cuenta&#10;ig: pov soltera"></textarea><button class="btn" id="buSumar">${icn("plus")}Agregar</button></div>
+    ${fb.length ? `<div class="bu-fu">${fb.map(f => `<span class="chip ${f.activa ? "ac" : ""}" title="${f.vistos} vistos · ${f.sirven} sirvieron"><button type="button" data-bufuente="${f.id}" data-activa="${f.activa ? 0 : 1}" title="${f.activa ? "Pausar" : "Activar"}">${icn(f.activa ? "check" : "pause", "sm")}</button>${esc(f.texto)}<button type="button" data-bufuente="${f.id}" data-borrar="1" title="Sacar">×</button></span>`).join("")}</div>` : `<p class="muted" style="margin:8px 0 0;font-size:12.5px">Todavía no hay dónde buscar.</p>`}</div>`;
+  if (!ls.length) return cab + dondeBusca + `<div class="card" style="margin-top:14px"><div class="vacio"><div class="ic">${icn("sparkles")}</div><b>Todavía no hay memes guardados</b><p>Pegá arriba links de videos que te gusten.</p></div></div>`;
   const tarjeta = x => `<div class="card cp-h">
     <button type="button" class="cp-h-img" data-inprevia="${esc(x.link)}" title="Ver acá">${x.mini_url ? `<img src="/mini?p=${encodeURIComponent(x.mini_url)}" alt="" loading="lazy" onerror="this.remove()">` : `<span class="vacio" style="height:100%">${icn(x.ficha === "error" ? "alert" : x.ficha ? "video" : "loader")}</span>`}${x.copia ? `<span class="chip ok cp-h-est">${icn("check", "sm")}Hecho</span>` : x.cat ? `<span class="chip cp-h-est">${esc(IN_CAT[x.cat] || x.cat)}</span>` : ""}${x.ficha === "ok" ? `<span class="cp-h-play">${icn("play")}</span>` : ""}</button>
     <div class="cp-h-pie"><div class="cp-h-txt" title="${esc(x.titulo || x.titulo_orig || "")}">${esc(x.titulo || x.titulo_orig || x.link.replace(/^https?:\/\/(www\.)?/, ""))}</div>
@@ -1561,7 +1658,7 @@ function pInspiracion() {
       <div class="fila" style="gap:4px">${x.copia ? `<button class="btn sm" data-inver="${esc(x.copia)}">${icn("play", "sm")}Ver video</button>` : `<button class="btn sm prim" data-inhacer="${esc(x.link)}">${icn("sparkles", "sm")}Hacer</button>`}<button class="btn sm fant" data-cpborrarlink="${esc(x.link)}" title="Sacar">${icn("x", "sm")}</button></div>
       <div class="in-voto">${[["oro", "⭐", "De oro"], ["bueno", "👍", "Me gusta"], ["malo", "👎", "No me gusta"]].map(([k, e, t]) => `<button type="button" class="${x.voto === k ? "on" : ""}" data-invoto="${k}" data-inlink="${esc(x.link)}" title="${t}">${e}</button>`).join("")}</div>
       ${x.voto === "malo" ? `<div class="in-motivos">${IN_MOTIVOS.map(m => `<button type="button" class="${x.motivo === m ? "on" : ""}" data-inmotivo="${esc(m)}" data-inlink="${esc(x.link)}">${m}</button>`).join("")}</div>` : x.motivo ? `<small>${esc(x.motivo)}</small>` : ""}</div></div>`;
-  return cab + filtros + `<div class="cp-hist" style="margin-top:12px">${ver.map(tarjeta).join("") || `<p class="muted">Nada en este filtro.</p>`}</div>`;
+  return cab + dondeBusca + filtros + `<div class="cp-hist" style="margin-top:12px">${ver.map(tarjeta).join("") || `<p class="muted">Nada en este filtro.</p>`}</div>`;
 }
 let cpVerLinks = false;
 function cpBanco() {
@@ -1633,6 +1730,7 @@ async function cpElegirAudio() {
 }
 $("#cpArchivoEj").addEventListener("change", e => { cpSubir("ejemplo", e.target.files[0]); e.target.value = ""; });
 $("#cpArchivoMod").addEventListener("change", e => { cpSubir("modelo", e.target.files[0]); e.target.value = ""; });
+$("#stArchivo").addEventListener("change", e => { cpSubirSticker(e.target.files[0]); e.target.value = ""; });
 $("#cpArchivoAudio").addEventListener("change", e => { cpSubir("audio", e.target.files[0]); e.target.value = ""; });
 $("#cpArchivoRemate").addEventListener("change", e => { cpSubir("remate", e.target.files[0]); e.target.value = ""; });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.id === "cpLink") cpBajar(); });
@@ -2340,6 +2438,13 @@ document.addEventListener("click", async e => {
   if (d.cpborrarlink) return api("/api/copiar", { op: "borrar_link", link: d.cpborrarlink }).then(() => cargarCopias(true)).catch(fallo);
   if (t.id === "cpSubirEj") return $("#cpArchivoEj").click();
   if (t.id === "cpSubirMod") return $("#cpArchivoMod").click();
+  if (t.id === "cpSubirSticker") return $("#stArchivo").click();
+  if (t.id === "buSumar") { const ta = $("#buFuentes"); try { const r = await api("/api/copiar", { op: "sumar_fuentes", texto: ta.value }); CP.fuentes_busqueda = r.fuentes; ta.value = ""; toast(r.n ? `${r.n} ${r.n === 1 ? "fuente agregada" : "fuentes agregadas"}` : "Ya estaban"); render(); } catch (er) { fallo(er); } return; }
+  if (d.bufuente) { try { const r = await api("/api/copiar", { op: "fuente_busqueda", fuente: +d.bufuente, ...(d.borrar ? { borrar: true } : { activa: d.activa === "1" }) }); CP.fuentes_busqueda = r.fuentes; render(); } catch (er) { fallo(er); } return; }
+  if (d.abrirchat !== undefined) { $("#side").classList.remove("on"); return abrirChat(); }
+  if (e.target.closest("[data-cpstickerborrar]")) { const a = e.target.closest("[data-cpstickerborrar]").dataset.cpstickerborrar; if (!(await confirmar({ titulo: "¿Borrar este sticker de la lista?", texto: "Los videos ya armados no cambian.", ok: "Borrar", peligro: true }))) return; try { await api("/api/copiar", { op: "borrar_sticker", archivo: a }); CP.opciones.stickers = (CP.opciones.stickers || []).filter(x => x.archivo !== a); const c = cpCopia(); if (c) cpSet({ stickers: (cpDr(c).stickers || []).filter(x => x.archivo !== a) }); render(); } catch (er) { fallo(er); } return; }
+  if (d.cpsticker) return cpSumarSticker(d.cpsticker);
+  if (d.capax) { cpCapaSacar(d.capax, +d.k); return; }
   if (d.cpremate !== undefined) return $("#cpArchivoRemate").click();
   if (t.id === "cpSubirAudio") return $("#cpArchivoAudio").click();
   if (t.id === "cpElegirMod") return cpElegirModelo();
@@ -2352,7 +2457,7 @@ document.addEventListener("click", async e => {
   if (d.cppreset) { cpLeerCampos(); const pr = CP_PRESETS[d.cppreset]; cpSet({ fuente: pr.fuente, estilo: pr.estilo, color: pr.color }); return render(); }
   if (d.cpauto !== undefined) { const c = cpCopia(); if (!c) return; const on = cpDr(c).ubicacion_auto === false; cpSet({ ubicacion_auto: on }); delete cpAutoFirma[c.id]; render(); if (on) cpAuto(true); return; }
   if (d.cppos) { cpManual(); cpSet({ texto_y: +d.cppos }); return cpPintarPrev(); }
-  if (d.cptam) { const c = cpCopia(); if (c) { cpSet({ texto_tam: Math.max(0.02, Math.min(0.09, cpDr(c).texto_tam + +d.cptam)) }); cpPintarPrev(); cpAuto(); } return; }
+  if (d.cptam) { const c = cpCopia(); if (c) { cpManual(); cpSet({ texto_tam: Math.max(0.02, Math.min(0.09, cpDr(c).texto_tam + +d.cptam)) }); cpPintarPrev(); } return; }
   if (d.cpzonas !== undefined) { cpZonas = !cpZonas; const pv = $("#cpPrev"); if (pv) pv.classList.toggle("zonas", cpZonas); t.classList.toggle("on", cpZonas); t.innerHTML = icn(cpZonas ? "eye" : "eye-off", "sm") + "Zonas IG"; return; }
   if (d.cpcentrar !== undefined) { cpManual(); cpSet({ texto_x: 0.5 }); return cpPintarPrev(); }
   if (d.cpbandeja) { try { await api("/api/copiar", { op: "a_bandeja", id: d.cpbandeja, archivo: d.cparch || "", cuenta: activa().id }); toast("Mandado a la Bandeja de @" + activa().usuario); refrescar(true); } catch (er) { fallo(er); } return; }

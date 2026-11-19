@@ -199,6 +199,7 @@ class _MensajeChatAPI(_Base):
 
 
 class _ChatAPI(_Base):
+    hay: bool = Field(description="true SOLO si el ejemplo muestra una captura de chat de WhatsApp para redibujar")
     mensajes: list[_MensajeChatAPI] = Field(description="[] si no hay captura de chat para dibujar")
     x0: float
     x1: float
@@ -222,7 +223,8 @@ class _PegarAPI(_Base):
 
 
 class _NotiAPI(_Base):
-    texto: str = Field(description='"" si no hay notificación')
+    hay: bool = Field(description="true SOLO si el ejemplo muestra una notificación de Instagram real")
+    texto: str = Field(description='el texto de esa notificación, tal cual; "" si no hay. Nunca tus notas.')
     titulo: str
     x0: float = Field(description="-1 si no se sabe")
     x1: float = Field(description="-1 si no se sabe")
@@ -263,6 +265,13 @@ def _o_nada(v, minimo=None, maximo=None):
     return v
 
 
+def _parece(a: str, b: str) -> bool:
+    """¿La "notificación" es en realidad la nota de Claude? (pasó en producción: la nota salía dibujada en el video)."""
+    norm = lambda t: " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in str(t or "")).split())
+    x, y = norm(a), norm(b)
+    return bool(x and y) and (x == y or (len(x) > 25 and (x in y or y in x)))
+
+
 def _lectura_desde_api(d: dict) -> dict:
     if d.get("descartar") == "menor":
         return {"descartar": "menor"}
@@ -273,13 +282,13 @@ def _lectura_desde_api(d: dict) -> dict:
     m = d.get("modelo")
     out["modelo"] = m if isinstance(m, int) and not isinstance(m, bool) and m > 0 else None
     ch = d.get("chat") or {}
-    if ch.get("mensajes"):
+    if ch.get("hay") and ch.get("mensajes"):
         out["chat"] = {"mensajes": [{"de": x["de"], "texto": x["texto"], "hora": x.get("hora") or ""}
                                     for x in ch["mensajes"]], "x0": ch["x0"], "x1": ch["x1"], "y0": ch["y0"]}
     out["pegar"] = [{**{k: b[k] for k in ("x0", "y0", "x1", "y1", "cuadro")}, "a_y0": _o_nada(b.get("a_y0"), 0, 1)}
                     for b in d.get("pegar") or []]
     nt = d.get("noti") or {}
-    if str(nt.get("texto") or "").strip():
+    if nt.get("hay") and str(nt.get("texto") or "").strip() and not _parece(nt["texto"], out["notas"]):
         out["noti"] = {"texto": nt["texto"], "titulo": nt.get("titulo") or "Instagram",
                        **{k: _o_nada(nt.get(k), 0) for k in ("x0", "x1", "y0")}}
     out["textos"] = [{"texto": t["texto"], "x": t["x"], "y": t["y"], "tam": _o_nada(t.get("tam"), 1e-9)}
