@@ -180,7 +180,7 @@ def test_fichas_usan_la_sesion_tienen_tiempo_maximo_y_no_se_pisan(monkeypatch):
     [h.start() for h in hs]
     [h.join() for h in hs]
     assert len(_YDL.opciones) == 3                         # cada link una sola vez, no 4
-    assert all(o["cookiefile"].endswith("navegador/cookies.txt") and o["socket_timeout"] for o in _YDL.opciones)
+    assert all(o["cookiefile"].endswith("cookies.txt") and o["socket_timeout"] for o in _YDL.opciones)
     fs = {x["link"]: x for x in fabrica.links()}
     assert fs["https://www.instagram.com/reel/AAA111/"]["ficha"] == "ok"
     assert fs["https://www.instagram.com/reel/malo222/"]["ficha"] == "error"   # sale el ícono, no «cargando»
