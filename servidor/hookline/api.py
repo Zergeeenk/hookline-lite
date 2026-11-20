@@ -32,7 +32,7 @@ log = logging.getLogger("hookline.api")
 PANEL = Path(__file__).parent / "panel" / "index.html"
 MAX_SUBIDA = 1024 * 1024 * 1024
 # desde dónde se pueden ver archivos por /mini y /media
-SECCIONES_VISIBLES = ("subir", "material", "copias", "resultados", "jueces", "candidatos", "stickers")
+SECCIONES_VISIBLES = ("subir", "material", "copias", "resultados", "jueces", "candidatos", "stickers", "chat")
 
 app = FastAPI(title="Hookline", version=__version__,
               description="Community manager de Instagram multi-cuenta. Auth: cookie de sesión (panel) o "
@@ -417,7 +417,13 @@ def costos(dias: int = 30, q: Quien = requerir("editor")):
 
 @app.post("/api/chat")
 def chat(d: dict = Depends(_json), q: Quien = requerir()):
-    return svc_jueces.mensaje(d.get("texto", ""), autor=q.firma)
+    return svc_jueces.mensaje(d.get("texto", ""), autor=q.firma, fotos=d.get("fotos"))
+
+
+@app.post("/api/chat_foto")
+def chat_foto(nombre: str = "foto.jpg", datos: bytes = Depends(_cuerpo), q: Quien = requerir()):
+    """Sube una foto para mandarle a Claude por el chat (de la compu o pegada con Ctrl+V)."""
+    return {"ok": True, "foto": svc_jueces.foto_chat(nombre, datos)}
 
 
 @app.get("/api/actividad")
