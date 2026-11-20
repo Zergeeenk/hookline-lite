@@ -500,14 +500,9 @@ def _fichas(_datos_trabajo: dict) -> None:
 
 
 def _opciones_ytdlp() -> dict:
-    """Las mismas para fichas, previas y descargas: con la sesión "para mirar" (Instagram casi nunca deja sin ella) y
-    con tiempo máximo, así un link colgado no frena todo."""
-    from .material import COOKIES_REL
-    o = {"quiet": True, "no_warnings": True, "socket_timeout": 20, "retries": 2}
-    cookies = almacen.raiz() / COOKIES_REL
-    if cookies.is_file():
-        o["cookiefile"] = str(cookies)
-    return o
+    """Las de las fichas: con tiempo máximo, así un link colgado no frena todo. La sesión «para mirar» (Instagram casi
+    nunca da el video sin ella) va aparte, como copia: material.cookies_ytdlp()."""
+    return {"quiet": True, "no_warnings": True, "socket_timeout": 20, "retries": 2}
 
 
 def _hacer_fichas() -> None:
@@ -523,7 +518,8 @@ def _hacer_fichas() -> None:
         link = sin[0].link
         ficha = {"ficha": "error"}
         try:
-            with yt_dlp.YoutubeDL({**_opciones_ytdlp(), "skip_download": True}) as y:
+            with material.cookies_ytdlp() as ck, \
+                    yt_dlp.YoutubeDL({**_opciones_ytdlp(), "skip_download": True, **({"cookiefile": ck} if ck else {})}) as y:
                 info = y.extract_info(link, download=False)
             nombre = f"{re.sub(r'[^0-9A-Za-z_-]', '', str(info.get('id') or uuid.uuid4().hex))[:40]}.jpg"
             ficha = {"ficha": "ok", "dur": round(float(info.get("duration") or 0), 1)}

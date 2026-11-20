@@ -7,8 +7,12 @@ Las multicuentas usan el material de su cuenta main (servicios.cuentas.modelo_de
 """
 from __future__ import annotations
 
+import contextlib
+import logging
 import re
+import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 import uuid
 from pathlib import Path
@@ -28,6 +32,7 @@ SECCIONES = {"modelo": medios.FOTOS | medios.VIDEOS, "ejemplos": medios.FOTOS | 
              "musica": AUDIOS | medios.VIDEOS, "general": medios.FOTOS | medios.VIDEOS}
 GENERAL = "_general"
 CARPETAS_HISTORIAS = ("Salidas y comida", "Día a día", "historias")    # de acá salen las historias
+log = logging.getLogger(__name__)
 COOKIES_REL = "navegador/cookies.txt"                                   # sesión del buscador (para bajar de Instagram)
 
 
@@ -236,10 +241,64 @@ def guardar_musica(video: Path, cuenta: str, nombre: str) -> None:
 
 # --- bajar de TikTok / Instagram ---------------------------------------------------------------------------------------------
 class _Callado:
+    """Logger para yt-dlp: no ensucia la salida pero se queda con los avisos (ej. «cookies are no longer valid»)."""
+    def __init__(self):
+        self.avisos: list[str] = []
+
     def debug(self, m): pass
     def info(self, m): pass
-    def warning(self, m): pass
-    def error(self, m): pass
+
+    def warning(self, m):
+        self.avisos.append(str(m))
+
+    def error(self, m):
+        self.avisos.append(str(m))
+
+
+@contextlib.contextmanager
+def cookies_ytdlp():
+    """Una COPIA de la sesión «para mirar» para yt-dlp. yt-dlp reescribe el cookiefile al terminar y, si Instagram
+    le dice que la sesión no vale, le borra el sessionid: con la copia, el archivo de ella queda como lo cargó."""
+    original = almacen.raiz() / COOKIES_REL
+    if not original.is_file():
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="hl-ck-") as d:
+        copia = Path(d) / "cookies.txt"
+        shutil.copyfile(original, copia)
+        copia.chmod(0o600)
+        yield str(copia)
+
+
+def _hay_sesion(link: str) -> bool:
+    from .buscador import estado_sesion
+    try:
+        est = estado_sesion()
+    except Exception:
+        return False
+    return bool(est.get("tiktok" if "tiktok.com" in link else "instagram"))
+
+
+def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> str:
+    """El error de yt-dlp en criollo, diciendo qué hacer."""
+    txt = (str(ex) + " " + " ".join(avisos or [])).lower()
+    ig = "instagram.com" in str(link)
+    red = "Instagram" if ig else "TikTok" if "tiktok.com" in str(link) else ""
+    if "no longer valid" in txt:
+        return (f"La sesión de {red or 'la cuenta para mirar'} venció (la cerraron o expiró). Iniciá sesión de nuevo en "
+                "el navegador, exportá las cookies y cargalas en Memes → «Cargar sesión de Instagram/TikTok».")
+    if "photo" in txt:
+        return "Ese link es de fotos (no video): sacales captura y subilas."
+    if red and any(k in txt for k in ("login", "cookie", "rate", "empty media", "no video in this post",
+                                       "registered users", "not available")):
+        if _hay_sesion(link):
+            return (f"{red} no dio ese video ni con la sesión cargada: puede ser de fotos, privado o borrado. Abrilo en "
+                    "el navegador; si es un video público, subilo con «Subir video».")
+        return (f"{red} no da los videos sin sesión. Cargá la sesión de la cuenta «para mirar» (Memes → «Cargar sesión "
+                "de Instagram/TikTok») o subilo con el botón «Subir video».")
+    if "private" in txt:
+        return "Ese video es privado: subilo con el botón «Subir video»."
+    return "No se pudo bajar. Fijate que el link sea de un video público."
 
 
 def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B_%(id)s") -> tuple[Path, dict]:
@@ -250,27 +309,23 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
         raise ValueError("Falta yt-dlp en el servidor.")
     carpeta_destino = Path(carpeta_destino)
     carpeta_destino.mkdir(parents=True, exist_ok=True)
+    log_y = _Callado()
     opts = {"outtmpl": str(carpeta_destino / f"{nombre}.%(ext)s"), "restrictfilenames": True,
             "format": "b[vcodec^=h264]/b[vcodec^=avc]/b", "noplaylist": True, "quiet": True,
-            "no_warnings": True, "noprogress": True, "logger": _Callado(), "ffmpeg_location": medios.ffmpeg(),
+            "no_warnings": True, "noprogress": True, "logger": log_y, "ffmpeg_location": medios.ffmpeg(),
             "socket_timeout": 20, "retries": 2}
-    cookies = almacen.raiz() / COOKIES_REL
-    if cookies.is_file():
-        opts["cookiefile"] = str(cookies)
     try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            info = y.extract_info(link, download=True)
-            video = Path(y.prepare_filename(info))
+        with cookies_ytdlp() as ck:
+            if ck:
+                opts["cookiefile"] = ck
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(link, download=True)
+                video = Path(y.prepare_filename(info))
         if not video.is_file():
             raise RuntimeError("no se guardó")
     except Exception as ex:
-        txt = str(ex).lower()
-        if "photo" in txt:
-            raise ValueError("Ese link es de fotos (no video): sacales captura y subilas.")
-        if "instagram" in link and any(k in txt for k in ("login", "cookie", "rate", "empty media")):
-            raise ValueError("Instagram no dejó bajar ese video: hace falta la sesión de la cuenta «para mirar» (Memes → "
-                             "«Cargar sesión de Instagram/TikTok») o subilo con el botón «Subir video».")
-        raise ValueError("No se pudo bajar. Fijate que el link sea de un video público.")
+        log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
+        raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None
     return video, info
 
 
