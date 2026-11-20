@@ -489,6 +489,22 @@ def copia_capa(id: str, que: str, k: int = 0, q: Quien = requerir()):
     return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/emojis")
+def emojis_lista(q: Quien = requerir()):
+    """El pack de emojis para el selector de stickers (nombre, grupo, palabras para buscar)."""
+    return JSONResponse({"emojis": _mod(svc_fabrica, "fábrica").emojis()},
+                        headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/emoji/{clave}.webp", include_in_schema=False)
+def emoji_imagen(clave: str):
+    """Imagen de un emoji del pack (estáticas y de licencia MIT: no piden login)."""
+    p = _mod(svc_fabrica, "fábrica").ruta_emoji(clave)
+    if not p or not p.is_file():
+        raise HTTPException(404, "No existe ese emoji.")
+    return FileResponse(p, media_type="image/webp", headers={"Cache-Control": "public, max-age=2592000, immutable"})
+
+
 @app.post("/api/sticker_subir")
 def sticker_subir(nombre: str = "sticker.png", datos: bytes = Depends(_cuerpo), q: Quien = requerir()):
     return {"ok": True, "sticker": _mod(svc_fabrica, "fábrica").subir_sticker(nombre, datos)}
@@ -533,6 +549,9 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
         b = _mod(svc_buscador, "buscador")
         b.fuente(d.get("fuente"), activa=d.get("activa"), borrar=bool(d.get("borrar")))
         return {"ok": True, "fuentes": b.fuentes()}
+    if op == "usar_con_marca":
+        f.usar_con_marca(cid)
+        return {"ok": True}
     if op == "borrar_sticker":
         f.borrar_sticker(str(d.get("archivo") or ""))
         return {"ok": True}

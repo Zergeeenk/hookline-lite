@@ -1,0 +1,4 @@
+Emojis Fluent 3D de Microsoft (https://github.com/microsoft/fluentui-emoji), licencia MIT: ver
+LICENCIA-fluentui-emoji.txt. Se usan como stickers en Copiar video (no son los de Apple: esos tienen
+derechos de autor). 3d/<unicode>.webp a 192 px; indice.json: k (clave), n (nombre), g (grupo), e (emoji),
+p (palabras). Se regeneran con scripts del repo de Microsoft; no se editan a mano.

@@ -141,7 +141,7 @@ def _repartir(dia: str, reels: int, historias: int, aprobado_por: str) -> dict:
             if faltan_r > 0:
                 pool = sorted([x for x in copias if x.get("resultado") and (x.get("juez") or {}).get("estado") == "aprobado"
                                and svc_cuentas.modelo_de(x.get("cuenta") or "") == m and x["id"] not in ya_repartidas
-                               and not (x.get("marca_agua") and not x.get("remate"))],
+                               and not (x.get("marca_agua") and not x.get("remate") and not x.get("marca_ok"))],
                               key=lambda x: x.get("armado") or "")
                 cands = _horarios(HORAS_REELS, reels, i, dia) + _horarios(HORAS_REELS, len(HORAS_REELS), i, dia)
                 for cuando in _libres(cands, ocupadas(c["id"]), faltan_r):
