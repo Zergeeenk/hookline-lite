@@ -15,7 +15,9 @@ la copia queda frenada para que la dueña la descarte o suba un remate propio (s
 """
 from __future__ import annotations
 
+import functools
 import hashlib
+import json
 import logging
 import random
 import re
@@ -213,6 +215,38 @@ def opciones() -> dict:
 
 
 # --- stickers (emojis de iPhone, logos...): imágenes PNG que se pegan sobre la parte de la modelo -----------------------------
+EMOJIS_DIR = Path(__file__).resolve().parents[1] / "emojis"
+
+
+@functools.lru_cache(maxsize=1)
+def _indice_emojis() -> dict:
+    try:
+        lista = json.loads((EMOJIS_DIR / "indice.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {e["k"]: e for e in lista if isinstance(e, dict) and re.fullmatch(r"[0-9a-z-]{1,60}", str(e.get("k")))}
+
+
+def emojis() -> list[dict]:
+    """El pack de emojis (Fluent 3D, MIT): [{k, n, g, e, p}]. La imagen se sirve en /emoji/<k>.webp."""
+    return list(_indice_emojis().values())
+
+
+def ruta_emoji(k: str) -> Path | None:
+    k = str(k or "")
+    return EMOJIS_DIR / "3d" / f"{k}.webp" if k in _indice_emojis() else None
+
+
+def _ruta_sticker(archivo: str) -> Path | None:
+    """Un sticker es un PNG subido (nombre.png) o un emoji del pack ("emoji:<clave>")."""
+    a = str(archivo or "")
+    if a.startswith("emoji:"):
+        p = ruta_emoji(a[6:])
+        return p if p and p.is_file() else None
+    p = _dir_stickers() / Path(a).name
+    return p if p.suffix == ".png" and p.is_file() else None
+
+
 def _dir_stickers() -> Path:
     return almacen.dir_de("stickers")
 
@@ -740,7 +774,7 @@ def _limpiar_campos(l: dict, dur) -> dict:
     if isinstance(l.get("color"), str) and l["color"] in COLORES:
         out["color"] = l["color"]
     if isinstance(l.get("stickers"), list):
-        hay = {x["archivo"] for x in stickers()}
+        hay = {x["archivo"] for x in stickers()} | {f"emoji:{k}" for k in _indice_emojis()}
         out["stickers"] = [{"archivo": str(s["archivo"]), "x0": round(_num(s.get("x0"), 0.4, -0.5, 1), 4),
                             "y0": round(_num(s.get("y0"), 0.4, -0.5, 1), 4),
                             "ancho": round(_num(s.get("ancho"), 0.2, 0.03, 1.5), 4)}
@@ -819,8 +853,21 @@ def _elegir_foto(cid: str, cuenta: str, cual) -> None:
 
 
 def _bloqueada_por_marca(c: dict) -> bool:
-    """Marca de agua de otra cuenta en el remate y sin remate propio (que exista de verdad): no se arma ni se usa."""
+    """Marca de agua de otra cuenta en el remate y sin remate propio (que exista de verdad): no se arma sola. Si la
+    dueña decide usarlo igual («Usarlo igual»: marca_ok), se arma y pasa por el juez como cualquier otro."""
+    if c.get("marca_ok"):
+        return False
     return bool(c.get("marca_agua")) and not (c.get("remate") and (_dir(c["id"]) / c["remate"]).is_file())
+
+
+def usar_con_marca(cid: str) -> None:
+    """La dueña decide usar el remate con la marca de agua de otra cuenta (Instagram puede darle menos alcance)."""
+    c = _datos(cid)
+    if not c.get("marca_agua"):
+        raise ValueError("Este meme no tiene marca de agua.")
+    _datos(cid, marca_ok=True)
+    if c.get("ejemplo") and c.get("modelo"):
+        armar(cid, {}, juzgar=True)
 
 
 def _auto(cid: str) -> None:
@@ -1178,10 +1225,17 @@ def _render_ya(datos: dict) -> None:
             entradas += ["-loop", "1", "-i", str(d / "_chat.png")]
             base += (f"[cb];[{ni}:v]format=rgba,trim=0:{corte:.2f},setpts=PTS-STARTPTS[chat];"
                      f"[cb][chat]overlay={int(w * cx0)}:{cy0},null")
-        for k, st in enumerate(c.get("stickers") or []):      # emojis de iPhone, logos: PNG con transparencia
-            sp = _dir_stickers() / Path(str(st.get("archivo") or "")).name
-            if not sp.is_file():
+        for k, st in enumerate(c.get("stickers") or []):      # emojis del pack o PNG subidos (con transparencia)
+            sp = _ruta_sticker(st.get("archivo"))
+            if not sp:
                 continue
+            if sp.suffix == ".webp":                          # a PNG: ffmpeg lee seguro el canal alfa
+                tmp = d / "_capas"
+                tmp.mkdir(exist_ok=True)
+                png = tmp / f"st{k}.png"
+                from PIL import Image
+                Image.open(sp).convert("RGBA").save(png)
+                sp = png
             sw = max(4, int(w * _num(st.get("ancho"), 0.2, 0.03, 1.5))) // 2 * 2
             ni = entradas.count("-i")
             entradas += ["-loop", "1", "-i", str(sp)]
@@ -1200,7 +1254,7 @@ def _render_ya(datos: dict) -> None:
             base += "," + f
         # el remate: el del ejemplo (sin tocar sus marcas: si las tiene, la copia no llega acá) o uno propio
         remate_p = d / c["remate"] if c.get("remate") and (d / c["remate"]).is_file() else None
-        if c.get("marca_agua") and not remate_p:
+        if c.get("marca_agua") and not remate_p and not c.get("marca_ok"):
             raise RuntimeError("el remate tiene marca de agua y no hay remate propio")
         if remate_p:
             ri = entradas.count("-i")

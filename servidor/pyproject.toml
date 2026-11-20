@@ -38,7 +38,8 @@ hookline = "hookline.cli:main"
 include = ["hookline*"]
 
 [tool.setuptools.package-data]
-hookline = ["panel/*.html", "migraciones/*.py", "migraciones/*.mako", "migraciones/versions/*.py", "alembic.ini", "ia/*.md"]
+hookline = ["panel/*.html", "migraciones/*.py", "migraciones/*.mako", "migraciones/versions/*.py", "alembic.ini", "ia/*.md", "emojis/*.json", "emojis/*.txt",
+            "emojis/3d/*.webp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
