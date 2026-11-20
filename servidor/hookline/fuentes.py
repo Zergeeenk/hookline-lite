@@ -483,14 +483,15 @@ def poner_claude(valor: bool) -> None:
 
 
 # --- lo que la letra sabe dibujar -----------------------------------------------------------------------------------------
-def dibujable(texto: str, p: Path | None) -> str:
+def dibujable(texto: str, p: Path | None, conservar: str = "") -> str:
     """Saca lo que la fuente no tiene (emojis y símbolos raros) para que no salgan cuadraditos en el video.
+    `conservar`: caracteres que quedan igual (los marcadores de los emojis que se dibujan como imagen).
     Si la fuente no se puede leer, devuelve el texto tal cual."""
     texto = str(texto or "")
     cm = _cmap(Path(p)) if p else None
     if cm is None:
         return texto
-    out = "".join(ch for ch in texto if ch in "\n\t " or ord(ch) in cm)
+    out = "".join(ch for ch in texto if ch in "\n\t " or ord(ch) in cm or ch in conservar)
     out = re.sub(r"[ \t]{2,}", " ", out)
     return "\n".join(l.strip() for l in out.split("\n")).strip("\n")
 
