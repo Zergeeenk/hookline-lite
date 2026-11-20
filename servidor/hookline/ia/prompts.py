@@ -188,6 +188,7 @@ Lo que pasa ahora en el sistema:
 Últimos mensajes del chat:
 {json.dumps(p.get('historial') or [], ensure_ascii=False)[:4000]}
 
+{"La dueña te mandó " + str(p['fotos']) + (" foto (es la imagen adjunta): mirala bien antes de contestar." if p.get('fotos') == 1 else " fotos (son las imágenes adjuntas): miralas todas antes de contestar.") if p.get('fotos') else ""}
 MENSAJE: {p.get('texto')}"""
 
 

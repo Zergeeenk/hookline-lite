@@ -168,19 +168,77 @@ def tendencias_semanales() -> None:
 
 
 # --- chat ------------------------------------------------------------------------------------------------------------------------
-def mensaje(texto: str, autor: str = "") -> dict:
+MAX_FOTOS_CHAT = 4
+
+
+def foto_chat(nombre: str, datos: bytes) -> str:
+    """Una foto para el chat (de la compu o pegada del portapapeles): se guarda como JPG de 1568 px como mucho
+    (más grande Claude no ve más) y devuelve su ruta relativa para mandarla con el mensaje."""
+    import secrets
+    from io import BytesIO
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    if not datos or len(datos) > 15 * 1024 * 1024:
+        raise ValueError("La foto tiene que pesar menos de 15 MB.")
+    try:
+        im = Image.open(BytesIO(datos))
+        im.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError):
+        raise ValueError("Eso no es una foto (probá con JPG, PNG o una captura).") from None
+    if im.width * im.height > 60_000_000:
+        raise ValueError("La foto es demasiado grande.")
+    im = ImageOps.exif_transpose(im)
+    if im.mode in ("RGBA", "LA", "P"):
+        fondo = Image.new("RGB", im.size, (255, 255, 255))
+        im = im.convert("RGBA")
+        fondo.paste(im, mask=im.split()[-1])
+        im = fondo
+    im = im.convert("RGB")
+    im.thumbnail((1568, 1568))
+    d = almacen.dir_de("chat", ahora().strftime("%Y-%m"))
+    p = d / f"{secrets.token_hex(8)}.jpg"
+    im.save(p, "JPEG", quality=88)
+    return almacen.relativa(p)
+
+
+def _fotos_validas(fotos) -> list[str]:
+    if fotos in (None, ""):
+        return []
+    if not isinstance(fotos, list):
+        raise ValueError("Las fotos tienen que ir en una lista.")
+    if len(fotos) > MAX_FOTOS_CHAT:
+        raise ValueError(f"Hasta {MAX_FOTOS_CHAT} fotos por mensaje.")
+    base = almacen.raiz() / almacen.SECCIONES["chat"]
+    out = []
+    for f in fotos:
+        if not isinstance(f, str):
+            raise ValueError("Foto inválida.")
+        try:
+            p = almacen.ruta(f)
+            p.resolve().relative_to(base.resolve())       # solo fotos subidas al chat, nada más del disco
+        except (ValueError, OSError):
+            raise ValueError("Esa foto no es del chat: subila de nuevo.") from None
+        if not p.is_file():
+            raise ValueError("Esa foto ya no está: subila de nuevo.")
+        out.append(almacen.relativa(p))
+    return out
+
+
+def mensaje(texto: str, autor: str = "", fotos=None) -> dict:
     texto = str(texto or "").strip()
-    if not texto:
+    fotos = _fotos_validas(fotos)
+    if not texto and not fotos:
         raise ValueError("Escribí algo.")
-    m = chat_agregar("vos", texto, autor=autor)
+    if not texto:
+        texto = "¿Qué ves acá?" if len(fotos) == 1 else "¿Qué ves en estas fotos?"
+    m = chat_agregar("vos", texto, {"fotos": fotos} if fotos else None, autor=autor)
     from .piezas import listar
     contexto = {"cuentas": [{k: c[k] for k in ("id", "nicho", "tono", "seguidores", "conectada", "main")}
                             for c in svc_cuentas.listar()],
                 "bandeja": [{k: p[k] for k in ("id", "cuenta", "tipo", "estado", "cuando")} for p in listar()][-40:]}
     with sesion() as s:
         hist = [mensaje_dict(x) for x in s.scalars(select(MensajeChat).order_by(MensajeChat.id.desc()).limit(12))]
-    tareas.crear("chat", {"texto": texto, "contexto": contexto, "historial": list(reversed(hist))},
-                 referencia=str(m["id"]))
+    tareas.crear("chat", {"texto": texto, "contexto": contexto, "historial": list(reversed(hist)),
+                          "fotos": len(fotos)}, referencia=str(m["id"]), imagenes=fotos)
     return m
 
 

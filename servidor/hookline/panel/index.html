@@ -579,6 +579,16 @@ table.tabla { width: 100%; border-collapse: collapse; }
 .env { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--bd); align-items: flex-end; }
 .env textarea { flex: 1; resize: none; height: 42px; max-height: 140px; border-radius: 12px; border: 1px solid var(--bd); background: var(--sf2); padding: 10px 12px; outline: none; }
 .env textarea:focus { border-color: var(--ac); }
+.env .adj { flex: none; width: 42px; height: 42px; padding: 0; justify-content: center; }
+.chat-fotos { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 12px 0; }
+.chat-fotos:empty { display: none; }
+.chat-fotos span { position: relative; width: 56px; height: 56px; border-radius: 10px; overflow: hidden; border: 1px solid var(--bd); background: var(--sf2); }
+.chat-fotos img { width: 100%; height: 100%; object-fit: cover; }
+.chat-fotos button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; border: 0; background: rgba(0, 0, 0, .65); color: #fff; font-size: 11px; line-height: 18px; padding: 0; cursor: pointer; }
+.chat-fotos .subiendo { display: grid; place-items: center; color: var(--tx3); }
+.m .fotos { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+.m .fotos img { width: 96px; height: 96px; object-fit: cover; border-radius: 10px; cursor: zoom-in; display: block; }
+.chat.arrastrando { outline: 3px dashed var(--ac); outline-offset: -6px; }
 
 /* ---------- responsive ---------- */
 @media (max-width: 1100px) { .grid-kpi { grid-template-columns: repeat(2, 1fr); } .dos { grid-template-columns: minmax(0, 1fr); } .cal { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
@@ -749,7 +759,9 @@ table.tabla { width: 100%; border-collapse: collapse; }
   <div class="chat-cab"><div class="av">C</div><div><b>Claude</b><small id="chatEst"></small></div><button class="btn ib fant" id="chatX" style="margin-left:auto" aria-label="Cerrar chat"></button></div>
   <div class="msjs" id="msjs"></div>
   <div class="sugs" id="sugs"></div>
-  <div class="env"><textarea id="texto" placeholder="Escribile a Claude…" aria-label="Mensaje para Claude"></textarea><button class="btn prim" id="mandar"></button></div>
+  <div class="chat-fotos" id="chatFotos"></div>
+  <div class="env"><button class="btn fant adj" id="chatAdj" title="Mandar una foto (también podés pegarla con Ctrl+V o arrastrarla)" aria-label="Mandar una foto"></button><textarea id="texto" placeholder="Escribile a Claude… (podés pegar fotos con Ctrl+V)" aria-label="Mensaje para Claude"></textarea><button class="btn prim" id="mandar"></button></div>
+  <input type="file" id="chatArchivo" accept="image/*" multiple hidden>
 </div>
 <input type="file" id="matArchivos" multiple hidden>
 <input type="file" id="fuArchivos" multiple accept=".ttf,.otf,.zip,font/ttf,font/otf,application/zip" hidden>
@@ -2381,21 +2393,54 @@ function pintarChat() {
   if (!chatAbierto && ultimoChat !== -1 && nuevos) { $("#badge").textContent = nuevos; $("#badge").classList.add("on"); }
   ultimoChat = id;
   const esperando = m.length && ["vos"].includes(m[m.length - 1].de) && S.claude.puente !== "apagado";
-  $("#msjs").innerHTML = (m.length ? "" : `<div class="m panel">Escribile a Claude lo que necesites: ideas, textos, dudas sobre tus cuentas.</div>`) + m.map(x => `<div class="m ${x.de}">${x.de === "pedido" ? icn("send", "sm") + " Pedido enviado: " + esc(x.tipo_pedido || "") : esc(x.texto)}${["vos", "claude"].includes(x.de) ? `<small>${x.de === "vos" ? "Vos" : "Claude"} · ${esc(x.hora)}</small>` : ""}</div>`).join("") + `<div class="tipeo ${esperando ? "on" : ""}"><i></i><i></i><i></i></div>`;
+  $("#msjs").innerHTML = (m.length ? "" : `<div class="m panel">Escribile a Claude lo que necesites: ideas, textos, dudas sobre tus cuentas.</div>`) + m.map(x => `<div class="m ${x.de}">${(x.fotos || []).length ? `<div class="fotos">${x.fotos.map(f => `<img src="/mini?p=${encodeURIComponent(f)}" alt="Foto" loading="lazy" data-verfoto="${esc(f)}">`).join("")}</div>` : ""}${x.de === "pedido" ? icn("send", "sm") + " Pedido enviado: " + esc(x.tipo_pedido || "") : esc(x.texto)}${["vos", "claude"].includes(x.de) ? `<small>${x.de === "vos" ? "Vos" : "Claude"} · ${esc(x.hora)}</small>` : ""}</div>`).join("") + `<div class="tipeo ${esperando ? "on" : ""}"><i></i><i></i><i></i></div>`;
   $("#msjs").scrollTop = 1e9;
 }
 function abrirChat() { chatAbierto = true; $("#chat").classList.add("on"); $("#badge").classList.remove("on"); vistos = (S.chat || []).reduce((a, x) => Math.max(a, x.id), 0); $("#texto").focus(); }
 function cerrarChat() { chatAbierto = false; $("#chat").classList.remove("on"); }
 function crecer() { const ta = $("#texto"); ta.style.height = "42px"; ta.style.height = Math.min(140, ta.scrollHeight + 2) + "px"; }
+// fotos para el chat: botón 📎, Ctrl+V (portapapeles) o arrastrar al chat
+let chatFotos = [];   // [{id, url (vista local), ruta (en el servidor) | null mientras sube}]
+function pintarChatFotos() {
+  $("#chatFotos").innerHTML = chatFotos.map(f => `<span>${f.ruta ? `<img src="${f.url}" alt="">` : `<i class="subiendo">${icn("loader", "sm")}</i>`}<button type="button" data-chatfotox="${f.id}" aria-label="Sacar foto">×</button></span>`).join("");
+}
+async function sumarChatFotos(archivos) {
+  const fotos = [...archivos].filter(f => f && /^image\//.test(f.type || "") || /\.(jpe?g|png|webp|gif|heic|bmp)$/i.test((f && f.name) || ""));
+  if (!fotos.length) return toast("Eso no es una foto", true);
+  for (const f of fotos) {
+    if (chatFotos.length >= 4) { toast("Hasta 4 fotos por mensaje", true); break; }
+    const x = { id: Math.random().toString(36).slice(2), url: URL.createObjectURL(f), ruta: null };
+    chatFotos.push(x); pintarChatFotos();
+    try { const r = await subirBytes(`/api/chat_foto?nombre=${encodeURIComponent(f.name || "captura.png")}`, f); x.ruta = r.foto; }
+    catch (e) { chatFotos = chatFotos.filter(y => y !== x); fallo(e); }
+    pintarChatFotos();
+  }
+}
 async function mandar() {
-  const ta = $("#texto"), t = ta.value.trim(); if (!t) return;
-  ta.value = ""; crecer();
-  try { await api("/api/chat", { texto: t }); if (S.claude.puente === "apagado") toast("Mensaje guardado: Claude lo lee cuando lo conectes", true); refrescar(); } catch (e) { fallo(e); ta.value = t; }
+  const ta = $("#texto"), t = ta.value.trim();
+  if (chatFotos.some(f => !f.ruta)) return toast("Esperá que terminen de subir las fotos", true);
+  const fotos = chatFotos.map(f => f.ruta);
+  if (!t && !fotos.length) return;
+  const antes = chatFotos; ta.value = ""; chatFotos = []; pintarChatFotos(); crecer();
+  try { await api("/api/chat", { texto: t, fotos }); if (S.claude.puente === "apagado") toast("Mensaje guardado: Claude lo lee cuando lo conectes", true); refrescar(); }
+  catch (e) { fallo(e); ta.value = t; chatFotos = antes; pintarChatFotos(); }
 }
 $("#fabIc").innerHTML = icn("message"); $("#chatX").innerHTML = icn("x"); $("#mandar").innerHTML = icn("send"); $("#ham").innerHTML = icn("menu");
 $("#fab").addEventListener("click", () => chatAbierto ? cerrarChat() : abrirChat());
 $("#chatX").addEventListener("click", cerrarChat);
 $("#mandar").addEventListener("click", mandar);
+$("#chatAdj").innerHTML = icn("image");
+$("#chatAdj").addEventListener("click", () => $("#chatArchivo").click());
+$("#chatArchivo").addEventListener("change", e => { sumarChatFotos(e.target.files); e.target.value = ""; });
+$("#texto").addEventListener("paste", e => {
+  const fs = [...((e.clipboardData && e.clipboardData.items) || [])].filter(i => i.kind === "file" && /^image\//.test(i.type)).map(i => i.getAsFile()).filter(Boolean);
+  if (fs.length) { e.preventDefault(); sumarChatFotos(fs); }
+});
+$("#chat").addEventListener("dragover", e => { if ([...(e.dataTransfer.types || [])].includes("Files")) { e.preventDefault(); $("#chat").classList.add("arrastrando"); } });
+$("#chat").addEventListener("dragleave", e => { if (!e.relatedTarget || !$("#chat").contains(e.relatedTarget)) $("#chat").classList.remove("arrastrando"); });
+$("#chat").addEventListener("drop", e => { $("#chat").classList.remove("arrastrando"); if (e.dataTransfer.files.length) { e.preventDefault(); sumarChatFotos(e.dataTransfer.files); } });
+$("#chatFotos").addEventListener("click", e => { const b = e.target.closest("[data-chatfotox]"); if (b) { chatFotos = chatFotos.filter(f => f.id !== b.dataset.chatfotox); pintarChatFotos(); } });
+$("#msjs").addEventListener("click", e => { const i = e.target.closest("[data-verfoto]"); if (i) window.open(`/media?p=${encodeURIComponent(i.dataset.verfoto)}`, "_blank", "noopener"); });
 $("#texto").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); mandar(); } });
 $("#sugs").innerHTML = ["¿Qué publico hoy?", "Dame 3 ideas de historias", "Mejorá este texto:"].map(s => `<button class="sug">${s}</button>`).join("");
 $("#sugs").addEventListener("click", e => { const b = e.target.closest(".sug"); if (b) { $("#texto").value = b.textContent + " "; $("#texto").focus(); } });
