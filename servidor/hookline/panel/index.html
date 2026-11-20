@@ -318,6 +318,8 @@ textarea.in { resize: vertical; min-height: 110px; line-height: 1.5; }
 .cp-txt:hover, .cp-txt.arr { outline-color: rgba(255, 255, 255, .7); }
 .cp-txt.arr { cursor: grabbing; }
 .cp-txt .cp-l { width: fit-content; margin-left: auto; margin-right: auto; }
+.cp-emo { display: inline-flex; justify-content: center; align-items: flex-end; vertical-align: baseline; height: 1em; overflow: visible; }
+.cp-emo img { flex: none; -webkit-text-stroke: 0; filter: none; }
 .cp-capa { position: absolute; z-index: 2; cursor: grab; touch-action: none; outline: 1.5px dashed rgba(255, 255, 255, .5); outline-offset: 2px; }
 .cp-capa img { display: block; width: 100%; height: auto; pointer-events: none; }
 .cp-capa.arr { cursor: grabbing; outline-color: #fff; }
@@ -1395,13 +1397,37 @@ function cpCss(dr, px) {
   if (dr.estilo === "contorno") css += `-webkit-text-stroke:${Math.max(1, px / 7)}px ${oscuro ? "#fff" : "#000"};paint-order:stroke fill;`;
   return css;
 }
+// emojis en el texto: se dibujan con el pack 3D (igual que en el video), cada uno en el lugar de n espacios
+let EMO_MAPA = null;
+function emoCargarMapa() {
+  if (EMO_MAPA || emoCargarMapa.pedido) return; emoCargarMapa.pedido = true;
+  api("/api/emojis").then(d => { EMO = EMO || d.emojis; const m = new Map(); let largo = 1;
+    d.emojis.forEach(e => { const g = Array.from(String(e.e || "").replace(/\uFE0F/g, "")); if (g.length && !m.has(g.join(""))) { m.set(g.join(""), e.k); largo = Math.max(largo, g.length); } });
+    EMO_MAPA = { m, largo }; if (pagina === "copiar") cpPintarPrev(); }).catch(() => { emoCargarMapa.pedido = false; });
+}
+function emoPartir(texto) {   // → {t: texto con marcadores U+E000…, mapa: {marcador: clave}}
+  const t = Array.from(String(texto || "")), mapa = {}; let out = "", i = 0, n = 0;
+  if (!EMO_MAPA) return { t: String(texto || ""), mapa };
+  const raro = ch => ch === "\uFE0F" || (ch.codePointAt(0) >= 0x1F3FB && ch.codePointAt(0) <= 0x1F3FF);
+  while (i < t.length) {
+    let hallado = null;
+    if (!raro(t[i])) for (let L = Math.min(EMO_MAPA.largo + 6, t.length - i); L > 0; L--) { const g = t.slice(i, i + L).filter(ch => !raro(ch)).join(""); if (EMO_MAPA.m.has(g)) { hallado = [L, EMO_MAPA.m.get(g)]; break; } }
+    if (hallado && n < 64) { const marca = String.fromCharCode(0xE000 + n++); mapa[marca] = hallado[1]; out += marca; i += hallado[0]; while (i < t.length && raro(t[i])) i++; }
+    else out += t[i++];
+  }
+  return { t: out, mapa };
+}
 function cpRenglones(texto, fuente, px, max) {
   const cv = cpRenglones.cv || (cpRenglones.cv = document.createElement("canvas")), ctx = cv.getContext("2d");
   const f = cpFuente(fuente); ctx.font = `${f.estilo} ${f.peso} ${px}px "${f.familia}"`;
+  emoCargarMapa();
+  const { t: conMarcas, mapa } = emoPartir(texto), esp = Math.max(1, ctx.measureText(" ").width), n = Math.max(1, Math.ceil(px * 1.05 / esp));
+  cpRenglones.emo = { mapa, n, esp };
+  const plano = s => [...s].map(ch => mapa[ch] ? " ".repeat(n) : ch).join("");
   const out = [];
-  String(texto || "").split("\n").forEach(par => {
+  conMarcas.split("\n").forEach(par => {
     let l = "";
-    par.split(/\s+/).filter(Boolean).forEach(p => { const pr = (l + " " + p).trim(); if (l && ctx.measureText(pr).width > max) { out.push(l); l = p; } else l = pr; });
+    par.split(/\s+/).filter(Boolean).forEach(p => { const pr = (l + " " + p).trim(); if (l && ctx.measureText(plano(pr)).width > max) { out.push(l); l = p; } else l = pr; });
     out.push(l);
   });
   while (out.length && !out[out.length - 1]) out.pop();
@@ -1409,11 +1435,15 @@ function cpRenglones(texto, fuente, px, max) {
 }
 function cpPintarPrev() {
   const c = cpCopia(), prev = $("#cpPrev"), txt = $("#cpTxt"); if (!c || !prev || !txt) return;
-  const dr = cpDr(c), W = prev.clientWidth, H = prev.clientHeight, o = CP.opciones, px = Math.max(6, dr.texto_tam * H * (o.escala_texto || 1));
+  const dr = cpDr(c), W = prev.clientWidth, H = prev.clientHeight, o = CP.opciones, altoV = c.alto || 1280;
+  // el video usa la letra en píxeles enteros (int en el servidor): la vista previa redondea igual, si no un renglón al límite se corta distinto
+  const px = Math.max(6, Math.floor(dr.texto_tam * altoV * (o.escala_texto || 1)) * H / altoV);
   const pad = px * o.caja_pad, caja = dr.estilo === "caja", oscuro = dr.color === "negro";
   const lineas = cpRenglones(dr.texto, dr.fuente, px, W * o.ancho_max);
   txt.style.cssText = cpCss(dr, px) + `line-height:${o.interlinea};top:${dr.texto_y * H + (caja ? pad : 0) - px * (o.interlinea - 1) / 2}px;`;
-  (txt.querySelector(".cp-lineas") || txt).innerHTML = lineas.length ? lineas.map(l => `<div class="cp-l" style="${caja ? `background:${oscuro ? "rgba(255,255,255,.95)" : "rgba(0,0,0,.85)"};padding:0 ${pad}px;margin-bottom:${pad}px;` : ""}">${esc(l) || "&nbsp;"}</div>`).join("") : `<div class="cp-l" style="opacity:.55;font-size:${px * 0.7}px">Escribí el texto →</div>`;
+  const em = cpRenglones.emo || { mapa: {}, n: 1, esp: px * 0.25 }, lado = px * 1.05;
+  const conEmojis = l => [...l].map(ch => em.mapa[ch] ? `<span class="cp-emo" style="width:${em.n * em.esp}px"><img src="/emoji/${esc(em.mapa[ch])}.webp" alt="" style="width:${lado}px;height:${lado}px;margin-bottom:${-lado * 0.14}px"></span>` : esc(ch)).join("");
+  (txt.querySelector(".cp-lineas") || txt).innerHTML = lineas.length ? lineas.map(l => `<div class="cp-l" style="${caja ? `background:${oscuro ? "rgba(255,255,255,.95)" : "rgba(0,0,0,.85)"};padding:0 ${pad}px;margin-bottom:${pad}px;` : ""}">${conEmojis(l) || "&nbsp;"}</div>`).join("") : `<div class="cp-l" style="opacity:.55;font-size:${px * 0.7}px">Escribí el texto →</div>`;
   const bw = txt.offsetWidth;
   txt.style.left = Math.max(pad + 4 * W / (c.ancho || 720), Math.min(dr.texto_x * W - bw / 2, W - bw - pad)) + "px";
   const lbl = $("#cpTamLbl"); if (lbl) lbl.textContent = (dr.texto_tam * 100).toFixed(1).replace(".", ",") + " %";

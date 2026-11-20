@@ -141,7 +141,7 @@ def test_la_vista_previa_usa_la_escala_del_video():
     from hookline.servicios import fabrica
     assert fabrica.opciones()["escala_texto"] == fabrica.ESCALA_TEXTO == 1.2
     html = PANEL.read_text(encoding="utf-8")
-    assert "dr.texto_tam * H * (o.escala_texto || 1)" in html
+    assert "Math.floor(dr.texto_tam * altoV * (o.escala_texto || 1)) * H / altoV" in html
     # tocar el tamaño (esquina, botones A−/A+, barra) deja el texto donde está: no lo vuelve a ubicar solo
     assert "if (!cpArr.esquina) cpManual();" not in html
     assert re.search(r"d\.cptam\) \{ const c = cpCopia\(\); if \(c\) \{ cpManual\(\);", html)

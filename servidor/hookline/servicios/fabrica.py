@@ -71,14 +71,66 @@ def _info_video(p: Path) -> tuple[int, int, float, bool]:
     return w - w % 2, h - h % 2, medios.duracion(p) or 0, "Audio:" in r.stderr
 
 
+# --- emojis en el texto: la letra no los tiene, así que se dibujan con el pack (Fluent 3D) en su lugar del renglón ---
+PUA = 0xE000          # cada emoji del texto se cambia por un carácter privado (U+E000…) mientras se arman los renglones
+VS16, TONOS = "\ufe0f", tuple(chr(c) for c in range(0x1F3FB, 0x1F400))
+
+
+@functools.lru_cache(maxsize=1)
+def _glifos() -> tuple[dict, int]:
+    m = {}
+    for e in _indice_emojis().values():
+        g = str(e.get("e") or "").replace(VS16, "")
+        if g:
+            m.setdefault(g, e["k"])
+    return m, max((len(g) for g in m), default=1)
+
+
+def emojis_del_texto(texto: str) -> tuple[str, dict]:
+    """Cambia cada emoji que está en el pack por un marcador (U+E000, U+E001…) y devuelve el texto y {marcador: clave}.
+    Los tonos de piel se ignoran (el pack trae el tono amarillo)."""
+    m, largo = _glifos()
+    out, mapa, i, t = [], {}, 0, str(texto or "")
+    while i < len(t):
+        hallado = None
+        for n in range(min(largo + 6, len(t) - i), 0, -1):
+            pedazo = t[i:i + n]
+            g = "".join(ch for ch in pedazo if ch != VS16 and ch not in TONOS)
+            if g in m and pedazo[0] not in (VS16,) + TONOS:
+                hallado = (n, m[g])
+                break
+        if hallado and len(mapa) < 64:
+            n, k = hallado
+            marca = chr(PUA + len(mapa))
+            mapa[marca] = k
+            out.append(marca)
+            i += n
+            while i < len(t) and (t[i] == VS16 or t[i] in TONOS):
+                i += 1
+        else:
+            out.append(t[i])
+            i += 1
+    return "".join(out), mapa
+
+
+def _espacios_emoji(medir, tam_px) -> tuple[int, float]:
+    """Cuántos espacios ocupa un emoji en el renglón (≈ el alto de la letra) y el ancho de un espacio."""
+    import math
+    esp = max(1.0, float(medir(" ")) or tam_px * 0.25)
+    return max(1, math.ceil(tam_px * 1.05 / esp)), esp
+
+
 def _renglones(texto, fuente_p, tam_px, max_px) -> list[str]:
     from PIL import ImageFont
     try:
-        medir = ImageFont.truetype(str(fuente_p), tam_px).getlength
+        base = ImageFont.truetype(str(fuente_p), tam_px).getlength
     except Exception:
-        medir = lambda s: len(s) * tam_px * 0.55
+        base = lambda s: len(s) * tam_px * 0.55
+    texto, mapa = emojis_del_texto(str(texto or "").replace("\r", ""))
+    n_esp, _ = _espacios_emoji(base, tam_px)
+    medir = (lambda s: base("".join(" " * n_esp if ch in mapa else ch for ch in s))) if mapa else base
     out = []
-    texto = fuentes.dibujable(str(texto or "").replace("\r", ""), fuente_p)   # sin cuadraditos (emojis)
+    texto = fuentes.dibujable(texto, fuente_p, conservar="".join(mapa))      # sin cuadraditos; los emojis quedan
     for parrafo in texto.split("\n"):
         linea = ""
         for palabra in parrafo.split():
@@ -204,7 +256,8 @@ def listar() -> list[dict]:
                 c[k + "_url"] = almacen.relativa(d / c[k]) if (d / c[k]).exists() else ""
         for v in c["versiones"]:
             v["url"] = almacen.relativa(d / v["archivo"]) if (d / v["archivo"]).exists() else ""
-        c["faltan"] = fuentes.faltan(c.get("texto"), c["fuente"])     # lo que esa letra no dibuja (emojis...)
+        sin_emojis = "".join(ch for ch in emojis_del_texto(c.get("texto"))[0] if not PUA <= ord(ch) < PUA + 64)
+        c["faltan"] = fuentes.faltan(sin_emojis, c["fuente"])     # lo que esa letra no dibuja (los emojis sí salen)
         out.append(c)
     return out
 
@@ -1107,9 +1160,20 @@ def _fondo_claro(cid: str, modelo: Path, c: dict, w: int, h: int, corte: float) 
 
 
 def _texto_filtros(c: dict, d: Path, w: int, h: int) -> list[str]:
+    """Los drawtext del texto. Los emojis del texto quedan como espacios y van en c["_emojis"] = [(clave, x, y, lado)]
+    para pegarlos como imagen encima, en el mismo lugar."""
+    from PIL import ImageFont
     tam = int(h * float(c["texto_tam"]) * ESCALA_TEXTO)
     fuente_p = fuentes.ruta_obligatoria(c["fuente"])
     lineas = _renglones(c.get("texto"), fuente_p, tam, w * ANCHO_MAX)
+    _, mapa = emojis_del_texto(c.get("texto"))
+    try:
+        medir = ImageFont.truetype(str(fuente_p), tam).getlength
+    except Exception:
+        medir = lambda s: len(s) * tam * 0.55
+    n_esp, esp = _espacios_emoji(medir, tam)
+    lado = max(4, int(round(tam * 1.05)))
+    c["_emojis"] = []
     color = COLORES.get(c["color"], "ffffff")
     oscuro = color == "111111"
     estilo = c["estilo"]
@@ -1121,9 +1185,26 @@ def _texto_filtros(c: dict, d: Path, w: int, h: int) -> list[str]:
     for i, linea in enumerate(lineas):
         if not linea:
             continue
-        (d / f"_t{i}.txt").write_text(linea, encoding="utf-8")
+        base_y = y0 + i * alto_linea + (pad if estilo == 'caja' else 0) + int(tam * 0.95)
+        if any(ch in mapa for ch in linea):
+            plano = "".join(" " * n_esp if ch in mapa else ch for ch in linea)
+            tw = medir(plano)
+            lx = int(max(pad + 4, min(w * cx - tw / 2, w - tw - pad - 4)))
+            for j, ch in enumerate(linea):
+                if ch in mapa:
+                    antes = medir("".join(" " * n_esp if x in mapa else x for x in linea[:j]))
+                    c["_emojis"].append((mapa[ch], int(lx + antes + (n_esp * esp - lado) / 2),
+                                         int(base_y - lado * 0.86), lado))
+            (d / f"_t{i}.txt").write_text(plano, encoding="utf-8")
+            pos_x = f"{lx}"
+        else:
+            (d / f"_t{i}.txt").write_text(linea, encoding="utf-8")
+            pos_x = f"'max({pad + 4},min(w*{cx:.4f}-tw/2,w-tw-{pad + 4}))'"
+        if not linea.strip(" "):
+            filtros.append("null")
+            continue
         f = (f"drawtext=fontfile='{f_esc}':textfile=_t{i}.txt:expansion=none:fontcolor=0x{color}:fontsize={tam}:"
-             f"x='max({pad + 4},min(w*{cx:.4f}-tw/2,w-tw-{pad + 4}))':y={y0 + i * alto_linea + (pad if estilo == 'caja' else 0) + int(tam * 0.95)}-ascent")
+             f"x={pos_x}:y={base_y}-ascent")
         if c.get("_sombra") and estilo == "nada":
             f += f":shadowcolor=black@0.35:shadowx=0:shadowy={max(1, tam // 30)}"
         if estilo == "sombra":
@@ -1252,6 +1333,18 @@ def _render_ya(datos: dict) -> None:
         c["_sombra"] = _fondo_claro(cid, modelo, c, w, h, corte)
         for f in _texto_filtros(c, d, w, h):
             base += "," + f
+        for k, (clave, ex, ey, lado) in enumerate(c.get("_emojis") or []):   # los emojis del texto, en su lugar
+            ep = ruta_emoji(clave)
+            if not ep:
+                continue
+            (d / "_capas").mkdir(exist_ok=True)
+            png = d / "_capas" / f"te{k}.png"
+            from PIL import Image as ImagenPIL
+            ImagenPIL.open(ep).convert("RGBA").resize((lado, lado), ImagenPIL.LANCZOS).save(png)
+            ni = entradas.count("-i")
+            entradas += ["-loop", "1", "-i", str(png)]
+            base += (f"[tb{k}];[{ni}:v]format=rgba,trim=0:{corte:.2f},setpts=PTS-STARTPTS[te{k}];"
+                     f"[tb{k}][te{k}]overlay={ex}:{ey},null")
         # el remate: el del ejemplo (sin tocar sus marcas: si las tiene, la copia no llega acá) o uno propio
         remate_p = d / c["remate"] if c.get("remate") and (d / c["remate"]).is_file() else None
         if c.get("marca_agua") and not remate_p and not c.get("marca_ok"):

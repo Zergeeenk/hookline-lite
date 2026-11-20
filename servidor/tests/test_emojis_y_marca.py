@@ -91,3 +91,65 @@ def test_el_reparto_respeta_la_decision():
     assert 'not (x.get("marca_agua") and not x.get("remate") and not x.get("marca_ok"))' in src
     html = (Path(__file__).resolve().parents[1] / "hookline" / "panel" / "index.html").read_text(encoding="utf-8")
     assert "data-cpmarcaok" in html and "Usarlo igual" in html
+
+
+# --- emojis adentro del texto (pedido 2026-11-20: «no me deja poner emojis en el texto») ----------------------------------
+@pytest.mark.parametrize("texto,claves", [
+    ("como adultos😮‍💨", ["1f62e-200d-1f4a8"]),            # emoji compuesto (ZWJ), como el de la captura
+    ("hola ❤️ y 👍🏽 fin", ["2764-fe0f", "1f44d"]),            # con selector de variante y con tono de piel
+    ("😂😂", ["1f602", "1f602"]),
+    ("sin emojis", []),
+    ("", []),
+])
+def test_detecta_los_emojis_del_texto(texto, claves):
+    from hookline.servicios import fabrica
+    t, mapa = fabrica.emojis_del_texto(texto)
+    assert [mapa[ch] for ch in t if ch in mapa] == claves
+    assert all(fabrica.ruta_emoji(k) for k in claves)
+
+
+def test_los_renglones_cuentan_el_ancho_del_emoji():
+    from hookline import fuentes
+    from hookline.servicios import fabrica
+    p = fuentes.ruta_obligatoria("clasica")
+    r = fabrica._renglones("hola 😂 chau", p, 50, 2000)
+    assert len(r) == 1 and "" in r[0]                         # el emoji no se borra
+    corto = fabrica._renglones("ab cd", p, 50, 90)
+    con = fabrica._renglones("ab 😂😂😂 cd", p, 50, 90)
+    assert len(con) > len(corto)                                    # ocupan lugar y hacen saltar el renglón
+
+
+def test_el_aviso_esto_no_sale_ya_no_cuenta_los_emojis(copia):  # noqa: F811
+    from hookline.servicios import fabrica
+    fabrica._datos(copia, texto="como adultos😮‍💨 漢")
+    c = next(x for x in fabrica.listar() if x["id"] == copia)
+    assert "😮" not in c["faltan"] and "漢" in c["faltan"]
+
+
+@con_ffmpeg
+def test_el_emoji_del_texto_sale_en_su_lugar(copia):  # noqa: F811
+    from hookline.servicios import fabrica
+    _armar(copia, texto="Hola 😂 chau", texto_y=0.5, texto_x=0.5, texto_tam=0.05, ubicacion_auto=False,
+           estilo="nada", color="blanco", pegar=[], stickers=[])
+    a = _cuadro(copia)
+    H, W = a.shape[:2]
+    amarillo = (a[..., 0] > 200) & (a[..., 1] > 150) & (a[..., 2] < 110)
+    ys, xs = np.where(amarillo)
+    assert len(xs) > 200, "no se ve el emoji"
+    ex0, ex1, ey0, ey1 = xs.min() / W, xs.max() / W, ys.min() / H, ys.max() / H
+    assert 0.48 <= ey0 and ey1 <= 0.6                                # en el renglón del texto
+    assert 0.4 <= (ex0 + ex1) / 2 <= 0.6                             # en el medio de «Hola … chau»
+    blanco = (a[..., 0] > 235) & (a[..., 1] > 235) & (a[..., 2] > 235)
+    fila = blanco[int(H * 0.5):int(H * 0.6)]
+    cols = np.where(fila.any(axis=0))[0] / W
+    assert (cols < ex0 - 0.01).any() and (cols > ex1 + 0.01).any()   # letras a los dos lados del emoji
+
+
+def test_la_vista_previa_redondea_la_letra_como_el_video():
+    """El servidor usa la letra en píxeles enteros (int): la vista previa tiene que redondear igual. Si no, un renglón
+    justo al límite se corta en otro lado (pasó: «problemas como» medía 519,5 px en el navegador y el máximo era 518,4)."""
+    import hookline.servicios.fabrica as fab
+    html = (Path(__file__).resolve().parents[1] / "hookline" / "panel" / "index.html").read_text(encoding="utf-8")
+    assert "Math.floor(dr.texto_tam * altoV * (o.escala_texto || 1)) * H / altoV" in html
+    src = Path(fab.__file__).read_text(encoding="utf-8")
+    assert 'tam = int(h * float(c["texto_tam"]) * ESCALA_TEXTO)' in src
