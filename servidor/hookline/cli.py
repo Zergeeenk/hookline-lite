@@ -93,6 +93,26 @@ def _latido(**kw):
     guardar_ajuste("puente", p)
 
 
+def cmd_buscador_probar(a):
+    from .servicios import buscador
+    try:
+        rs = buscador.probar(a.consultas or None)
+    except ValueError as ex:
+        print(f"No se pudo probar: {ex}")
+        sys.exit(1)
+    for r in rs:
+        if r.get("error"):
+            print(f"✗ {r['fuente']}: {r['error']}")
+            continue
+        estado = "✓" if r["ok"] else "✗"
+        ses = "" if r["red"] == "Pinterest" else (" · con sesión" if r["sesion"] else " · SIN sesión")
+        print(f"{estado} {r['fuente']}: {r['videos']} videos{ses}{' · PIDIÓ LOGIN' if r['pidio_login'] else ''}")
+        print(f"    abrió: {r['final']}")
+        for e in r["ejemplos"]:
+            print(f"    {e}")
+    sys.exit(0 if all(r.get("ok") for r in rs) else 2)
+
+
 def cmd_puente(a):
     _base()
     from .ia import tareas
@@ -177,6 +197,9 @@ def main(argv=None):
     x.add_argument("carpeta")
     x.add_argument("--sin-archivos", action="store_true", help="solo datos, sin copiar fotos y videos")
     x.set_defaults(f=cmd_migrar_lite)
+    x = sub.add_parser("buscador-probar", help="prueba el buscador contra Instagram, TikTok y Pinterest (no guarda nada)")
+    x.add_argument("consultas", nargs="*", help='ej.: "ig: meme pov" "tt @cuenta" "pin: meme pov"')
+    x.set_defaults(f=cmd_buscador_probar)
     x = sub.add_parser("puente")
     x.add_argument("accion", choices=["esperar", "responder", "estado"])
     x.add_argument("texto", nargs="*")

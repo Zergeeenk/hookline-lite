@@ -76,8 +76,12 @@ PUA = 0xE000          # cada emoji del texto se cambia por un carácter privado 
 VS16, TONOS = "\ufe0f", tuple(chr(c) for c in range(0x1F3FB, 0x1F400))
 
 
-@functools.lru_cache(maxsize=1)
 def _glifos() -> tuple[dict, int]:
+    return _glifos_de(_version_pack())
+
+
+@functools.lru_cache(maxsize=4)
+def _glifos_de(_version: str) -> tuple[dict, int]:
     m = {}
     for e in _indice_emojis().values():
         g = str(e.get("e") or "").replace(VS16, "")
@@ -272,7 +276,7 @@ EMOJIS_DIR = Path(__file__).resolve().parents[1] / "emojis"
 
 
 @functools.lru_cache(maxsize=1)
-def _indice_emojis() -> dict:
+def _indice_base() -> dict:
     try:
         lista = json.loads((EMOJIS_DIR / "indice.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -280,14 +284,195 @@ def _indice_emojis() -> dict:
     return {e["k"]: e for e in lista if isinstance(e, dict) and re.fullmatch(r"[0-9a-z-]{1,60}", str(e.get("k")))}
 
 
+# --- el pack propio: el equipo sube un ZIP con sus emojis (ej. los de iPhone) y reemplazan a los 3D ---------------------------
+# Van a datos/emojis-propios/<clave>.png con un pack.json {version, n, extra:[{k,n,g,e,p}]}. Los que no estaban en el
+# pack 3D (emojis más nuevos) entran como "extra" en el grupo «nuevos». API y worker son procesos distintos: el índice
+# se relee cuando cambia la versión del pack.json, no hace falta reiniciar nada.
+EMOJI_LADO = 160
+MAX_PACK = 400 * 1024 * 1024            # el ZIP
+MAX_ARCHIVOS_PACK = 80_000
+MAX_EMOJI_BYTES = 6 * 1024 * 1024
+
+
+def _dir_pack() -> Path:
+    return almacen.dir_de("emojis")
+
+
+def _leer_pack() -> dict:
+    f = _dir_pack() / "pack.json"
+    try:
+        return _leer_pack_de(str(f), f.stat().st_mtime_ns)
+    except OSError:
+        return {}
+
+
+@functools.lru_cache(maxsize=4)
+def _leer_pack_de(ruta: str, _mtime: int) -> dict:
+    try:
+        d = json.loads(Path(ruta).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _version_pack() -> str:
+    return str(_leer_pack().get("version") or "")
+
+
+def _indice_emojis() -> dict:
+    return _indice_de(_version_pack())
+
+
+@functools.lru_cache(maxsize=4)
+def _indice_de(_version: str) -> dict:
+    idx = dict(_indice_base())
+    for e in _leer_pack().get("extra") or []:
+        if isinstance(e, dict) and re.fullmatch(r"[0-9a-f-]{1,60}", str(e.get("k"))) and e["k"] not in idx:
+            idx[e["k"]] = {"k": e["k"], "n": str(e.get("n") or "")[:80], "g": "nuevos", "e": str(e.get("e") or "")[:20],
+                           "p": [str(x)[:40] for x in (e.get("p") or [])][:8]}
+    return idx
+
+
+def pack_emojis() -> dict:
+    p = _leer_pack()
+    return {"propio": int(p.get("n") or 0), "nuevos": len(p.get("extra") or []), "version": str(p.get("version") or ""),
+            "nombre": str(p.get("nombre") or "")}
+
+
 def emojis() -> list[dict]:
-    """El pack de emojis (Fluent 3D, MIT): [{k, n, g, e, p}]. La imagen se sirve en /emoji/<k>.webp."""
+    """El pack de emojis: [{k, n, g, e, p}]. La imagen se sirve en /emoji/<k>.webp (la del pack propio si la hay)."""
     return list(_indice_emojis().values())
 
 
 def ruta_emoji(k: str) -> Path | None:
     k = str(k or "")
-    return EMOJIS_DIR / "3d" / f"{k}.webp" if k in _indice_emojis() else None
+    if k not in _indice_emojis():
+        return None
+    if _version_pack():
+        p = _dir_pack() / f"{k}.png"
+        if p.is_file():
+            return p
+    p = EMOJIS_DIR / "3d" / f"{k}.webp"
+    return p if p.is_file() else None
+
+
+def _sin_fe0f(k: str) -> str:
+    """Clave comparable: sin FE0F y sin ceros a la izquierda («0023-fe0f-20e3» y «23-20e3» son el mismo #️⃣)."""
+    return "-".join(f"{int(x, 16):x}" for x in k.split("-") if x and x != "fe0f")
+
+
+def _es_emoji(cps: list[int]) -> bool:
+    """Para los que no están en el pack 3D: solo códigos de los bloques de emojis de Unicode (así «cafe.png» o
+    «logo.png» no entran como emoji)."""
+    def ok(c):
+        return (0x1F000 <= c <= 0x1FAFF or 0x2190 <= c <= 0x2BFF or 0xE0020 <= c <= 0xE007F
+                or c in (0x200D, 0xFE0F, 0x20E3, 0x3030, 0x303D, 0x3297, 0x3299))
+    return bool(cps) and all(ok(c) for c in cps) and any(c not in (0x200D, 0xFE0F, 0x20E3) for c in cps)
+
+
+def _clave_de_archivo(nombre: str, por_codigo: dict, por_nombre: dict) -> tuple[str, str]:
+    """De un nombre de archivo del ZIP saca (clave, emoji). Entiende «1f600.png», «emoji_u1f600.png» (Noto),
+    «U+1F600.png», «1f468_200d_1f469.png», «😀.png» y el nombre en inglés («grinning face.png»)."""
+    crudo = Path(nombre).stem.strip().lower()
+    if crudo in por_nombre:
+        return por_nombre[crudo], ""
+    base = re.sub(r"[@_-]?\d+x$|[_-](\d{2,3})$", "", crudo) or crudo        # «1f600@2x», «1f600_64»
+    if base in por_nombre:
+        return por_nombre[base], ""
+    t = re.sub(r"^(emoji_u|emoji-u|u\+|u)", "", base)
+    partes = [x for x in re.split(r"[\s_+-]+|u\+", t) if x]
+    if partes and all(re.fullmatch(r"[0-9a-f]{1,6}", x) for x in partes):
+        cps = [int(x, 16) for x in partes]
+    else:
+        cps = [ord(ch) for ch in Path(nombre).stem.strip()]
+    if not cps or len(cps) > 12 or any(c > 0x10FFFF or 0xD800 <= c <= 0xDFFF for c in cps):
+        return "", ""
+    k = "-".join(f"{c:x}" for c in cps)
+    if _sin_fe0f(k) in por_codigo:
+        return por_codigo[_sin_fe0f(k)], ""
+    if not _es_emoji(cps) or any(0x1F3FB <= c <= 0x1F3FF for c in cps):   # tonos de piel: el texto usa el amarillo
+        return "", ""
+    k = _sin_fe0f(k)
+    return k, "".join(chr(c) for c in cps if c != 0xFE0F)
+
+
+def importar_pack_emojis(datos: bytes, nombre_pack: str = "") -> dict:
+    """Un ZIP con imágenes de emojis (PNG/WebP/JPG) nombradas por su código. Reemplaza el pack propio anterior."""
+    import io
+    import zipfile
+    from PIL import Image, UnidentifiedImageError
+    if not datos or len(datos) > MAX_PACK:
+        raise ValueError("Subí un ZIP de menos de 400 MB con las imágenes de los emojis.")
+    try:
+        z = zipfile.ZipFile(io.BytesIO(datos))
+        miembros = z.infolist()
+    except (zipfile.BadZipFile, OSError, ValueError):
+        raise ValueError("Eso no es un ZIP: comprimí la carpeta de los emojis y subí el .zip.") from None
+    if len(miembros) > MAX_ARCHIVOS_PACK:
+        raise ValueError(f"El ZIP tiene más de {MAX_ARCHIVOS_PACK:,} archivos.".replace(",", "."))
+    base = _indice_base()
+    por_codigo = {_sin_fe0f(k): k for k in base}
+    por_nombre = {e["n"].lower(): k for k, e in base.items() if e.get("n")}
+    elegidos: dict[str, tuple[int, zipfile.ZipInfo, str]] = {}      # clave → (lado, archivo, emoji si es nuevo)
+    for m in miembros:
+        n = m.filename.replace("\\", "/")
+        if m.is_dir() or "__MACOSX/" in n or Path(n).name.startswith(".") or m.file_size > MAX_EMOJI_BYTES \
+                or Path(n).suffix.lower() not in (".png", ".webp", ".jpg", ".jpeg"):
+            continue
+        k, e = _clave_de_archivo(Path(n).name, por_codigo, por_nombre)
+        if not k:
+            continue
+        lado = max((int(x) for x in re.findall(r"(?<![0-9a-f])(\d{2,4})(?![0-9a-f])", n) if 16 <= int(x) <= 1024),
+                   default=0)                                       # carpetas 64/, 160/, 72x72/: se queda la más grande
+        if k not in elegidos or lado > elegidos[k][0]:
+            elegidos[k] = (lado, m, e)
+    if not elegidos:
+        raise ValueError("No encontré emojis en ese ZIP: los archivos tienen que llamarse por su código "
+                         "(1f600.png, emoji_u1f600.png) o por el emoji (😀.png).")
+    import shutil as _sh
+    import time as _t
+    final = _dir_pack()
+    tmp = final.with_name(final.name + ".nuevo")
+    _sh.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    hechos, extra = 0, []
+    try:
+        for k, (_, m, e) in elegidos.items():
+            try:
+                with z.open(m) as fh:
+                    im = Image.open(io.BytesIO(fh.read(MAX_EMOJI_BYTES + 1)))
+                    if im.width * im.height > 16_000_000:
+                        continue
+                    im.load()
+            except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError, zipfile.BadZipFile):
+                continue
+            im = im.convert("RGBA")
+            im.thumbnail((EMOJI_LADO, EMOJI_LADO))
+            im.save(tmp / f"{k}.png", "PNG")
+            hechos += 1
+            if k not in base:
+                extra.append({"k": k, "n": f"nuevo {e}", "g": "nuevos", "e": e, "p": ["nuevo", "new"]})
+        if not hechos:
+            raise ValueError("Ninguna imagen del ZIP se pudo abrir.")
+        (tmp / "pack.json").write_text(json.dumps({"version": f"{_t.time():.0f}-{hechos}", "n": hechos, "extra": extra,
+                                                    "nombre": str(nombre_pack or "")[:80]}, ensure_ascii=False),
+                                       encoding="utf-8")
+        viejo = final.with_name(final.name + ".viejo")
+        _sh.rmtree(viejo, ignore_errors=True)
+        final.rename(viejo)
+        tmp.rename(final)
+        _sh.rmtree(viejo, ignore_errors=True)
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+    return {"n": hechos, "reemplazados": hechos - len(extra), "nuevos": len(extra)}
+
+
+def borrar_pack_emojis() -> None:
+    """Vuelve al pack 3D de Microsoft."""
+    import shutil as _sh
+    d = _dir_pack()
+    _sh.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
 
 
 def _ruta_sticker(archivo: str) -> Path | None:

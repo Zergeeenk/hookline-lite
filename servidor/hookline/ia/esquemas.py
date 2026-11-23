@@ -140,7 +140,7 @@ class Elegido(_Base):
 
 class Filtro(_Base):
     sirven: list[Elegido]
-    fuentes_nuevas: list[str] = Field(default_factory=list, description='0-5, formato "ig @cuenta" o "ig: frase"')
+    fuentes_nuevas: list[str] = Field(default_factory=list, description='0-5, formato "ig @cuenta", "ig: frase", "tt @cuenta" o "pin: frase"')
 
 
 # --- chat ---------------------------------------------------------------------------------------------------------------------
