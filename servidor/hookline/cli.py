@@ -108,9 +108,13 @@ def cmd_buscador_probar(a):
         estado = "✓" if r["ok"] else "✗"
         ses = "" if r["red"] == "Pinterest" else (" · con sesión" if r["sesion"] else " · SIN sesión")
         print(f"{estado} {r['fuente']}: {r['videos']} videos{ses}{' · PIDIÓ LOGIN' if r['pidio_login'] else ''}")
-        print(f"    abrió: {r['final']}")
+        print(f"    abrió: {r['final']}" + (" (pines por la búsqueda interna de Pinterest)" if r.get("api") else ""))
         for e in r["ejemplos"]:
             print(f"    {e}")
+        if not r["ok"] and r.get("texto"):
+            print(f"    la página dice: {r['texto'][:240]}")
+        if r.get("captura"):
+            print(f"    captura: {r['captura']}")
     sys.exit(0 if all(r.get("ok") for r in rs) else 2)
 
 
