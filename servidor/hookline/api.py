@@ -793,6 +793,17 @@ def usuarios(q: Quien = requerir("admin")):
     return {"usuarios": us, "tokens": ts}
 
 
+def _id_entero(v) -> int:
+    """Un id que viene del pedido: entero chico o 0 (una lista o un número gigante no llegan a la base)."""
+    if isinstance(v, bool):
+        return 0
+    try:
+        n = int(v) if isinstance(v, (int, str)) else 0
+    except ValueError:
+        return 0
+    return n if 0 < n < 2**31 else 0
+
+
 @app.post("/api/usuarios")
 def usuarios_post(d: dict = Depends(_json), q: Quien = requerir("admin")):
     op = d.get("op")
@@ -801,7 +812,7 @@ def usuarios_post(d: dict = Depends(_json), q: Quien = requerir("admin")):
                                                      str(d.get("nombre", "")), str(d.get("rol") or "editor"))}
     if op == "desactivar":
         with sesion() as s:
-            u = s.get(Usuario, int(d.get("id") or 0))
+            u = s.get(Usuario, _id_entero(d.get("id")))
             if not u:
                 raise ValueError("Usuario desconocido.")
             if u.id == q.id:
@@ -812,7 +823,7 @@ def usuarios_post(d: dict = Depends(_json), q: Quien = requerir("admin")):
         return {"ok": True, "token": auth.crear_token(str(d.get("nombre") or "integración"), str(d.get("rol") or "editor"))}
     if op == "revocar_token":
         with sesion() as s:
-            t = s.get(TokenAPI, int(d.get("id") or 0))
+            t = s.get(TokenAPI, _id_entero(d.get("id")))
             if not t:
                 raise ValueError("Token desconocido.")
             t.revocado = True
