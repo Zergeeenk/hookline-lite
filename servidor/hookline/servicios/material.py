@@ -337,7 +337,10 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
     carpeta_destino.mkdir(parents=True, exist_ok=True)
     log_y = _Callado()
     opts = {"outtmpl": str(carpeta_destino / f"{nombre}.%(ext)s"), "restrictfilenames": True,
-            "format": "b[vcodec^=h264]/b[vcodec^=avc]/b", "noplaylist": True, "quiet": True,
+            # un archivo con video y audio; si no hay (el HLS de Pinterest los trae por separado), el mejor video + el
+            # mejor audio, unidos con ffmpeg en un MP4
+            "format": "b[vcodec^=h264]/b[vcodec^=avc]/b/bv*+ba/bv*", "merge_output_format": "mp4",
+            "noplaylist": True, "quiet": True,
             "no_warnings": True, "noprogress": True, "logger": log_y, "ffmpeg_location": medios.ffmpeg(),
             "socket_timeout": 20, "retries": 2}
     try:
@@ -346,7 +349,8 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
                 opts["cookiefile"] = ck
             with yt_dlp.YoutubeDL(opts) as y:
                 info = y.extract_info(_url_descarga(link), download=True)
-                video = Path(y.prepare_filename(info))
+                hecho = [d.get("filepath") for d in info.get("requested_downloads") or [] if d.get("filepath")]
+                video = Path(hecho[0]) if hecho else Path(y.prepare_filename(info))
         if not video.is_file():
             raise RuntimeError("no se guardó")
     except Exception as ex:
