@@ -206,20 +206,54 @@ AGENTE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, 
           "Chrome/142.0.0.0 Safari/537.36")
 
 
+def _soltar_candados(perfil: Path) -> int:
+    """El perfil vive en el volumen de datos y sobrevive a cada `docker compose up --build`: si Chrome se cortó, deja
+    SingletonLock apuntando al contenedor viejo y el nuevo se niega a abrir el perfil («en uso por otra computadora»).
+    Solo se llama cuando no hay ningún navegador del buscador escuchando, así que nadie lo está usando."""
+    n = 0
+    for nombre in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = perfil / nombre
+        if p.is_symlink() or p.exists():
+            try:
+                p.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def abrir() -> None:
     if _abierto():
         return
     perfil = almacen.dir_de("navegador", "perfil")
-    subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}", "--no-first-run",
-                      "--headless=new", "--no-sandbox", "--window-size=1280,900", "--mute-audio",
-                      f"--user-agent={AGENTE}", "--lang=es-AR", "--disable-blink-features=AutomationControlled",
-                      "about:blank"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(40):
+    if _soltar_candados(perfil):
+        log.info("buscador: saqué los candados viejos del perfil de Chrome")
+    registro = perfil.parent / "chrome.log"
+    with open(registro, "wb") as salida:
+        proc = subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}",
+                                 "--no-first-run", "--no-default-browser-check", "--headless=new", "--no-sandbox",
+                                 "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--mute-audio",
+                                 f"--user-agent={AGENTE}", "--lang=es-AR",
+                                 "--disable-blink-features=AutomationControlled", "about:blank"],
+                                stdout=salida, stderr=salida, start_new_session=True)
+    for _ in range(60):
         if _abierto():
             return
+        if proc.poll() is not None:
+            break
         time.sleep(0.5)
-    raise ValueError("No pude abrir el navegador del buscador.")
+    try:
+        renglones = [r for r in registro.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if "ERROR" in r or "error" in r.lower()]
+    except OSError:
+        renglones = []
+    motivo = re.sub(r"^\[[^\]]*\]\s*", "", renglones[0])[:220] if renglones else ""
+    codigo = proc.poll()
+    if codigo is None:
+        proc.kill()
+    raise ValueError("No pude abrir el navegador del buscador"
+                     + (f" (Chrome salió con código {codigo})" if codigo not in (None, 0) else " (no respondió en 30 s)")
+                     + (f": {motivo}" if motivo else ".") + f" El detalle queda en {registro}.")
 
 
 def _contexto(p):

@@ -192,3 +192,28 @@ def test_probar_en_el_servidor(buscador):
     assert rs[2]["ejemplos"][0].startswith("https://www.pinterest.com/pin/")
     from hookline.servicios import fabrica
     assert fabrica.links() == []                                      # probar no guarda nada
+
+
+def test_abre_aunque_haya_quedado_el_candado_de_otro_contenedor(buscador):
+    """Lo que pasó en el server: el perfil está en el volumen y después de un rebuild quedaba SingletonLock apuntando
+    al contenedor viejo; Chrome salía con código 21 («perfil en uso por otra computadora») y el buscador no abría."""
+    import os
+    from hookline import almacen
+    b = buscador
+    perfil = almacen.dir_de("navegador", "perfil")
+    os.symlink("contenedor-viejo-12345-99", perfil / "SingletonLock")
+    (perfil / "SingletonCookie").write_text("x")
+    b.abrir()
+    assert b._abierto()
+    assert os.readlink(perfil / "SingletonLock") != "contenedor-viejo-12345-99"     # el candado ahora es el nuevo
+
+
+def test_si_chrome_no_arranca_dice_por_que(buscador, monkeypatch, tmp_path):
+    b = buscador
+    falso = tmp_path / "chrome-roto"
+    falso.write_text("#!/bin/sh\necho '[1:1:ERROR:algo.cc:1] Falta una biblioteca: libnss3.so' >&2\nexit 127\n")
+    falso.chmod(0o755)
+    monkeypatch.setattr(b, "_chrome", lambda: str(falso))
+    with pytest.raises(ValueError) as e:
+        b.abrir()
+    assert "código 127" in str(e.value) and "libnss3" in str(e.value) and "chrome.log" in str(e.value)
