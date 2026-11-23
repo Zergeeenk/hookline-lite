@@ -175,7 +175,7 @@ Que sirva = chica claramente adulta en cámara, del formato, con gracia, que la 
 celosa). Ante la duda con la edad, afuera. Sé estricta: mejor 5 buenos que 30 dudosos. En sirven: n (el número), cat (una
 de: el-yo, nadie-yo, pov, numero, rateme, esto-o-esto, novio, flags, adivina, comenta, outfit, lipsync, antes-despues,
 chat, reaccion-animal, otro) y titulo (texto en pantalla, corto). En fuentes_nuevas (opcional, 0-5) proponé cuentas o
-frases para buscar si ves pistas en las miniaturas ("ig @cuenta", "ig: frase", "tt @cuenta")."""
+frases para buscar si ves pistas en las miniaturas ("ig @cuenta", "ig: frase", "tt @cuenta", "pin: frase")."""
 
 
 def chat(p: dict) -> str:

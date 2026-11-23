@@ -29,6 +29,7 @@ SECCIONES = {
     "navegador": "navegador",
     "fuentes": "fuentes",         # fuentes/<clave>.ttf|otf (las subidas en la sección Fuentes)
     "stickers": "stickers",       # stickers/<nombre>.png (emojis de iPhone, logos...: se pegan sobre el video)
+    "emojis": "emojis-propios",   # emojis-propios/<clave>.png + pack.json: el pack de emojis que sube el equipo
     "chat": "chat",               # chat/<aaaa-mm>/<id>.jpg (fotos que le mandan a Claude por el chat)
 }
 

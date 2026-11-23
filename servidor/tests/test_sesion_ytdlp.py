@@ -84,3 +84,11 @@ def test_sin_cookies_no_pasa_cookiefile(ytdlp, tmp_path):
         material.bajar_video("https://www.instagram.com/reel/AAA/", tmp_path)
     assert _YDLQueBorra.usados == [None]
     assert "Cargar sesión" in str(e.value)
+
+
+def test_motivo_de_pinterest_no_pide_sesion():
+    from hookline.servicios import material
+    m = material.motivo_ytdlp(RuntimeError("ERROR: [Pinterest] 123: No video formats found"), "https://www.pinterest.com/pin/123/")
+    assert "no tiene video" in m and "sesión" not in m
+    m = material.motivo_ytdlp(RuntimeError("timeout"), "https://pin.it/abc")
+    assert "Pinterest" in m and "sesión" not in m

@@ -72,6 +72,9 @@ def _link(href: str, red: str) -> str:
     if red == "ig":
         m = re.search(r"/(?:reel|p)/([\w-]+)", href)
         return f"https://www.instagram.com/reel/{m.group(1)}/" if m else ""
+    if red == "pin":
+        m = re.search(r"/pin/(\d{5,25})", href)
+        return f"https://www.pinterest.com/pin/{m.group(1)}/" if m else ""
     m = re.search(r"/@([\w.]+)/video/(\d+)", href)
     return f"https://www.tiktok.com/@{m.group(1)}/video/{m.group(2)}" if m else ""
 
@@ -81,8 +84,15 @@ def _url(red: str, q: str) -> str:
         return (f"https://www.instagram.com/{q[1:]}/reels/" if q.startswith("@") else
                 f"https://www.instagram.com/explore/tags/{urllib.parse.quote(q[1:])}/" if q.startswith("#") else
                 f"https://www.instagram.com/explore/search/keyword/?q={urllib.parse.quote(q)}")
+    if red == "pin":                     # Pinterest: la pestaña de videos de la búsqueda, o los pines de una cuenta
+        return (f"https://www.pinterest.com/{urllib.parse.quote(q[1:])}/_created/" if q.startswith("@") else
+                f"https://www.pinterest.com/search/videos/?q={urllib.parse.quote(q.lstrip('#'))}")
     return (f"https://www.tiktok.com/{q}" if q.startswith("@") else
             f"https://www.tiktok.com/search/video?q={urllib.parse.quote(q.lstrip('#'))}")
+
+
+NOMBRE_RED = {"ig": "Instagram", "tt": "TikTok", "pin": "Pinterest"}
+SELECTOR = {"ig": "a[href*='/reel/'], a[href*='/p/']", "tt": "a[href*='/video/']", "pin": "a[href*='/pin/']"}
 
 
 def clave(red: str, q: str) -> str:
@@ -110,7 +120,7 @@ def sumar_fuentes(nuevas) -> int:
     with sesion() as s:
         ya = {clave(f.red, f.consulta) for f in s.scalars(select(FuenteBusqueda))}
         for x in nuevas or []:
-            m = re.match(r"\s*(ig|tt)\s*:?\s*(.+)", str(x), re.I)
+            m = re.match(r"\s*(ig|tt|pin)\s*:?\s*(.+)", str(x), re.I)
             if not m or str(x).strip().startswith("#"):
                 continue
             red, q = m.group(1).lower(), m.group(2).strip()[:200]
@@ -190,12 +200,20 @@ def _chrome() -> str:
     raise ValueError("No encontré Chrome/Chromium en el servidor (instalalo o poné HOOKLINE_CHROME).")
 
 
+# Chrome sin ventana se presenta como «HeadlessChrome» y Instagram/TikTok lo tratan como robot (piden login o no muestran
+# nada): se presenta como un Chrome común de escritorio.
+AGENTE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+          "Chrome/142.0.0.0 Safari/537.36")
+
+
 def abrir() -> None:
     if _abierto():
         return
     perfil = almacen.dir_de("navegador", "perfil")
     subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}", "--no-first-run",
-                      "--headless=new", "--no-sandbox", "--window-size=1280,900", "--mute-audio", "about:blank"],
+                      "--headless=new", "--no-sandbox", "--window-size=1280,900", "--mute-audio",
+                      f"--user-agent={AGENTE}", "--lang=es-AR", "--disable-blink-features=AutomationControlled",
+                      "about:blank"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(40):
         if _abierto():
@@ -318,6 +336,11 @@ def importar_cookies(texto: str) -> int:
         tmp.write_text(_netscape(todas), encoding="utf-8")
         tmp.chmod(0o600)
         tmp.replace(f)
+        with candado("sesiones_redes"):
+            d = dict(ajuste("sesiones_redes", {}) or {})
+            for r in redes:
+                d[r] = {"vencida": False, "motivo": "", "cargada_el": _hora("%d/%m %H:%M"), "visto": ""}
+            guardar_ajuste("sesiones_redes", d)
     if _abierto():                       # si el navegador del buscador ya está abierto en esta máquina, también
         try:
             sync_playwright = _playwright()
@@ -332,6 +355,43 @@ def importar_cookies(texto: str) -> int:
 def estado_sesion() -> dict:
     cs = cookies_guardadas()
     return {r: any(_red(c["domain"]) == r and c["name"] == SESION_DE[r] for c in cs) for r in REDES}
+
+
+def marcar_sesion(red: str, vencida: bool, motivo: str = "") -> None:
+    """Lo que se sabe de la sesión de cada red más allá del archivo: si Instagram/TikTok la cortaron (la vio vencida el
+    buscador o una descarga). Se limpia al cargar cookies nuevas."""
+    if red not in REDES:
+        return
+    with candado("sesiones_redes"):
+        d = dict(ajuste("sesiones_redes", {}) or {})
+        r = dict(d.get(red) or {})
+        if bool(r.get("vencida")) == bool(vencida) and (not vencida or r.get("motivo") == motivo):
+            return
+        r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
+        d[red] = r
+        guardar_ajuste("sesiones_redes", d)
+
+
+def sesiones() -> dict:
+    """Para el panel: por red {cargada, vencida, cargada_el, motivo, visto}. Sobrevive a recargar la página (F5)."""
+    hay = estado_sesion()
+    d = ajuste("sesiones_redes", {}) or {}
+    out = {}
+    for r in REDES:
+        x = d.get(r) or {}
+        out[r] = {"cargada": bool(hay.get(r)), "vencida": bool(hay.get(r) and x.get("vencida")),
+                  "cargada_el": str(x.get("cargada_el") or ""), "motivo": str(x.get("motivo") or ""),
+                  "visto": str(x.get("visto") or "")}
+    return out
+
+
+def _sesion_viva(ctx, red: str) -> bool:
+    """Después de abrir una página de la red: si el sitio borró la cookie de sesión, la sesión murió."""
+    dom = "https://www.instagram.com" if red == "instagram" else "https://www.tiktok.com"
+    try:
+        return any(c.get("name") == SESION_DE[red] and c.get("value") for c in ctx.cookies(dom))
+    except Exception:
+        return True
 
 
 def _cargar_sesion(ctx) -> None:
@@ -387,6 +447,7 @@ def _buscar(_d: dict) -> None:
         with sync_playwright() as p:
             _, ctx = _contexto(p)
             _cargar_sesion(ctx)
+            hay = estado_sesion()
             pg = ctx.new_page()
             estado(mensaje="Mirando de quién son los buenos…")
             _autores(pg)
@@ -400,37 +461,13 @@ def _buscar(_d: dict) -> None:
                     break
                 estado(mensaje=f"Buscando «{q}» ({i + 1} de {len(elegidas)})…", juntados=len(cands))
                 try:
-                    pg.goto(url, wait_until="domcontentloaded", timeout=40000)
-                    pg.wait_for_timeout(4000)
-                    if "/login" in pg.url or "accounts/login" in pg.url:
-                        sin_sesion.add("Instagram" if red == "ig" else "TikTok")
-                        continue
-                    sel = "a[href*='/reel/'], a[href*='/p/']" if red == "ig" else "a[href*='/video/']"
-                    for _ in range(6):
-                        for a in pg.query_selector_all(sel):
-                            href = a.get_attribute("href") or ""
-                            link = _link(href, red)
-                            if not link or link in ya:
-                                continue
-                            if red == "ig" and "/reel/" not in href and not a.query_selector(
-                                    "svg[aria-label*='Clip'], svg[aria-label*='Reel'], svg[aria-label*='Video'], svg[aria-label*='clip']"):
-                                continue
-                            img = a.query_selector("img")
-                            src = img.get_attribute("src") if img else ""
-                            if not src:
-                                src = a.evaluate("""el => { for (const n of [el, ...el.querySelectorAll('*')]) {
-                                    const b = getComputedStyle(n).backgroundImage;
-                                    if (b && b.startsWith('url(')) return b.slice(4, -1).replace(/^["']|["']$/g, ''); }
-                                    return ''; }""")
-                            if not src:
-                                continue
-                            ya.add(link)
-                            cands.append({"link": link, "src": src, "alt": ((img.get_attribute("alt") if img else "") or "")[:160],
-                                          "fuente": clave(red, q)})
-                        pg.mouse.wheel(0, 3000)
-                        pg.wait_for_timeout(1200)
-                except Exception:
+                    nuevos, muro = _juntar(pg, ctx, red, q, url, ya, hay)
+                except Exception as ex:
+                    log.info("buscador: %s %s: %s", red, q, ex)
                     continue
+                if muro and red != "pin":         # Pinterest no usa la sesión: no hay nada que cargar
+                    sin_sesion.add(NOMBRE_RED[red])
+                cands += nuevos
             estado(mensaje="Bajando miniaturas…", juntados=len(cands))
             buenos = []
             for c in cands[:MAX_CANDIDATOS]:
@@ -448,7 +485,8 @@ def _buscar(_d: dict) -> None:
                 except Exception:
                     continue
             pg.close()
-        aviso_ = f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá las cookies en Ajustes → Buscador." if sin_sesion else ""
+        aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá la sesión de nuevo en Memes → «Cargar "
+                  "sesión de Instagram/TikTok» (cookies exportadas con la cuenta iniciada)." if sin_sesion else "")
         if not buenos:
             shutil.rmtree(d, ignore_errors=True)
             estado(estado="error" if aviso_ else "listo", fin=_hora("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
@@ -466,6 +504,79 @@ def _buscar(_d: dict) -> None:
         estado(estado="error", mensaje=str(ex))
     except Exception as ex:
         estado(estado="error", mensaje=f"Se cortó la búsqueda: {str(ex)[:150]}")
+
+
+def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool]:
+    """Abre una fuente y junta los videos que se ven (link + miniatura). Devuelve (candidatos, pidió_login)."""
+    pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+    pg.wait_for_timeout(4000)
+    nombre_red = {"ig": "instagram", "tt": "tiktok"}.get(red, "")
+    muro = "/login" in pg.url or "accounts/login" in pg.url or bool(
+        red == "ig" and pg.query_selector("input[name='username'], form#loginForm"))
+    if nombre_red and hay.get(nombre_red) and not _sesion_viva(ctx, nombre_red):
+        marcar_sesion(nombre_red, True, f"{NOMBRE_RED[red]} cerró la sesión al buscar")
+        hay[nombre_red] = False
+        muro = True
+    if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
+        return [], True
+    out = []
+    for _ in range(pasadas):
+        for a in pg.query_selector_all(SELECTOR[red]):
+            href = a.get_attribute("href") or ""
+            link = _link(href, red)
+            if not link or link in ya:
+                continue
+            if red == "ig" and "/reel/" not in href and not a.query_selector(
+                    "svg[aria-label*='Clip'], svg[aria-label*='Reel'], svg[aria-label*='Video'], svg[aria-label*='clip']"):
+                continue
+            img = a.query_selector("img")
+            src = img.get_attribute("src") if img else ""
+            if not src:
+                src = a.evaluate("""el => { for (const n of [el, ...el.querySelectorAll('*')]) {
+                    const b = getComputedStyle(n).backgroundImage;
+                    if (b && b.startsWith('url(')) return b.slice(4, -1).replace(/^["']|["']$/g, ''); }
+                    return ''; }""")
+            if not src:
+                continue
+            ya.add(link)
+            out.append({"link": link, "src": src, "alt": ((img.get_attribute("alt") if img else "") or "")[:160],
+                        "fuente": clave(red, q)})
+        pg.mouse.wheel(0, 3000)
+        pg.wait_for_timeout(1200)
+    return out, muro and not out
+
+
+def probar(consultas: list[str] | None = None) -> list[dict]:
+    """Para el servidor (`hookline buscador-probar`): abre una fuente de cada red con la sesión cargada y cuenta cuántos
+    videos ve. No guarda nada en el banco. Sirve para saber, de verdad y contra las redes, si el buscador anda."""
+    if estado().get("estado") in ("buscando", "filtrando"):
+        raise ValueError("Hay una búsqueda andando: esperá a que termine.")
+    consultas = consultas or ["ig: meme pov", "tt: meme pov", "pin: meme pov"]
+    sync_playwright = _playwright()
+    abrir()
+    out = []
+    with sync_playwright() as p:
+        _, ctx = _contexto(p)
+        _cargar_sesion(ctx)
+        hay = estado_sesion()
+        pg = ctx.new_page()
+        for c in consultas:
+            m = re.match(r"\s*(ig|tt|pin)\s*:?\s*(.+)", str(c), re.I)
+            if not m:
+                out.append({"fuente": c, "ok": False, "error": "formato: ig: frase · tt @cuenta · pin: frase"})
+                continue
+            red, q = m.group(1).lower(), m.group(2).strip()
+            r = {"fuente": f"{red} {q}", "red": NOMBRE_RED[red], "url": _url(red, q),
+                 "sesion": bool(hay.get({"ig": "instagram", "tt": "tiktok"}.get(red, ""), False))}
+            try:
+                cands, muro = _juntar(pg, ctx, red, q, r["url"], set(), hay, pasadas=3)
+                r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=pg.url,
+                         ejemplos=[x["link"] for x in cands[:3]])
+            except Exception as ex:
+                r.update(ok=False, error=f"{type(ex).__name__}: {str(ex)[:160]}", final=getattr(pg, "url", ""))
+            out.append(r)
+        pg.close()
+    return out
 
 
 def _autores(pg) -> None:

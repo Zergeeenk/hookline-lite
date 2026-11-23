@@ -168,6 +168,26 @@ espera creciente (hasta 12 veces). Eventos: `pieza.juzgada`, `pieza.publicada`, 
 `cuenta.conectada`, `cuenta.token_vencido`, `cuenta.token_por_vencer`. Los que tienen `cuenta` traen también
 `pyro_modelo_id` (la modelo de Pyro de esa cuenta, o `null`).
 
+## Buscador de memes (Instagram, TikTok y Pinterest)
+
+Fuentes en Memes → «Dónde busca»: `ig @cuenta`, `ig: frase`, `ig #tag`, `tt @cuenta`, `tt: frase`, `pin: frase`,
+`pin @cuenta`. Instagram y TikTok necesitan la sesión de la cuenta «para mirar» (Memes → «Cargar sesión»); Pinterest
+no. El panel muestra siempre el estado de cada sesión (cargada, vencida o sin sesión) y lo marca vencida cuando el
+buscador o una descarga ven que la red la cortó. Para probarlo contra las redes de verdad, en el servidor:
+```bash
+docker compose exec worker hookline buscador-probar                      # una fuente de cada red
+docker compose exec worker hookline buscador-probar "ig @cuenta" "pin: memes pov"
+```
+Dice cuántos videos vio en cada una, si pidió login y con qué link terminó. No guarda nada en el banco.
+
+## Pack de emojis propio
+
+Copiar video → Ajustar a mano → «Emojis» → «Subir pack de emojis (ZIP)». El ZIP trae las imágenes nombradas por su
+código (`1f600.png`, `emoji_u1f600.png`, `1f468_200d_1f469.png`), por el emoji (`😀.png`) o por su nombre en inglés;
+si hay varias carpetas de tamaños se queda con la más grande. Reemplazan a los 3D en el selector, en los stickers y
+adentro del texto; los que el pack 3D no tiene entran en el grupo «Nuevos». Las imágenes del pack propio piden login
+(las 3D de Microsoft, MIT, no). «Volver a los 3D» lo borra. Quedan en `datos/emojis-propios/`.
+
 ## Seguridad
 - Login con usuario y contraseña (scrypt), cookie HttpOnly, **CSRF** en todo POST, roles `admin`/`editor`/`lector`.
   Los POST solo aceptan `application/json` (en Lite cualquier página web podía publicar mandando `text/plain`).

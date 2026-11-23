@@ -35,7 +35,7 @@ def test_api_del_pack(cliente_api):
     es = cliente_api.get("/api/emojis").json()["emojis"]
     assert len(es) >= 1500
     r = TestClient(api.app).get(f"/emoji/{es[0]['k']}.webp")             # las imágenes no piden login
-    assert r.status_code == 200 and r.headers["content-type"] == "image/webp" and "immutable" in r.headers["cache-control"]
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp" and "max-age" in r.headers["cache-control"]
     for mal in ("..%2F..%2Fapi", "no-existe", "1f60d.png"):
         assert TestClient(api.app).get(f"/emoji/{mal}.webp").status_code == 404, mal
     assert TestClient(api.app).get("/api/emojis").status_code == 401

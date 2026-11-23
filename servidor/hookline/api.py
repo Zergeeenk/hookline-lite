@@ -485,7 +485,8 @@ def copias(q: Quien = requerir()):
     f = _mod(svc_fabrica, "fábrica")
     return {"items": f.listar(), "opciones": f.opciones(), "links": f.links(),
             "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."},
-            "fuentes_busqueda": svc_buscador.fuentes() if svc_buscador else []}
+            "fuentes_busqueda": svc_buscador.fuentes() if svc_buscador else [],
+            "sesiones": svc_buscador.sesiones() if svc_buscador else {}, "emojis_v": f.pack_emojis()["version"]}
 
 
 @app.get("/api/copia_capa")
@@ -497,18 +498,32 @@ def copia_capa(id: str, que: str, k: int = 0, q: Quien = requerir()):
 
 @app.get("/api/emojis")
 def emojis_lista(q: Quien = requerir()):
-    """El pack de emojis para el selector de stickers (nombre, grupo, palabras para buscar)."""
-    return JSONResponse({"emojis": _mod(svc_fabrica, "fábrica").emojis()},
-                        headers={"Cache-Control": "private, max-age=86400"})
+    """El pack de emojis para el selector de stickers (nombre, grupo, palabras para buscar) y el pack propio si hay."""
+    f = _mod(svc_fabrica, "fábrica")
+    return JSONResponse({"emojis": f.emojis(), "pack": f.pack_emojis()}, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/emojis_pack")
+def emojis_pack(nombre: str = "", datos: bytes = Depends(_cuerpo), q: Quien = requerir("editor")):
+    """Sube el pack de emojis del equipo (un ZIP con las imágenes): reemplaza a los 3D donde coincidan."""
+    f = _mod(svc_fabrica, "fábrica")
+    r = f.importar_pack_emojis(datos, nombre)
+    comun.actividad("emojis", f"Pack de emojis propio: {r['n']} emojis ({r['nuevos']} nuevos)")
+    return {"ok": True, **r, "pack": f.pack_emojis()}
 
 
 @app.get("/emoji/{clave}.webp", include_in_schema=False)
-def emoji_imagen(clave: str):
-    """Imagen de un emoji del pack (estáticas y de licencia MIT: no piden login)."""
-    p = _mod(svc_fabrica, "fábrica").ruta_emoji(clave)
+def emoji_imagen(clave: str, req: Request):
+    """Imagen de un emoji. Las del pack 3D (MIT) no piden login; las del pack propio que subió el equipo, sí."""
+    f = _mod(svc_fabrica, "fábrica")
+    p = f.ruta_emoji(clave)
     if not p or not p.is_file():
         raise HTTPException(404, "No existe ese emoji.")
-    return FileResponse(p, media_type="image/webp", headers={"Cache-Control": "public, max-age=2592000, immutable"})
+    if p.suffix == ".png":
+        if not auth.identificar(req):
+            raise HTTPException(401, "Iniciá sesión.")
+        return FileResponse(p, media_type="image/png", headers={"Cache-Control": "private, max-age=604800"})
+    return FileResponse(p, media_type="image/webp", headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.post("/api/sticker_subir")
@@ -558,6 +573,10 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
     if op == "usar_con_marca":
         f.usar_con_marca(cid)
         return {"ok": True}
+    if op == "borrar_pack_emojis":
+        f.borrar_pack_emojis()
+        comun.actividad("emojis", "Se volvió al pack de emojis 3D")
+        return {"ok": True, "pack": f.pack_emojis()}
     if op == "borrar_sticker":
         f.borrar_sticker(str(d.get("archivo") or ""))
         return {"ok": True}

@@ -771,6 +771,7 @@ table.tabla { width: 100%; border-collapse: collapse; }
 <input type="file" id="cpArchivoAudio" accept="audio/*,video/mp4,.m4a,.mp3,.wav" hidden>
 <input type="file" id="cpArchivoMod" accept="image/*,video/mp4,video/quicktime,.heic,.mov" hidden>
 <input type="file" id="stArchivo" accept="image/png,image/webp,image/jpeg,image/gif" hidden>
+<input type="file" id="emoPackArchivo" accept=".zip,application/zip" hidden>
 <input type="file" id="cpArchivoRemate" accept="video/mp4,video/quicktime,.mov,.m4v" hidden>
 <input type="file" id="archivos" multiple accept="image/*,video/mp4,video/quicktime,.heic,.mov" hidden>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -1377,7 +1378,7 @@ function cargarCopias(forzar) {
   if (!forzar && CP && Date.now() - cpTs < (ocupada ? 2500 : 20000)) return;
   cpTs = Date.now();
   api("/api/copias").then(d => {
-    const antes = JSON.stringify(CP); CP = d; cargarCaras(d.opciones && d.opciones.fuentes);
+    const antes = JSON.stringify(CP); CP = d; cargarCaras(d.opciones && d.opciones.fuentes); emoPack(d.emojis_v);
     if (!cpSel || !d.items.some(c => c.id === cpSel)) cpSel = d.items[0] ? d.items[0].id : "";
     const ae = document.activeElement, editando = ae && ae.closest && ae.closest("#contenido") && /INPUT|TEXTAREA|SELECT/.test(ae.tagName);
     const sonando = [...$$("#contenido .rp video")].some(v => !v.paused && !v.muted);
@@ -1399,9 +1400,15 @@ function cpCss(dr, px) {
 }
 // emojis en el texto: se dibujan con el pack 3D (igual que en el video), cada uno en el lugar de n espacios
 let EMO_MAPA = null;
+let EMO_V = "";
+const emoUrl = k => `/emoji/${encodeURIComponent(k)}.webp${EMO_V ? "?v=" + encodeURIComponent(EMO_V) : ""}`;
+function emoPack(v) {          // cambió el pack de emojis (lo subió alguien): se vuelve a pedir el índice
+  v = String(v || ""); if (v === EMO_V) return; const habia = EMO_V !== "" || EMO !== null; EMO_V = v;
+  if (habia) { EMO = null; EMO_MAPA = null; emoCargarMapa.pedido = false; }
+}
 function emoCargarMapa() {
   if (EMO_MAPA || emoCargarMapa.pedido) return; emoCargarMapa.pedido = true;
-  api("/api/emojis").then(d => { EMO = EMO || d.emojis; const m = new Map(); let largo = 1;
+  api("/api/emojis").then(d => { EMO = EMO || d.emojis; EMO_PACK = d.pack || null; const m = new Map(); let largo = 1;
     d.emojis.forEach(e => { const g = Array.from(String(e.e || "").replace(/\uFE0F/g, "")); if (g.length && !m.has(g.join(""))) { m.set(g.join(""), e.k); largo = Math.max(largo, g.length); } });
     EMO_MAPA = { m, largo }; if (pagina === "copiar") cpPintarPrev(); }).catch(() => { emoCargarMapa.pedido = false; });
 }
@@ -1442,7 +1449,7 @@ function cpPintarPrev() {
   const lineas = cpRenglones(dr.texto, dr.fuente, px, W * o.ancho_max);
   txt.style.cssText = cpCss(dr, px) + `line-height:${o.interlinea};top:${dr.texto_y * H + (caja ? pad : 0) - px * (o.interlinea - 1) / 2}px;`;
   const em = cpRenglones.emo || { mapa: {}, n: 1, esp: px * 0.25 }, lado = px * 1.05;
-  const conEmojis = l => [...l].map(ch => em.mapa[ch] ? `<span class="cp-emo" style="width:${em.n * em.esp}px"><img src="/emoji/${esc(em.mapa[ch])}.webp" alt="" style="width:${lado}px;height:${lado}px;margin-bottom:${-lado * 0.14}px"></span>` : esc(ch)).join("");
+  const conEmojis = l => [...l].map(ch => em.mapa[ch] ? `<span class="cp-emo" style="width:${em.n * em.esp}px"><img src="${emoUrl(em.mapa[ch])}" alt="" style="width:${lado}px;height:${lado}px;margin-bottom:${-lado * 0.14}px"></span>` : esc(ch)).join("");
   (txt.querySelector(".cp-lineas") || txt).innerHTML = lineas.length ? lineas.map(l => `<div class="cp-l" style="${caja ? `background:${oscuro ? "rgba(255,255,255,.95)" : "rgba(0,0,0,.85)"};padding:0 ${pad}px;margin-bottom:${pad}px;` : ""}">${conEmojis(l) || "&nbsp;"}</div>`).join("") : `<div class="cp-l" style="opacity:.55;font-size:${px * 0.7}px">Escribí el texto →</div>`;
   const bw = txt.offsetWidth;
   txt.style.left = Math.max(pad + 4 * W / (c.ancho || 720), Math.min(dr.texto_x * W - bw / 2, W - bw - pad)) + "px";
@@ -1463,7 +1470,7 @@ function cpCapas(c, dr) {
   if (dr.noti && dr.noti.texto) { const x0 = dr.noti.x0 ?? 0.12; out.push({ tipo: "noti", n: "Notificación", img: url("noti"), x: x0, y: dr.noti.y0 ?? 0.25, ancho: (dr.noti.x1 ?? 0.88) - x0, max: 1 }); }
   const lib = Object.fromEntries(((CP.opciones || {}).stickers || []).map(x => [x.archivo, x]));
   (dr.stickers || []).forEach((st, k) => {
-    const img = String(st.archivo).startsWith("emoji:") ? `/emoji/${encodeURIComponent(st.archivo.slice(6))}.webp` : lib[st.archivo] ? `/media?p=${encodeURIComponent(lib[st.archivo].url)}` : "";
+    const img = String(st.archivo).startsWith("emoji:") ? emoUrl(st.archivo.slice(6)) : lib[st.archivo] ? `/media?p=${encodeURIComponent(lib[st.archivo].url)}` : "";
     if (img) out.push({ tipo: "sticker", k, n: String(st.archivo).startsWith("emoji:") ? "Emoji" : "Sticker", img, x: st.x0, y: st.y0, ancho: st.ancho, max: 1.5 });
   });
   return out;
@@ -1513,30 +1520,36 @@ document.addEventListener("pointerup", () => {
   if (!cpCap) return; const g = cpCap; cpCap = null; g.el.classList.remove("arr");
   if (g.pos) { cpCapaSet(g.tipo, g.k, g.pos); const cap = $("#cpCapas"); if (cap) cap.dataset.firma = ""; cpPintarPrev(); }
 });
-const EMO_GRUPOS = [["caras", "Caras"], ["gente", "Gente"], ["animales", "Animales"], ["comida", "Comida"], ["actividades", "Actividades"], ["lugares", "Lugares"], ["objetos", "Objetos"], ["simbolos", "Símbolos"], ["banderas", "Banderas"]];
-let EMO = null;
+const EMO_GRUPOS = [["caras", "Caras"], ["gente", "Gente"], ["animales", "Animales"], ["comida", "Comida"], ["actividades", "Actividades"], ["lugares", "Lugares"], ["objetos", "Objetos"], ["simbolos", "Símbolos"], ["banderas", "Banderas"], ["nuevos", "Nuevos"]];
+let EMO = null, EMO_PACK = null;
 const emoRecientes = () => { try { return JSON.parse(localStorage.getItem("hl_emojis") || "[]").filter(k => /^[0-9a-z-]+$/.test(k)).slice(0, 14); } catch (e) { return []; } };
 function emoUsado(k) { try { localStorage.setItem("hl_emojis", JSON.stringify([k, ...emoRecientes().filter(x => x !== k)].slice(0, 14))); } catch (e) {} }
 async function elegirEmoji() {
-  if (!EMO) { try { EMO = (await api("/api/emojis")).emojis; } catch (er) { return fallo(er); } }
+  if (!EMO) { try { const d = await api("/api/emojis"); EMO = d.emojis; EMO_PACK = d.pack || null; } catch (er) { return fallo(er); } }
+  const pk = EMO_PACK || {}, gruposV = EMO_GRUPOS.filter(([k]) => k !== "nuevos" || EMO.some(e => e.g === "nuevos"));
   const f = document.createElement("div"); f.className = "dlg-fondo"; let grupo = "caras", q = "";
   f.innerHTML = `<div class="dlg" role="dialog" aria-modal="true" aria-label="Emojis" style="width:min(720px,calc(100vw - 32px))"><div class="dlg-cab"><span class="dlg-ic">${icn("heart")}</span><h2>Emojis</h2></div>
     <input class="in" id="emoQ" placeholder="Buscar (en inglés: heart, fire, laugh, eyes…)" autocomplete="off">
-    <div class="seg" id="emoG" style="margin:10px 0">${EMO_GRUPOS.map(([k, n]) => `<button type="button" data-g="${k}" class="${k === grupo ? "on" : ""}">${n}</button>`).join("")}</div>
+    <div class="seg" id="emoG" style="margin:10px 0">${gruposV.map(([k, n]) => `<button type="button" data-g="${k}" class="${k === grupo ? "on" : ""}">${n}</button>`).join("")}</div>
     <div class="emo-grid" id="emoGrid"></div>
-    <small class="muted" style="display:block;margin-top:8px">Emojis 3D de Microsoft (Fluent, licencia libre). Tocá uno y aparece en la vista previa para moverlo y achicarlo.</small>
-    <div class="dlg-pie"><button class="btn" data-x>Cerrar</button></div></div>`;
+    <small class="muted" style="display:block;margin-top:8px">${pk.propio ? `Usando <b>tu pack</b>${pk.nombre ? ` (${esc(pk.nombre)})` : ""}: ${pk.propio} emojis${pk.nuevos ? `, ${pk.nuevos} nuevos` : ""}. Los que tu pack no trae salen en 3D.` : "Emojis 3D de Microsoft (Fluent, licencia libre)."} Tocá uno y aparece en la vista previa para moverlo y achicarlo. También se pueden escribir adentro del texto.</small>
+    <div class="dlg-pie"><button class="btn" id="emoPackSubir">${icn("upload")}Subir pack de emojis (ZIP)</button>${pk.propio ? `<button class="btn fant" id="emoPackSacar">Volver a los 3D</button>` : ""}<span style="flex:1"></span><button class="btn" data-x>Cerrar</button></div></div>`;
   document.body.appendChild(f);
   const pintar = () => {
     const t = q.trim().toLowerCase();
     const lista = EMO.filter(e => t ? (e.n.includes(t) || e.p.some(p => p.includes(t)) || e.e === t) : e.g === grupo).slice(0, 400);
-    f.querySelector("#emoGrid").innerHTML = lista.map(e => `<button type="button" class="emo" data-emo="${esc(e.k)}" title="${esc(e.n)}"><img src="/emoji/${esc(e.k)}.webp" alt="${esc(e.n)}" loading="lazy"></button>`).join("") || `<p class="muted">No encontré ninguno: probá otra palabra en inglés.</p>`;
+    f.querySelector("#emoGrid").innerHTML = lista.map(e => `<button type="button" class="emo" data-emo="${esc(e.k)}" title="${esc(e.n)}"><img src="${emoUrl(e.k)}" alt="${esc(e.n)}" loading="lazy"></button>`).join("") || `<p class="muted">No encontré ninguno: probá otra palabra en inglés.</p>`;
     f.querySelectorAll("#emoG button").forEach(b => b.classList.toggle("on", !t && b.dataset.g === grupo));
   };
   pintar(); f.querySelector("#emoQ").focus();
   f.querySelector("#emoQ").addEventListener("input", ev => { q = ev.target.value; pintar(); });
   f.addEventListener("click", ev => {
     if (ev.target === f || ev.target.closest("[data-x]")) return f.remove();
+    if (ev.target.closest("#emoPackSubir")) return $("#emoPackArchivo").click();
+    if (ev.target.closest("#emoPackSacar")) {
+      if (!confirm("¿Volver a los emojis 3D? Tu pack se borra del servidor (lo podés subir de nuevo).")) return;
+      return api("/api/copiar", { op: "borrar_pack_emojis" }).then(r => { f.remove(); emoPack(r.pack.version); toast("Listo: volvieron los emojis 3D"); cargarCopias(true); render(); }).catch(fallo);
+    }
     const g = ev.target.closest("[data-g]"); if (g) { grupo = g.dataset.g; q = ""; f.querySelector("#emoQ").value = ""; return pintar(); }
     const e = ev.target.closest("[data-emo]"); if (e) { emoUsado(e.dataset.emo); f.remove(); cpSumarSticker("emoji:" + e.dataset.emo); render(); }
   });
@@ -1674,7 +1687,7 @@ function pCopiar() {
     <div class="cp-campo"><span>Letra <a href="#fuentes" data-ir="fuentes" style="font-weight:500">(ver todas)</a></span><div class="fu-elegir">${Object.entries(o.fuentes || {}).map(([k, f]) => `<button type="button" class="fu-chip ${dr.fuente === k ? "on" : ""}" data-cpset="fuente" data-cpval="${esc(k)}" style="font-family:'${esc(f.familia)}'">${esc(f.nombre)}</button>`).join("")}</div></div>
     <div class="cp-campo"><span>Estilo</span>${seg("estilo", [["nada", "Sin nada"], ["sombra", "Sombra"], ["contorno", "Borde"], ["caja", "Caja"]])}</div>
     <div class="cp-campo"><span>Color</span><div class="cp-colores">${Object.entries(o.colores || {}).map(([k, hx]) => `<button type="button" class="${dr.color === k ? "on" : ""}" data-cpset="color" data-cpval="${esc(k)}" style="background:#${esc(hx)}" title="${esc(k)}" aria-label="Color ${esc(k)}"></button>`).join("")}</div></div>
-    <div class="cp-campo"><span>Stickers y emojis</span><div class="cp-stk"><button type="button" class="btn sm prim" id="cpEmojis">${icn("heart", "sm")}Emojis</button>${emoRecientes().map(k => `<button type="button" class="cp-stk-it" data-cpsticker="emoji:${esc(k)}" title="Agregar"><img src="/emoji/${esc(k)}.webp" alt=""></button>`).join("")}${(o.stickers || []).map(x => `<button type="button" class="cp-stk-it" data-cpsticker="${esc(x.archivo)}" title="Agregar ${esc(x.nombre)} al video"><img src="/media?p=${encodeURIComponent(x.url)}" alt="${esc(x.nombre)}"><span class="x" data-cpstickerborrar="${esc(x.archivo)}" title="Borrar de la lista">×</span></button>`).join("")}<button type="button" class="btn sm" id="cpSubirSticker">${icn("upload", "sm")}Subir PNG</button></div><small class="muted">«Emojis» abre el pack completo (1.595, en 3D). También podés subir tus propios PNG (mejor con fondo transparente): quedan guardados para todos los videos.</small></div>
+    <div class="cp-campo"><span>Stickers y emojis</span><div class="cp-stk"><button type="button" class="btn sm prim" id="cpEmojis">${icn("heart", "sm")}Emojis</button>${emoRecientes().map(k => `<button type="button" class="cp-stk-it" data-cpsticker="emoji:${esc(k)}" title="Agregar"><img src="${emoUrl(k)}" alt=""></button>`).join("")}${(o.stickers || []).map(x => `<button type="button" class="cp-stk-it" data-cpsticker="${esc(x.archivo)}" title="Agregar ${esc(x.nombre)} al video"><img src="/media?p=${encodeURIComponent(x.url)}" alt="${esc(x.nombre)}"><span class="x" data-cpstickerborrar="${esc(x.archivo)}" title="Borrar de la lista">×</span></button>`).join("")}<button type="button" class="btn sm" id="cpSubirSticker">${icn("upload", "sm")}Subir PNG</button></div><small class="muted">«Emojis» abre el pack completo (1.595, en 3D). También podés subir tus propios PNG (mejor con fondo transparente): quedan guardados para todos los videos.</small></div>
     <div class="cp-campo"><span>Tamaño <b id="cpTamLbl" style="color:var(--tx)"></b></span><input type="range" id="cpTam" min="2" max="9" step="0.1" value="${(dr.texto_tam * 100).toFixed(1)}"></div>
     <label class="cp-campo"><span>Segundos de tu modelo (después sigue el ejemplo)</span><input class="in" id="cpCorte" type="number" min="0.3" step="0.1" max="${c.duracion || 60}" value="${dr.corte || ""}"><small class="muted">El ejemplo dura ${String(c.duracion || 0).replace(".", ",")} s.</small></label>
     <div class="cp-campo"><span>Audio</span>${seg("audio", [["ejemplo", "Del ejemplo", "copy"], ["modelo", "De mi video", "video"], ["musica", "Otra música", "music"], ["ninguno", "Sin sonido", "volume-x"]])}</div>
@@ -1709,6 +1722,16 @@ document.addEventListener("input", e => {
 document.addEventListener("change", e => { if (e.target.id === "cpFuente") { cpSet({ fuente: e.target.value }); render(); } });
 const IN_CAT = { "el-yo": "Él / Yo", "nadie-yo": "Nadie / Yo", pov: "POV", numero: "Elegí 1, 2, 3", rateme: "Puntuame", "esto-o-esto": "Esto o esto", novio: "Novio", flags: "Red flags", adivina: "Adiviná", comenta: "Comentá", outfit: "Outfit", lipsync: "Lip-sync", "antes-despues": "Antes / después", chat: "Chat", "reaccion-animal": "Reacción animal", otro: "Otros" };
 const IN_MOTIVOS = ["No sale chica", "Parece menor", "Muy infantil", "Aburrido", "No es el formato", "Mala calidad"];
+function sesionesHtml(se) {
+  if (!se) return "";
+  const red = (k, n) => { const x = se[k] || {};
+    const [cl, ic, txt] = x.vencida ? ["err", "alert", `${n}: la sesión venció${x.motivo ? ` (${esc(x.motivo)})` : ""}. Cargala de nuevo.`]
+      : x.cargada ? ["ok", "check", `${n}: sesión cargada${x.cargada_el ? ` el ${x.cargada_el}` : ""}`]
+      : ["", "key", `${n}: sin sesión${k === "instagram" ? " (los /p/ no bajan y el buscador ve poco)" : ""}`];
+    return x.vencida ? `<button type="button" class="chip ${cl}" data-sesion="${k}" data-incookies title="Cargar la sesión de nuevo" style="cursor:pointer;border:0">${icn(ic, "sm")}${esc(txt)}</button>`
+      : `<span class="chip ${cl}" data-sesion="${k}">${icn(ic, "sm")}${esc(txt)}</span>`; };
+  return `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:10px">${red("instagram", "Instagram")}${red("tiktok", "TikTok")}</div>`;
+}
 function pInspiracion() {
   cargarCopias();
   if (!CP) return `<div class="card"><div class="vacio"><div class="ic">${icn("loader")}</div><b>Cargando…</b></div></div>`;
@@ -1718,15 +1741,16 @@ function pInspiracion() {
   const ver = ls.filter(x => (inFiltro === "libres" ? !x.copia : inFiltro === "hechos" ? x.copia : true) && (!inCat || x.cat === inCat));
   const chip = (k, n, on, attr) => `<button class="btn sm ${on ? "prim" : "fant"}" ${attr}="${k}">${n}</button>`;
   const cab = `<div class="card cp-hero">
-    <div class="cp-hero-t"><span class="cp-hero-ic">${icn("sparkles")}</span><div><b>Tu banco de memes</b><small>${ls.length} ${ls.length === 1 ? "video guardado" : "videos guardados"} · ${libres} sin usar${sinFicha ? ` · cargando miniaturas de ${sinFicha}…` : ""}. Tocá «Buscar memes» y Claude busca solo en Instagram, o pegá links abajo.</small></div></div>
+    <div class="cp-hero-t"><span class="cp-hero-ic">${icn("sparkles")}</span><div><b>Tu banco de memes</b><small>${ls.length} ${ls.length === 1 ? "video guardado" : "videos guardados"} · ${libres} sin usar${sinFicha ? ` · cargando miniaturas de ${sinFicha}…` : ""}. Tocá «Buscar memes» y Claude busca solo en Instagram, TikTok y Pinterest, o pegá links abajo.</small></div></div>
     ${CP.items.some(c => ["bajando", "leyendo"].includes(c.estado)) ? `<div class="fila" style="gap:8px"><span class="chip info anim">${icn("loader", "sm")}Haciendo videos</span><span class="muted" style="font-size:12.5px">${CP.items.filter(c => ["bajando", "leyendo", "armando"].includes(c.estado)).length} en camino</span><button class="btn sm" data-cpcancelar>${icn("x", "sm")}Cancelar</button></div>` : ""}
     ${bu.mensaje ? `<div class="fila" style="gap:8px"><span class="chip ${bu.estado === "error" ? "err" : busy ? "info anim" : "ok"}">${icn(bu.estado === "error" ? "alert" : busy ? "loader" : "check", "sm")}${bu.estado === "error" ? "Ojo" : busy ? "Buscando" : "Listo"}</span><span class="muted" style="font-size:12.5px">${esc(bu.mensaje)}</span></div>` : ""}
-    <div class="cp-hero-in"><textarea class="in" id="cpLink" rows="2" placeholder="Pegá links de TikTok o Instagram (uno por renglón)" autocomplete="off"></textarea>
+    ${sesionesHtml(CP.sesiones)}
+    <div class="cp-hero-in"><textarea class="in" id="cpLink" rows="2" placeholder="Pegá links de TikTok, Instagram o Pinterest (uno por renglón)" autocomplete="off"></textarea>
       <div class="cp-hero-bt"><button class="btn prim" data-inbuscar ${busy ? "disabled" : ""}>${icn(busy ? "loader" : "search")}${busy ? "Buscando…" : "Buscar memes"}</button><button class="btn" id="cpGuardarLinks">${icn("download")}Guardar</button><button class="btn sm fant" data-incookies>${icn("key")}Cargar sesión de Instagram/TikTok</button>${libres ? [1, 10, 30].filter(n => n < libres).map(n => `<button class="btn sm" data-cphacer="${n}">Hacer ${n}</button>`).join("") : ""}</div></div></div>`;
   const filtros = `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:14px">${chip("libres", `Sin usar (${libres})`, inFiltro === "libres", "data-infiltro")}${chip("hechos", `Ya hechos (${ls.length - libres})`, inFiltro === "hechos", "data-infiltro")}${chip("todos", "Todos", inFiltro === "todos", "data-infiltro")}${cats.length ? `<span style="width:10px"></span>${chip("", "Todas", !inCat, "data-incat")}${cats.map(k => chip(k, IN_CAT[k] || k, inCat === k, "data-incat")).join("")}` : ""}</div>`;
   const fb = CP.fuentes_busqueda || [];
-  const dondeBusca = `<div class="card pad" style="margin-top:14px"><b>${icn("search")} Dónde busca</b><small class="muted" style="display:block;margin-top:4px">Una por renglón: <code>ig @cuenta</code>, <code>tt @cuenta</code>, <code>ig: pov soltera</code> o <code>ig #hashtag</code>. Las cuentas que suben este tipo de memes son lo que mejor funciona. Las cuentas de los memes que guardás se suman solas.</small>
-    <div class="fila" style="margin-top:8px;align-items:flex-start"><textarea class="in" id="buFuentes" rows="3" style="flex:1;min-width:220px;font-family:monospace;font-size:12.5px" placeholder="ig @cuenta_de_memes&#10;tt @otra_cuenta&#10;ig: pov soltera"></textarea><button class="btn" id="buSumar">${icn("plus")}Agregar</button></div>
+  const dondeBusca = `<div class="card pad" style="margin-top:14px"><b>${icn("search")} Dónde busca</b><small class="muted" style="display:block;margin-top:4px">Una por renglón: <code>ig @cuenta</code>, <code>tt @cuenta</code>, <code>ig: pov soltera</code>, <code>ig #hashtag</code>, <code>tt: frase</code> o <code>pin: frase</code> (Pinterest, no necesita sesión). Las cuentas que suben este tipo de memes son lo que mejor funciona. Las cuentas de los memes que guardás se suman solas.</small>
+    <div class="fila" style="margin-top:8px;align-items:flex-start"><textarea class="in" id="buFuentes" rows="3" style="flex:1;min-width:220px;font-family:monospace;font-size:12.5px" placeholder="ig @cuenta_de_memes&#10;tt @otra_cuenta&#10;ig: pov soltera&#10;pin: memes pov"></textarea><button class="btn" id="buSumar">${icn("plus")}Agregar</button></div>
     ${fb.length ? `<div class="bu-fu">${fb.map(f => `<span class="chip ${f.activa ? "ac" : ""}" title="${f.vistos} vistos · ${f.sirven} sirvieron"><button type="button" data-bufuente="${f.id}" data-activa="${f.activa ? 0 : 1}" title="${f.activa ? "Pausar" : "Activar"}">${icn(f.activa ? "check" : "pause", "sm")}</button>${esc(f.texto)}<button type="button" data-bufuente="${f.id}" data-borrar="1" title="Sacar">×</button></span>`).join("")}</div>` : `<p class="muted" style="margin:8px 0 0;font-size:12.5px">Todavía no hay dónde buscar.</p>`}</div>`;
   if (!ls.length) return cab + dondeBusca + `<div class="card" style="margin-top:14px"><div class="vacio"><div class="ic">${icn("sparkles")}</div><b>Todavía no hay memes guardados</b><p>Pegá arriba links de videos que te gusten.</p></div></div>`;
   const tarjeta = x => `<div class="card cp-h">
@@ -1809,6 +1833,15 @@ async function cpElegirAudio() {
 $("#cpArchivoEj").addEventListener("change", e => { cpSubir("ejemplo", e.target.files[0]); e.target.value = ""; });
 $("#cpArchivoMod").addEventListener("change", e => { cpSubir("modelo", e.target.files[0]); e.target.value = ""; });
 $("#stArchivo").addEventListener("change", e => { cpSubirSticker(e.target.files[0]); e.target.value = ""; });
+$("#emoPackArchivo").addEventListener("change", async e => {
+  const z = e.target.files[0]; e.target.value = ""; if (!z) return;
+  toast(`Subiendo ${z.name}… (si es grande tarda un par de minutos)`);
+  try {
+    const r = await subirBytes(`/api/emojis_pack?nombre=${encodeURIComponent(z.name.replace(/\.zip$/i, ""))}`, z);
+    document.querySelectorAll(".dlg-fondo").forEach(x => { if (x.querySelector("#emoGrid")) x.remove(); });
+    emoPack(r.pack.version); toast(`Pack cargado: ${r.n} emojis${r.nuevos ? ` (${r.nuevos} nuevos)` : ""}`); cargarCopias(true); render();
+  } catch (er) { fallo(er); }
+});
 $("#cpArchivoAudio").addEventListener("change", e => { cpSubir("audio", e.target.files[0]); e.target.value = ""; });
 $("#cpArchivoRemate").addEventListener("change", e => { cpSubir("remate", e.target.files[0]); e.target.value = ""; });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && e.target.id === "cpLink") cpBajar(); });
@@ -2538,7 +2571,7 @@ document.addEventListener("click", async e => {
   }
   if (d.invoto) { const x = (CP.links || []).find(y => y.link === d.inlink), voto = x && x.voto === d.invoto ? "" : d.invoto; if (x) { x.voto = voto; x.motivo = ""; render(); } return api("/api/copiar", { op: "votar", link: d.inlink, voto }).catch(fallo); }
   if (d.inmotivo) { const x = (CP.links || []).find(y => y.link === d.inlink); if (x) { x.motivo = d.inmotivo; render(); } return api("/api/copiar", { op: "votar", link: d.inlink, voto: "malo", motivo: d.inmotivo }).catch(fallo); }
-  if (d.inbuscar !== undefined) { toast("Arrancó la búsqueda: dejá abierta la ventana de Chrome"); return api("/api/copiar", { op: "buscar" }).then(() => cargarCopias(true)).catch(fallo); }
+  if (d.inbuscar !== undefined) { toast("Arrancó la búsqueda: podés seguir usando Hookline, avisa cuando termina"); return api("/api/copiar", { op: "buscar" }).then(() => cargarCopias(true)).catch(fallo); }
   if (d.incookies !== undefined) return cargarCookies();
   if (d.cpcancelar !== undefined) { if (!confirm("¿Frenar los videos que todavía no se armaron? Los links vuelven a quedar sin usar.")) return; return api("/api/copiar", { op: "cancelar" }).then(r => { toast(`Cancelados ${r.n}`); cargarCopias(true); }).catch(fallo); }
   if (d.infiltro !== undefined) { inFiltro = d.infiltro; return render(); }

@@ -289,6 +289,10 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> s
                 "el navegador, exportá las cookies y cargalas en Memes → «Cargar sesión de Instagram/TikTok».")
     if "photo" in txt:
         return "Ese link es de fotos (no video): sacales captura y subilas."
+    if "pinterest." in str(link) or "pin.it/" in str(link):
+        if any(k in txt for k in ("no video", "not available", "unable to extract", "no formats", "404")):
+            return "Ese pin no tiene video (es una imagen) o lo borraron: probá con otro o subí el video con «Subir video»."
+        return "No se pudo bajar ese pin de Pinterest. Fijate que sea un pin de video público."
     if red and any(k in txt for k in ("login", "cookie", "rate", "empty media", "no video in this post",
                                        "registered users", "not available")):
         if _hay_sesion(link):
@@ -325,6 +329,13 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             raise RuntimeError("no se guardó")
     except Exception as ex:
         log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
+        if any("no longer valid" in a.lower() for a in log_y.avisos):
+            try:
+                from .buscador import marcar_sesion
+                marcar_sesion("tiktok" if "tiktok.com" in link else "instagram", True,
+                              "Venció al bajar un video (la cerraron o expiró)")
+            except Exception:
+                pass
         raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None
     return video, info
 
