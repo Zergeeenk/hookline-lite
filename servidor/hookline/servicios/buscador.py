@@ -589,7 +589,12 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
     sync_playwright = _playwright()
     abrir()
     out = []
-    with sync_playwright() as p:
+    try:
+        pw = sync_playwright().__enter__()
+    except Exception as ex:
+        raise ValueError(f"El navegador abrió pero Playwright no pudo conectarse ({str(ex)[:160]}). Mirá que la imagen "
+                         "tenga sus bibliotecas (docker compose up -d --build).") from None
+    with _Cerrar(pw) as p:
         _, ctx = _contexto(p)
         _cargar_sesion(ctx)
         hay = estado_sesion()
@@ -611,6 +616,20 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
             out.append(r)
         pg.close()
     return out
+
+
+class _Cerrar:
+    def __init__(self, pw):
+        self.pw = pw
+
+    def __enter__(self):
+        return self.pw
+
+    def __exit__(self, *a):
+        try:
+            self.pw.stop()
+        except Exception:
+            pass
 
 
 def _autores(pg) -> None:

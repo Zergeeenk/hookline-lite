@@ -73,6 +73,26 @@ jobs:
             caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           cd servidor && cp .env.ejemplo .env && POSTGRES_PASSWORD=x HOOKLINE_DOMINIO=ejemplo.sslip.io \
             docker compose --profile https config --quiet
+      - name: El buscador abre Chrome dentro de la imagen
+        run: |
+          docker run --rm --entrypoint python -e HOOKLINE_DATOS=/tmp/d -e HOOKLINE_BASE_DATOS=sqlite:////tmp/d/x.db \
+            -e HOOKLINE_CLAVE_SECRETA=$(python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())") \
+            -e HOOKLINE_CLAVE_SESION=ci-clave-de-sesion-123 hookline:ci -c "
+          import os
+          from hookline.servicios import buscador
+          from hookline import almacen
+          perfil = almacen.dir_de('navegador', 'perfil')
+          os.symlink('contenedor-viejo-1-2', perfil / 'SingletonLock')   # el candado que dejaba un rebuild
+          buscador.abrir()
+          with buscador._playwright()() as p:
+              _, ctx = buscador._contexto(p)
+              pg = ctx.new_page()
+              pg.set_content('<a href=\"/pin/1234567890/\"><img src=\"https://x/y.jpg\"></a>')
+              ua = pg.evaluate('navigator.userAgent')
+              n = len(pg.query_selector_all(buscador.SELECTOR['pin']))
+              print('UA:', ua, '| pines:', n)
+              assert 'Headless' not in ua and n == 1
+          "
       - name: Las fuentes del catálogo están instaladas
         run: |
           docker run --rm --entrypoint python hookline:ci -c "

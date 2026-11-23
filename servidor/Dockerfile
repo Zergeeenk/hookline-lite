@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     HOOKLINE_DATOS=/datos HOOKLINE_CHROME=/usr/bin/chromium
 
 # ffmpeg (videos), fuentes para los textos de los reels (antes salían de C:\Windows\Fonts),
-# chromium (buscador de memes: opcional, se apaga con HOOKLINE_BUSCADOR=0)
+# chromium (buscador de memes: opcional, se apaga con HOOKLINE_BUSCADOR=0); libatomic1 la necesita el driver de
+# Playwright (sin ella el buscador no arranca: «libatomic.so.1: cannot open shared object file»)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg fonts-inter fonts-dejavu-core fonts-liberation2 chromium tini \
+        ffmpeg fonts-inter fonts-dejavu-core fonts-liberation2 chromium tini libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Muchas más fuentes para el catálogo de la sección Fuentes ("como en Word"). Se instala solo lo que exista en esta
