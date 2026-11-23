@@ -206,20 +206,54 @@ AGENTE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, 
           "Chrome/142.0.0.0 Safari/537.36")
 
 
+def _soltar_candados(perfil: Path) -> int:
+    """El perfil vive en el volumen de datos y sobrevive a cada `docker compose up --build`: si Chrome se cortó, deja
+    SingletonLock apuntando al contenedor viejo y el nuevo se niega a abrir el perfil («en uso por otra computadora»).
+    Solo se llama cuando no hay ningún navegador del buscador escuchando, así que nadie lo está usando."""
+    n = 0
+    for nombre in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = perfil / nombre
+        if p.is_symlink() or p.exists():
+            try:
+                p.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
 def abrir() -> None:
     if _abierto():
         return
     perfil = almacen.dir_de("navegador", "perfil")
-    subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}", "--no-first-run",
-                      "--headless=new", "--no-sandbox", "--window-size=1280,900", "--mute-audio",
-                      f"--user-agent={AGENTE}", "--lang=es-AR", "--disable-blink-features=AutomationControlled",
-                      "about:blank"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(40):
+    if _soltar_candados(perfil):
+        log.info("buscador: saqué los candados viejos del perfil de Chrome")
+    registro = perfil.parent / "chrome.log"
+    with open(registro, "wb") as salida:
+        proc = subprocess.Popen([_chrome(), f"--user-data-dir={perfil}", f"--remote-debugging-port={PUERTO}",
+                                 "--no-first-run", "--no-default-browser-check", "--headless=new", "--no-sandbox",
+                                 "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--mute-audio",
+                                 f"--user-agent={AGENTE}", "--lang=es-AR",
+                                 "--disable-blink-features=AutomationControlled", "about:blank"],
+                                stdout=salida, stderr=salida, start_new_session=True)
+    for _ in range(60):
         if _abierto():
             return
+        if proc.poll() is not None:
+            break
         time.sleep(0.5)
-    raise ValueError("No pude abrir el navegador del buscador.")
+    try:
+        renglones = [r for r in registro.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if "ERROR" in r or "error" in r.lower()]
+    except OSError:
+        renglones = []
+    motivo = re.sub(r"^\[[^\]]*\]\s*", "", renglones[0])[:220] if renglones else ""
+    codigo = proc.poll()
+    if codigo is None:
+        proc.kill()
+    raise ValueError("No pude abrir el navegador del buscador"
+                     + (f" (Chrome salió con código {codigo})" if codigo not in (None, 0) else " (no respondió en 30 s)")
+                     + (f": {motivo}" if motivo else ".") + f" El detalle queda en {registro}.")
 
 
 def _contexto(p):
@@ -443,7 +477,7 @@ def _buscar(_d: dict) -> None:
         d = almacen.dir_de("candidatos", lote)
         with sesion() as s:
             ya = set(s.scalars(select(LinkBanco.link)).all())
-        cands, sin_sesion = [], set()
+        cands, sin_sesion, problemas = [], set(), []
         with sync_playwright() as p:
             _, ctx = _contexto(p)
             _cargar_sesion(ctx)
@@ -461,7 +495,11 @@ def _buscar(_d: dict) -> None:
                     break
                 estado(mensaje=f"Buscando «{q}» ({i + 1} de {len(elegidas)})…", juntados=len(cands))
                 try:
-                    nuevos, muro = _juntar(pg, ctx, red, q, url, ya, hay)
+                    nuevos, muro, _ = _juntar(ctx, red, q, url, ya, hay)
+                except ErrorRed as ex:
+                    log.info("buscador: %s %s: %s", red, q, ex)
+                    problemas.append(str(ex))
+                    continue
                 except Exception as ex:
                     log.info("buscador: %s %s: %s", red, q, ex)
                     continue
@@ -487,6 +525,8 @@ def _buscar(_d: dict) -> None:
             pg.close()
         aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá la sesión de nuevo en Memes → «Cargar "
                   "sesión de Instagram/TikTok» (cookies exportadas con la cuenta iniciada)." if sin_sesion else "")
+        if problemas:
+            aviso_ += " " + "; ".join(dict.fromkeys(problemas))[:300] + "."
         if not buenos:
             shutil.rmtree(d, ignore_errors=True)
             estado(estado="error" if aviso_ else "listo", fin=_hora("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
@@ -506,10 +546,58 @@ def _buscar(_d: dict) -> None:
         estado(estado="error", mensaje=f"Se cortó la búsqueda: {str(ex)[:150]}")
 
 
-def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool]:
-    """Abre una fuente y junta los videos que se ven (link + miniatura). Devuelve (candidatos, pidió_login)."""
-    pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+class ErrorRed(Exception):
+    """La red contestó con error (403, 429…) o la página no cargó. El texto dice qué pasó en criollo."""
+
+
+def que_paso(red: str, estado: int, error: str = "") -> str:
+    n = NOMBRE_RED.get(red, red)
+    if estado in (401, 407):
+        return f"{n} pide iniciar sesión ({estado})"
+    if estado == 403:
+        return f"{n} bloqueó al servidor (403): suele ser por la IP del servidor o la sesión"
+    if estado == 429:
+        return f"{n} está limitando al servidor por muchos pedidos (429): esperá un rato"
+    if estado >= 500:
+        return f"{n} falló de su lado ({estado})"
+    if estado >= 400:
+        return f"{n} contestó con error {estado}"
+    m = re.search(r"net::(ERR_[A-Z_]+)", error or "")
+    return f"{n} no cargó la página ({m.group(1) if m else (error or 'sin respuesta')[:80]})"
+
+
+def _juntar(ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool, dict]:
+    """Abre la fuente en una pestaña propia (si una falla no arrastra a la siguiente) y junta los videos que se ven
+    (link + miniatura). Devuelve (candidatos, pidió_login, {final, estado})."""
+    pg = ctx.new_page()
+    try:
+        return _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas)
+    finally:
+        try:
+            pg.close()
+        except Exception:
+            pass
+
+
+def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
+    estado = {"n": 0}
+
+    def al_responder(r):
+        try:
+            if not estado["n"] and r.request.is_navigation_request() and r.frame == pg.main_frame:
+                estado["n"] = r.status
+        except Exception:
+            pass
+    pg.on("response", al_responder)
+    try:
+        resp = pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+    except Exception as ex:
+        raise ErrorRed(que_paso(red, estado["n"], str(ex))) from None
+    codigo = (resp.status if resp else 0) or estado["n"]
+    if codigo >= 400 and codigo not in (401,):
+        raise ErrorRed(que_paso(red, codigo))
     pg.wait_for_timeout(4000)
+    info = {"final": pg.url, "estado": codigo}
     nombre_red = {"ig": "instagram", "tt": "tiktok"}.get(red, "")
     muro = "/login" in pg.url or "accounts/login" in pg.url or bool(
         red == "ig" and pg.query_selector("input[name='username'], form#loginForm"))
@@ -517,8 +605,9 @@ def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: in
         marcar_sesion(nombre_red, True, f"{NOMBRE_RED[red]} cerró la sesión al buscar")
         hay[nombre_red] = False
         muro = True
+    muro = muro or codigo == 401
     if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
-        return [], True
+        return [], True, info
     out = []
     for _ in range(pasadas):
         for a in pg.query_selector_all(SELECTOR[red]):
@@ -543,7 +632,8 @@ def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: in
                         "fuente": clave(red, q)})
         pg.mouse.wheel(0, 3000)
         pg.wait_for_timeout(1200)
-    return out, muro and not out
+    info["final"] = pg.url
+    return out, muro and not out, info
 
 
 def probar(consultas: list[str] | None = None) -> list[dict]:
@@ -555,11 +645,15 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
     sync_playwright = _playwright()
     abrir()
     out = []
-    with sync_playwright() as p:
+    try:
+        pw = sync_playwright().__enter__()
+    except Exception as ex:
+        raise ValueError(f"El navegador abrió pero Playwright no pudo conectarse ({str(ex)[:160]}). Mirá que la imagen "
+                         "tenga sus bibliotecas (docker compose up -d --build).") from None
+    with _Cerrar(pw) as p:
         _, ctx = _contexto(p)
         _cargar_sesion(ctx)
         hay = estado_sesion()
-        pg = ctx.new_page()
         for c in consultas:
             m = re.match(r"\s*(ig|tt|pin)\s*:?\s*(.+)", str(c), re.I)
             if not m:
@@ -569,14 +663,29 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
             r = {"fuente": f"{red} {q}", "red": NOMBRE_RED[red], "url": _url(red, q),
                  "sesion": bool(hay.get({"ig": "instagram", "tt": "tiktok"}.get(red, ""), False))}
             try:
-                cands, muro = _juntar(pg, ctx, red, q, r["url"], set(), hay, pasadas=3)
-                r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=pg.url,
-                         ejemplos=[x["link"] for x in cands[:3]])
+                cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3)
+                r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=info["final"],
+                         estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]])
+            except ErrorRed as ex:
+                r.update(ok=False, error=str(ex))
             except Exception as ex:
-                r.update(ok=False, error=f"{type(ex).__name__}: {str(ex)[:160]}", final=getattr(pg, "url", ""))
+                r.update(ok=False, error=f"{type(ex).__name__}: {str(ex)[:160]}")
             out.append(r)
-        pg.close()
     return out
+
+
+class _Cerrar:
+    def __init__(self, pw):
+        self.pw = pw
+
+    def __enter__(self):
+        return self.pw
+
+    def __exit__(self, *a):
+        try:
+            self.pw.stop()
+        except Exception:
+            pass
 
 
 def _autores(pg) -> None:

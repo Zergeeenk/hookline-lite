@@ -67,6 +67,21 @@ def web():
                 cuerpo, tipo = _jpg(), "image/jpeg"
             elif ruta == "/accounts/login/":
                 cuerpo, tipo = b"<p>login</p>", "text/html"
+            elif ruta == "/bloqueado":                       # como Instagram al servidor: 429 sin cuerpo
+                self.send_response(429)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            elif ruta == "/prohibido":
+                cuerpo = b"<html><body>Access Denied</body></html>"
+                self.send_response(403)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(cuerpo)
+                return
+            elif ruta == "/corta":                           # corta la conexión sin contestar (chrome-error)
+                self.close_connection = True
+                return
             elif ruta == "/ig-redirige":
                 self.send_response(302)
                 self.send_header("Location", "/accounts/login/?next=/reels/")
@@ -99,7 +114,8 @@ def buscador(monkeypatch, web):
     monkeypatch.setattr(b, "_chrome", _chrome)
     monkeypatch.setattr(b, "PUERTO", 9391)
     rutas = {("ig", "@memes"): "/ig", ("ig", "@privada"): "/ig-redirige", ("ig", "#muro"): "/ig-muro",
-             ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin"}
+             ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin", ("ig", "meme pov"): "/bloqueado",
+             ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -124,9 +140,10 @@ def test_junta_reels_tiktoks_y_pines_y_no_es_headless(buscador):
     b = buscador
     def correr(pg, ctx):
         hay = b.estado_sesion()
-        ig, m1 = b._juntar(pg, ctx, "ig", "@memes", b._url("ig", "@memes"), set(), hay, pasadas=2)
-        tt, m2 = b._juntar(pg, ctx, "tt", "@memero", b._url("tt", "@memero"), set(), hay, pasadas=2)
-        pin, m3 = b._juntar(pg, ctx, "pin", "meme pov", b._url("pin", "meme pov"), set(), hay, pasadas=2)
+        ig, m1, _ = b._juntar(ctx, "ig", "@memes", b._url("ig", "@memes"), set(), hay, pasadas=2)
+        tt, m2, _ = b._juntar(ctx, "tt", "@memero", b._url("tt", "@memero"), set(), hay, pasadas=2)
+        pin, m3, info = b._juntar(ctx, "pin", "meme pov", b._url("pin", "meme pov"), set(), hay, pasadas=2)
+        assert info["estado"] == 200 and info["final"].endswith("/pin")
         return ig, tt, pin, (m1, m2, m3)
     ig, tt, pin, muros = _con_pagina(b, correr)
     assert muros == (False, False, False)
@@ -144,11 +161,11 @@ def test_login_y_sesion_cortada(buscador):
     b.importar_cookies("sessionid=111%3Aabc%3A22; csrftoken=tok; ds_user_id=111")
     def correr(pg, ctx):
         hay = b.estado_sesion()
-        r1 = b._juntar(pg, ctx, "ig", "@privada", b._url("ig", "@privada"), set(), hay, pasadas=1)   # redirige a login
-        r2 = b._juntar(pg, ctx, "ig", "#muro", b._url("ig", "#muro"), set(), hay, pasadas=1)         # formulario de login
+        r1 = b._juntar(ctx, "ig", "@privada", b._url("ig", "@privada"), set(), hay, pasadas=1)[:2]   # redirige a login
+        r2 = b._juntar(ctx, "ig", "#muro", b._url("ig", "#muro"), set(), hay, pasadas=1)[:2]         # formulario de login
         assert not b.sesiones()["instagram"]["vencida"]                  # todavía tiene la cookie: no es «vencida»
         ctx.clear_cookies(name="sessionid")                              # Instagram borra la sesión (la cerró)
-        r3 = b._juntar(pg, ctx, "ig", "@memes", b._url("ig", "@memes"), set(), hay, pasadas=1)
+        r3 = b._juntar(ctx, "ig", "@memes", b._url("ig", "@memes"), set(), hay, pasadas=1)[:2]
         return r1, r2, r3
     r1, r2, r3 = _con_pagina(b, correr)
     assert r1 == ([], True) and r2 == ([], True) and r3 == ([], True)
@@ -192,3 +209,50 @@ def test_probar_en_el_servidor(buscador):
     assert rs[2]["ejemplos"][0].startswith("https://www.pinterest.com/pin/")
     from hookline.servicios import fabrica
     assert fabrica.links() == []                                      # probar no guarda nada
+
+
+def test_abre_aunque_haya_quedado_el_candado_de_otro_contenedor(buscador):
+    """Lo que pasó en el server: el perfil está en el volumen y después de un rebuild quedaba SingletonLock apuntando
+    al contenedor viejo; Chrome salía con código 21 («perfil en uso por otra computadora») y el buscador no abría."""
+    import os
+    from hookline import almacen
+    b = buscador
+    perfil = almacen.dir_de("navegador", "perfil")
+    os.symlink("contenedor-viejo-12345-99", perfil / "SingletonLock")
+    (perfil / "SingletonCookie").write_text("x")
+    b.abrir()
+    assert b._abierto()
+    assert os.readlink(perfil / "SingletonLock") != "contenedor-viejo-12345-99"     # el candado ahora es el nuevo
+
+
+def test_si_chrome_no_arranca_dice_por_que(buscador, monkeypatch, tmp_path):
+    b = buscador
+    falso = tmp_path / "chrome-roto"
+    falso.write_text("#!/bin/sh\necho '[1:1:ERROR:algo.cc:1] Falta una biblioteca: libnss3.so' >&2\nexit 127\n")
+    falso.chmod(0o755)
+    monkeypatch.setattr(b, "_chrome", lambda: str(falso))
+    with pytest.raises(ValueError) as e:
+        b.abrir()
+    assert "código 127" in str(e.value) and "libnss3" in str(e.value) and "chrome.log" in str(e.value)
+
+
+def test_errores_de_las_redes_se_explican_y_no_arrastran_a_la_siguiente(buscador):
+    """Lo que dio el server (23/11): Instagram contestó con error, TikTok no cargó y Pinterest quedó «interrumpida por
+    otra navegación» porque usaban la misma pestaña. Cada fuente va en su pestaña y el error dice el código."""
+    b = buscador
+    rs = b.probar(["ig: meme pov", "tt: meme pov", "pin: meme pov", "ig @prohibida", "ig @memes"])
+    por = {r["fuente"]: r for r in rs}
+    assert "429" in por["ig meme pov"]["error"] and "limitando" in por["ig meme pov"]["error"]
+    assert "TikTok no cargó la página (ERR_" in por["tt meme pov"]["error"], por["tt meme pov"]
+    assert por["pin meme pov"]["ok"] and por["pin meme pov"]["videos"] == 6          # no la arrastró la anterior
+    assert "403" in por["ig @prohibida"]["error"] and "bloqueó" in por["ig @prohibida"]["error"]
+    assert por["ig @memes"]["ok"] and por["ig @memes"]["estado"] == 200
+
+
+def test_la_busqueda_avisa_por_que_no_encontro(buscador):
+    b = buscador
+    b.sumar_fuentes(["ig: meme pov", "tt: meme pov"])
+    b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    b._buscar({})
+    e = b.estado()
+    assert e["estado"] == "error" and "429" in e["mensaje"] and "TikTok no cargó" in e["mensaje"], e["mensaje"]
