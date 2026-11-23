@@ -45,7 +45,7 @@ export HOOKLINE_CLAVE_SECRETA=$(hookline generar-clave) HOOKLINE_CLAVE_SESION=al
 hookline crear-usuario vos@ejemplo.com
 hookline api            # http://localhost:8000  (panel) · /docs (API)
 hookline worker         # en otra terminal
-python -m pytest        # tests (~115, 1-2 min)
+python -m pytest        # tests (358, 3-4 min)
 HOOKLINE_TEST_BD=postgresql+psycopg://usuario:clave@localhost/hookline_test python -m pytest   # los mismos, contra Postgres
 ```
 Los tests incluyen una batería para intentar romperlo (`tests/test_romper.py`): miles de pedidos con datos basura
