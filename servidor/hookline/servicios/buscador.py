@@ -33,6 +33,7 @@ from ..ia import tareas
 from ..modelos import FuenteBusqueda, LinkBanco
 from ..trabajos import encolar, manejador
 from . import fabrica
+from .material import video_valido
 
 log = logging.getLogger("hookline.buscador")
 PUERTO = 9333
@@ -73,7 +74,7 @@ def _link(href: str, red: str) -> str:
         m = re.search(r"/(?:reel|p)/([\w-]+)", href)
         return f"https://www.instagram.com/reel/{m.group(1)}/" if m else ""
     if red == "pin":
-        m = re.search(r"/pin/(\d{5,25})", href)
+        m = re.search(r"/pin/([\w-]{5,120})", href)
         return f"https://www.pinterest.com/pin/{m.group(1)}/" if m else ""
     m = re.search(r"/@([\w.]+)/video/(\d+)", href)
     return f"https://www.tiktok.com/@{m.group(1)}/video/{m.group(2)}" if m else ""
@@ -661,6 +662,26 @@ def _mirar(pg, info: dict, captura) -> None:
             pass
 
 
+def video_de_pin(x: dict) -> tuple[str, float, str]:
+    """(url del video, segundos, miniatura) de un pin de la API de Pinterest. Prefiere un MP4; si no, el HLS (.m3u8),
+    que yt-dlp también baja. Mira el video del pin y el de la primera página de un idea pin."""
+    listas = [((x.get("videos") or {}).get("video_list") or {})]
+    for pagina in ((x.get("story_pin_data") or {}).get("pages") or [])[:1]:
+        for bloque in (pagina or {}).get("blocks") or []:
+            listas.append(((bloque or {}).get("video") or {}).get("video_list") or {})
+    for lista in listas:
+        vs = [v for v in lista.values() if isinstance(v, dict) and video_valido(str(v.get("url") or ""))]
+        if not vs:
+            continue
+        mp4 = sorted((v for v in vs if v["url"].split("?")[0].endswith(".mp4")),
+                     key=lambda v: -int(v.get("width") or 0))
+        v = (mp4 or vs)[0]
+        dur = next((float(w["duration"]) / 1000 for w in vs if isinstance(w.get("duration"), (int, float))), 0.0)
+        mini = next((str(w["thumbnail"]) for w in vs if str(w.get("thumbnail") or "").startswith("http")), "")
+        return v["url"], round(dur, 1), mini
+    return "", 0.0, ""
+
+
 def _pines_api(pg, q: str, ya: set) -> list[dict]:
     """La búsqueda de Pinterest por su servicio interno (lo que usa su propia página), con el navegador del buscador.
     Pinterest no pide sesión para esto. Devuelve los pines con video primero."""
@@ -684,17 +705,21 @@ def _pines_api(pg, q: str, ya: set) -> list[dict]:
     res = datos_r.get("results") if isinstance(datos_r, dict) else datos_r
     con_video, otros = [], []
     for x in res or []:
-        if not isinstance(x, dict) or not re.fullmatch(r"\d{5,25}", str(x.get("id") or "")):
-            continue
+        if not isinstance(x, dict) or not re.fullmatch(r"[\w-]{5,120}", str(x.get("id") or "")):
+            continue                     # sin sesión Pinterest manda ids codificados («e1_AfqP…»), no el número del pin
         link = f"https://www.pinterest.com/pin/{x['id']}/"
         imgs = x.get("images") or {}
+        video, dur, mini = video_de_pin(x)
         src = next((str((imgs.get(k) or {}).get("url") or "") for k in ("474x", "236x", "736x", "orig")
-                    if (imgs.get(k) or {}).get("url")), "")
+                    if (imgs.get(k) or {}).get("url")), "") or mini
         if link in ya or not src.startswith("http"):
             continue
         item = {"link": link, "src": src, "fuente": clave("pin", q),
                 "alt": str(x.get("grid_title") or x.get("title") or x.get("description") or "")[:160]}
-        es_video = bool(x.get("videos")) or x.get("story_pin_data") is not None or bool(x.get("is_video"))
+        if video:
+            item.update(video=video, dur=dur)
+        es_video = (bool(video) or bool(x.get("videos")) or x.get("story_pin_data") is not None
+                    or bool(x.get("is_video")))
         (con_video if es_video else otros).append(item)
     out = con_video or otros
     ya.update(x["link"] for x in out)
@@ -838,7 +863,7 @@ def _tanda_hecha_ya(lote: str, k: int, fil: dict) -> None:
         c = cands.get(int(x["n"]))
         if c:
             items.append({"link": c["link"], "titulo": str(x.get("titulo") or c["alt"])[:120], "cat": str(x.get("cat") or "")[:30],
-                          "img": d / f"{c['n']}.jpg"})
+                          "img": d / f"{c['n']}.jpg", "video": c.get("video", ""), "dur": c.get("dur", 0)})
     nuevos = int(e.get("nuevos") or 0) + fabrica.agregar_encontrados(items)
     hechas = int(e.get("hechas") or 0) + 1
     if hechas < int(e.get("hojas") or 0):
