@@ -326,3 +326,11 @@ def test_crear_usuario_por_consola_con_error_no_muestra_traceback(capsys, monkey
     with pytest.raises(SystemExit):
         cli.cmd_usuario(SimpleNamespace(email="EMAIL_DE_ZERGEN", clave="clave-larga-123", nombre="", rol="admin"))
     assert "No se creó el usuario: Escribí un email válido." in capsys.readouterr().out
+
+
+def test_usuarios_ids_raros_no_dan_500(cliente_api):
+    """Lo encontró el fuzz (23/11): id como lista daba TypeError y un número gigante OverflowError de SQLite."""
+    for op in ("desactivar", "revocar_token"):
+        for raro in ([], [1], {"a": 1}, 2**70, -5, True, "abc", "99999999999999999999", None, 1.5):
+            r = cliente_api.post("/api/usuarios", json={"op": op, "id": raro})
+            assert r.status_code == 400, (op, raro, r.status_code, r.text)

@@ -351,8 +351,10 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
                 info = y.extract_info(_url_descarga(link), download=True)
                 hecho = [d.get("filepath") for d in info.get("requested_downloads") or [] if d.get("filepath")]
                 video = Path(hecho[0]) if hecho else Path(y.prepare_filename(info))
-        if not video.is_file():
-            raise RuntimeError("no se guardó")
+            if not video.is_file():
+                raise RuntimeError("no se guardó")
+            if not tiene_audio(video):
+                video = _sumar_audio_aparte(yt_dlp, info, video, opts, log_y) or video
     except Exception as ex:
         log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
         if any("no longer valid" in a.lower() for a in log_y.avisos):
@@ -364,6 +366,57 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
                 pass
         raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None
     return video, info
+
+
+def tiene_audio(video: Path) -> bool:
+    ff = medios.ffmpeg()
+    if not ff:
+        return True
+    try:
+        r = subprocess.run([ff, "-hide_banner", "-i", str(video)], capture_output=True, text=True, errors="ignore",
+                           timeout=60)
+    except Exception:
+        return True
+    return "Audio:" in r.stderr
+
+
+def _sumar_audio_aparte(yt_dlp, info: dict, video: Path, opts: dict, log_y) -> Path | None:
+    """Instagram (y algunos HLS) sirven el video sin sonido y el audio aparte, sin decir que el video no lo tiene:
+    yt-dlp baja solo el video. Si quedó mudo y hay una pista de audio sola, se baja y se une (si no, queda como está)."""
+    solos = [f for f in info.get("formats") or [] if f.get("vcodec") == "none" and f.get("acodec") != "none"
+             and f.get("format_id") and (f.get("url") or f.get("manifest_url") or f.get("fragments"))]
+    if not solos:
+        log.info("el video %s vino sin sonido y no hay audio aparte", video.name)
+        return None
+    mejor = max(solos, key=lambda f: (f.get("abr") or f.get("tbr") or 0))
+    tmp = video.with_name(video.stem + ".audio")
+    try:
+        o = {**opts, "format": mejor["format_id"], "outtmpl": str(tmp) + ".%(ext)s"}
+        o.pop("merge_output_format", None)
+        with yt_dlp.YoutubeDL(o) as y:
+            y.process_ie_result(dict(info), download=True)
+        audio = next(iter(sorted(video.parent.glob(tmp.name + ".*"))), None)
+        if not audio:
+            return None
+        junto = video.with_name(video.stem + ".con-audio.mp4")
+        r = subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-i", str(video), "-i", str(audio), "-map", "0:v:0",
+                            "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(junto)],
+                           capture_output=True, text=True, errors="ignore", timeout=600)
+        if r.returncode or not junto.is_file() or not tiene_audio(junto):
+            log.info("no pude unir el audio de %s: %s", video.name, r.stderr[-200:])
+            junto.unlink(missing_ok=True)
+            return None
+        final = video.with_suffix(".mp4")
+        junto.replace(final)
+        if video != final:
+            video.unlink(missing_ok=True)
+        return final
+    except Exception as ex:
+        log.info("no pude bajar el audio aparte de %s: %s", video.name, ex)
+        return None
+    finally:
+        for p in video.parent.glob(tmp.name + ".*"):
+            p.unlink(missing_ok=True)
 
 
 def sacar_audio(video: Path, destino: Path) -> Path | None:
