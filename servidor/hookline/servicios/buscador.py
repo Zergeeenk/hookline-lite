@@ -477,7 +477,7 @@ def _buscar(_d: dict) -> None:
         d = almacen.dir_de("candidatos", lote)
         with sesion() as s:
             ya = set(s.scalars(select(LinkBanco.link)).all())
-        cands, sin_sesion = [], set()
+        cands, sin_sesion, problemas = [], set(), []
         with sync_playwright() as p:
             _, ctx = _contexto(p)
             _cargar_sesion(ctx)
@@ -495,7 +495,11 @@ def _buscar(_d: dict) -> None:
                     break
                 estado(mensaje=f"Buscando «{q}» ({i + 1} de {len(elegidas)})…", juntados=len(cands))
                 try:
-                    nuevos, muro = _juntar(pg, ctx, red, q, url, ya, hay)
+                    nuevos, muro, _ = _juntar(ctx, red, q, url, ya, hay)
+                except ErrorRed as ex:
+                    log.info("buscador: %s %s: %s", red, q, ex)
+                    problemas.append(str(ex))
+                    continue
                 except Exception as ex:
                     log.info("buscador: %s %s: %s", red, q, ex)
                     continue
@@ -521,6 +525,8 @@ def _buscar(_d: dict) -> None:
             pg.close()
         aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá la sesión de nuevo en Memes → «Cargar "
                   "sesión de Instagram/TikTok» (cookies exportadas con la cuenta iniciada)." if sin_sesion else "")
+        if problemas:
+            aviso_ += " " + "; ".join(dict.fromkeys(problemas))[:300] + "."
         if not buenos:
             shutil.rmtree(d, ignore_errors=True)
             estado(estado="error" if aviso_ else "listo", fin=_hora("%H:%M"), mensaje=("No encontré nada nuevo." + aviso_).strip())
@@ -540,10 +546,58 @@ def _buscar(_d: dict) -> None:
         estado(estado="error", mensaje=f"Se cortó la búsqueda: {str(ex)[:150]}")
 
 
-def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool]:
-    """Abre una fuente y junta los videos que se ven (link + miniatura). Devuelve (candidatos, pidió_login)."""
-    pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+class ErrorRed(Exception):
+    """La red contestó con error (403, 429…) o la página no cargó. El texto dice qué pasó en criollo."""
+
+
+def que_paso(red: str, estado: int, error: str = "") -> str:
+    n = NOMBRE_RED.get(red, red)
+    if estado in (401, 407):
+        return f"{n} pide iniciar sesión ({estado})"
+    if estado == 403:
+        return f"{n} bloqueó al servidor (403): suele ser por la IP del servidor o la sesión"
+    if estado == 429:
+        return f"{n} está limitando al servidor por muchos pedidos (429): esperá un rato"
+    if estado >= 500:
+        return f"{n} falló de su lado ({estado})"
+    if estado >= 400:
+        return f"{n} contestó con error {estado}"
+    m = re.search(r"net::(ERR_[A-Z_]+)", error or "")
+    return f"{n} no cargó la página ({m.group(1) if m else (error or 'sin respuesta')[:80]})"
+
+
+def _juntar(ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool, dict]:
+    """Abre la fuente en una pestaña propia (si una falla no arrastra a la siguiente) y junta los videos que se ven
+    (link + miniatura). Devuelve (candidatos, pidió_login, {final, estado})."""
+    pg = ctx.new_page()
+    try:
+        return _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas)
+    finally:
+        try:
+            pg.close()
+        except Exception:
+            pass
+
+
+def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
+    estado = {"n": 0}
+
+    def al_responder(r):
+        try:
+            if not estado["n"] and r.request.is_navigation_request() and r.frame == pg.main_frame:
+                estado["n"] = r.status
+        except Exception:
+            pass
+    pg.on("response", al_responder)
+    try:
+        resp = pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+    except Exception as ex:
+        raise ErrorRed(que_paso(red, estado["n"], str(ex))) from None
+    codigo = (resp.status if resp else 0) or estado["n"]
+    if codigo >= 400 and codigo not in (401,):
+        raise ErrorRed(que_paso(red, codigo))
     pg.wait_for_timeout(4000)
+    info = {"final": pg.url, "estado": codigo}
     nombre_red = {"ig": "instagram", "tt": "tiktok"}.get(red, "")
     muro = "/login" in pg.url or "accounts/login" in pg.url or bool(
         red == "ig" and pg.query_selector("input[name='username'], form#loginForm"))
@@ -551,8 +605,9 @@ def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: in
         marcar_sesion(nombre_red, True, f"{NOMBRE_RED[red]} cerró la sesión al buscar")
         hay[nombre_red] = False
         muro = True
+    muro = muro or codigo == 401
     if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
-        return [], True
+        return [], True, info
     out = []
     for _ in range(pasadas):
         for a in pg.query_selector_all(SELECTOR[red]):
@@ -577,7 +632,8 @@ def _juntar(pg, ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: in
                         "fuente": clave(red, q)})
         pg.mouse.wheel(0, 3000)
         pg.wait_for_timeout(1200)
-    return out, muro and not out
+    info["final"] = pg.url
+    return out, muro and not out, info
 
 
 def probar(consultas: list[str] | None = None) -> list[dict]:
@@ -598,7 +654,6 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
         _, ctx = _contexto(p)
         _cargar_sesion(ctx)
         hay = estado_sesion()
-        pg = ctx.new_page()
         for c in consultas:
             m = re.match(r"\s*(ig|tt|pin)\s*:?\s*(.+)", str(c), re.I)
             if not m:
@@ -608,13 +663,14 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
             r = {"fuente": f"{red} {q}", "red": NOMBRE_RED[red], "url": _url(red, q),
                  "sesion": bool(hay.get({"ig": "instagram", "tt": "tiktok"}.get(red, ""), False))}
             try:
-                cands, muro = _juntar(pg, ctx, red, q, r["url"], set(), hay, pasadas=3)
-                r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=pg.url,
-                         ejemplos=[x["link"] for x in cands[:3]])
+                cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3)
+                r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=info["final"],
+                         estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]])
+            except ErrorRed as ex:
+                r.update(ok=False, error=str(ex))
             except Exception as ex:
-                r.update(ok=False, error=f"{type(ex).__name__}: {str(ex)[:160]}", final=getattr(pg, "url", ""))
+                r.update(ok=False, error=f"{type(ex).__name__}: {str(ex)[:160]}")
             out.append(r)
-        pg.close()
     return out
 
 

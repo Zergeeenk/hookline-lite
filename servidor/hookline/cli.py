@@ -102,7 +102,8 @@ def cmd_buscador_probar(a):
         sys.exit(1)
     for r in rs:
         if r.get("error"):
-            print(f"✗ {r['fuente']}: {r['error']}")
+            ses = "" if r.get("red") in (None, "Pinterest") else (" · con sesión" if r.get("sesion") else " · SIN sesión")
+            print(f"✗ {r['fuente']}: {r['error']}{ses}")
             continue
         estado = "✓" if r["ok"] else "✗"
         ses = "" if r["red"] == "Pinterest" else (" · con sesión" if r["sesion"] else " · SIN sesión")
