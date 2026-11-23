@@ -13,6 +13,13 @@ from hookline import medios
 pytestmark = pytest.mark.skipif(not medios.ffmpeg(), reason="hace falta ffmpeg")
 
 
+def _servir(carpeta):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(
+        type("H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None}), directory=str(carpeta)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 @pytest.fixture
 def hls(tmp_path):
     ff = medios.ffmpeg()
@@ -51,3 +58,42 @@ def test_un_pin_del_banco_se_baja_por_su_hls(hls, tmp_path, monkeypatch):
     fabrica.agregar_encontrados([{"link": link, "titulo": "pov", "img": "", "video": hls, "dur": 4.0}])
     video, _ = material.bajar_video(link, tmp_path / "salida", "pin")
     assert "Audio: aac" in _pistas(video)
+
+
+@pytest.fixture
+def mudo(tmp_path):
+    """Como Instagram (23/11, «no me está poniendo la música»): el video no dice que no tiene audio y el audio va
+    aparte; yt-dlp baja solo el video, aunque se le pida video + audio."""
+    ff = medios.ffmpeg()
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:size=360x640:rate=30:duration=4",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod",
+                    str(tmp_path / "v.m3u8")], check=True)
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "aac",
+                    "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", str(tmp_path / "a.m3u8")], check=True)
+    (tmp_path / "master.m3u8").write_text(
+        '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="a.m3u8"\n'
+        '#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=360x640\nv.m3u8\n')
+    srv = _servir(tmp_path)
+    yield f"http://127.0.0.1:{srv.server_address[1]}/master.m3u8"
+    srv.shutdown()
+
+
+def test_video_mudo_con_audio_aparte_sale_con_sonido(mudo, tmp_path):
+    from hookline.servicios import material
+    video, _ = material.bajar_video(mudo, tmp_path / "salida", "ejemplo")
+    assert video.is_file() and video.name == "ejemplo.mp4"
+    p = _pistas(video)
+    assert "Video: h264" in p and "Audio: aac" in p, p
+    assert sorted(x.name for x in video.parent.iterdir()) == ["ejemplo.mp4"]          # sin restos
+
+
+def test_video_mudo_sin_audio_en_ningun_lado_queda_como_esta(tmp_path):
+    from hookline.servicios import material
+    subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:size=360x640:rate=30:duration=2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp_path / "solo.mp4")], check=True)
+    srv = _servir(tmp_path)
+    try:
+        video, _ = material.bajar_video(f"http://127.0.0.1:{srv.server_address[1]}/solo.mp4", tmp_path / "salida", "x")
+    finally:
+        srv.shutdown()
+    assert video.is_file() and "Audio:" not in _pistas(video)
