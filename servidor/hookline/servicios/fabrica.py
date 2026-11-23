@@ -771,7 +771,9 @@ def agregar_encontrados(items: list[dict]) -> int:
                 nombre = ""
             s.add(LinkBanco(link=it["link"][:400], titulo=str(it.get("titulo", ""))[:200], cat=str(it.get("cat", ""))[:30],
                             origen=it.get("origen", "buscador"), voto=it.get("voto", ""), autor=it.get("autor", ""),
-                            datos={"ficha": "ok", "mini": nombre}))
+                            datos={"ficha": "ok", "mini": nombre,
+                                   **({"video": it["video"]} if material.video_valido(it.get("video")) else {}),
+                                   **({"dur": float(it["dur"])} if isinstance(it.get("dur"), (int, float)) and it["dur"] else {})}))
             n += 1
     return n
 

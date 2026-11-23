@@ -39,6 +39,21 @@ def _jpg():
     return b.getvalue()
 
 
+_MP4 = []
+
+
+def _mp4():
+    if not _MP4:
+        from hookline import medios
+        import tempfile
+        f = Path(tempfile.mkdtemp()) / "m.mp4"
+        subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:size=360x640:rate=30:duration=2",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", str(f)], check=True)
+        _MP4.append(f.read_bytes())
+    return _MP4[0]
+
+
 def _paginas(base):
     img = lambda n: f"{base}/img/{n}.jpg"  # noqa: E731
     return {
@@ -64,7 +79,9 @@ def web():
         def do_GET(self):
             AGENTES.append(self.headers.get("User-Agent", ""))
             ruta = self.path.split("?")[0]
-            if ruta.startswith("/img/"):
+            if ruta == "/vid/meme.mp4":
+                cuerpo, tipo = _mp4(), "video/mp4"
+            elif ruta.startswith("/img/"):
                 cuerpo, tipo = _jpg(), "image/jpeg"
             elif ruta == "/accounts/login/":
                 cuerpo, tipo = b"<p>login</p>", "text/html"
@@ -86,6 +103,23 @@ def web():
                 opts = json.loads(qs["data"][0])["options"]
                 assert opts["scope"] == "videos" and self.headers.get("X-Requested-With") == "XMLHttpRequest"
                 base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                if opts["query"] == "meme real":            # lo que devolvió Pinterest de verdad al servidor (23/11)
+                    res = [{"id": f"e1_AfqPShzuSG4ScyIabfQ-WkP-mJr4wmDATl4b8VqXHBM1hQ-Po3O{n}", "type": "pin",
+                            "grid_title": f"pov real {n}", "story_pin_data": None, "is_video": None,
+                            "images": {"236x": {"url": f"{base}/img/5{n}.jpg"}, "474x": {"url": f"{base}/img/6{n}.jpg"}},
+                            "videos": {"id": "5332127969571817029", "video_list": {
+                                "V_HLSV4": {"url": f"{base}/vid/x.m3u8", "width": 576, "duration": 5666,
+                                            "thumbnail": f"{base}/img/7{n}.jpg"},
+                                "V_720P": {"url": f"{base}/vid/meme.mp4", "width": 720, "duration": 5666}}}}
+                           for n in range(3)]
+                    res.append({"id": "e1_foto_sin_video", "type": "pin", "images": {"474x": {"url": f"{base}/img/9.jpg"}},
+                                "videos": None, "story_pin_data": None})
+                    cuerpo = json.dumps({"resource_response": {"data": {"results": res}}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(cuerpo)
+                    return
                 res = [{"id": "111111111", "images": {"474x": {"url": f"{base}/img/40.jpg"}}, "videos": {"x": 1},
                         "grid_title": "pov " + opts["query"]},
                        {"id": "222222222", "images": {"236x": {"url": f"{base}/img/41.jpg"}}, "story_pin_data": {}},
@@ -128,7 +162,8 @@ def buscador(monkeypatch, web):
     monkeypatch.setattr(b, "PUERTO", 9391)
     rutas = {("ig", "@memes"): "/ig", ("ig", "@privada"): "/ig-redirige", ("ig", "#muro"): "/ig-muro",
              ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin", ("ig", "meme pov"): "/bloqueado",
-             ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido", ("pin", "sin dom"): "/pin-vacio"}
+             ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido", ("pin", "sin dom"): "/pin-vacio",
+             ("pin", "meme real"): "/pin-vacio"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -287,3 +322,43 @@ def test_que_paso_explica_cada_error():
     assert "pide sesión o que bloquea" in b.que_paso("ig", 0, "net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x")
     assert "ERR_CONNECTION_RESET" in b.que_paso("tt", 0, "net::ERR_CONNECTION_RESET")
     assert "429" in b.que_paso("pin", 429) and "403" in b.que_paso("ig", 403) and "502" in b.que_paso("tt", 502)
+
+
+def test_pinterest_sin_sesion_ids_codificados_hasta_bajar_el_video(buscador, monkeypatch, web, tmp_path):
+    """Lo que dio el servidor: sin sesión Pinterest no pone links en la página y su búsqueda interna manda ids
+    codificados («e1_…», que yt-dlp no entiende) con el video directo en video_list. Se guardan el pin y su video, y la
+    descarga usa el video directo."""
+    from hookline.ia import tareas
+    from hookline.servicios import fabrica, material
+    monkeypatch.setattr(material, "ESQUEMAS_VIDEO", ("https://", web + "/"))
+    b = buscador
+    r = b.probar(["pin: meme real"])[0]
+    assert r["ok"] and r["api"] and r["videos"] == 3, r                      # la foto queda afuera
+    assert r["ejemplos"][0] == "https://www.pinterest.com/pin/e1_AfqPShzuSG4ScyIabfQ-WkP-mJr4wmDATl4b8VqXHBM1hQ-Po3O0/"
+    b.sumar_fuentes(["pin: meme real"])
+    b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    b._buscar({})
+    e = b.estado()
+    assert e["estado"] == "filtrando" and e["juntados"] == 3, e
+    assert [t for t in tareas.pendientes_claude_code() if t.tipo == "filtrar"]
+    b._tanda_hecha(e["lote"], 1, {"sirven": [{"n": 1, "titulo": "pov", "cat": "pov"}]})
+    [x] = fabrica.links()
+    from hookline.db import sesion
+    from hookline.modelos import LinkBanco
+    with sesion() as s:
+        d = s.get(LinkBanco, x["link"]).datos
+    assert d["video"] == web + "/vid/meme.mp4" and d["dur"] == 5.7 and d["mini"]   # el MP4, no el HLS
+    video, info = material.bajar_video(x["link"], tmp_path)                   # yt-dlp de verdad, contra el MP4
+    assert video.is_file() and video.stat().st_size > 1000 and info.get("url", "").endswith("/vid/meme.mp4")
+
+
+def test_video_de_pin_con_hls_solo_y_con_idea_pin():
+    from hookline.servicios import buscador as b
+    hls = {"videos": {"video_list": {"V_HLSV3_MOBILE": {"url": "https://v1.pinimg.com/x.m3u8", "duration": 3000,
+                                                          "thumbnail": "https://i.pinimg.com/t.jpg"}}}}
+    assert b.video_de_pin(hls) == ("https://v1.pinimg.com/x.m3u8", 3.0, "https://i.pinimg.com/t.jpg")
+    idea = {"videos": None, "story_pin_data": {"pages": [{"blocks": [{"video": {"video_list": {
+        "V_EXP7": {"url": "https://v1.pinimg.com/a.mp4", "width": 720, "duration": 8000}}}}]}]}}
+    assert b.video_de_pin(idea) == ("https://v1.pinimg.com/a.mp4", 8.0, "")
+    assert b.video_de_pin({"videos": {"video_list": {"X": {"url": "http://evil/x.mp4"}}}}) == ("", 0.0, "")
+    assert b.video_de_pin({}) == ("", 0.0, "")

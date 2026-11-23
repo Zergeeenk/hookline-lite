@@ -305,6 +305,28 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> s
     return "No se pudo bajar. Fijate que el link sea de un video público."
 
 
+ESQUEMAS_VIDEO = ("https://",)   # de dónde se acepta un video directo guardado en el banco (los tests suman el local)
+
+
+def video_valido(url) -> bool:
+    return isinstance(url, str) and len(url) <= 1000 and url.startswith(ESQUEMAS_VIDEO)
+
+
+def _url_descarga(link: str) -> str:
+    """Los pines que encontró el buscador sin sesión tienen un id codificado que yt-dlp no entiende: para esos se baja el
+    video directo (CDN público de Pinterest) que se guardó en el banco junto con el pin."""
+    if "pinterest." not in str(link):
+        return link
+    from ..modelos import LinkBanco
+    try:
+        with sesion() as s:
+            x = s.get(LinkBanco, str(link))
+            v = str(((x.datos or {}).get("video") if x else "") or "")
+    except Exception:
+        return link
+    return v if video_valido(v) else link
+
+
 def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B_%(id)s") -> tuple[Path, dict]:
     """yt-dlp. Devuelve (ruta, info). ValueError con el motivo en criollo."""
     try:
@@ -323,7 +345,7 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             if ck:
                 opts["cookiefile"] = ck
             with yt_dlp.YoutubeDL(opts) as y:
-                info = y.extract_info(link, download=True)
+                info = y.extract_info(_url_descarga(link), download=True)
                 video = Path(y.prepare_filename(info))
         if not video.is_file():
             raise RuntimeError("no se guardó")
