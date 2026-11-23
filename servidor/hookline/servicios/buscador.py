@@ -563,15 +563,18 @@ def que_paso(red: str, estado: int, error: str = "") -> str:
     if estado >= 400:
         return f"{n} contestó con error {estado}"
     m = re.search(r"net::(ERR_[A-Z_]+)", error or "")
+    if m and m.group(1) == "ERR_HTTP_RESPONSE_CODE_FAILURE":
+        return f"{n} contestó con un error y sin contenido (suele ser que pide sesión o que bloquea la IP del servidor)"
     return f"{n} no cargó la página ({m.group(1) if m else (error or 'sin respuesta')[:80]})"
 
 
-def _juntar(ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6) -> tuple[list[dict], bool, dict]:
+def _juntar(ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 6,
+            captura: Path | None = None) -> tuple[list[dict], bool, dict]:
     """Abre la fuente en una pestaña propia (si una falla no arrastra a la siguiente) y junta los videos que se ven
     (link + miniatura). Devuelve (candidatos, pidió_login, {final, estado})."""
     pg = ctx.new_page()
     try:
-        return _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas)
+        return _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura)
     finally:
         try:
             pg.close()
@@ -579,7 +582,7 @@ def _juntar(ctx, red: str, q: str, url: str, ya: set, hay: dict, pasadas: int = 
             pass
 
 
-def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
+def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
     estado = {"n": 0}
 
     def al_responder(r):
@@ -596,7 +599,11 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
     codigo = (resp.status if resp else 0) or estado["n"]
     if codigo >= 400 and codigo not in (401,):
         raise ErrorRed(que_paso(red, codigo))
-    pg.wait_for_timeout(4000)
+    try:                                 # los resultados los arma JavaScript: se espera a que aparezcan (12 s como mucho)
+        pg.wait_for_selector(SELECTOR[red], timeout=12000)
+    except Exception:
+        pass
+    pg.wait_for_timeout(1500)
     info = {"final": pg.url, "estado": codigo}
     nombre_red = {"ig": "instagram", "tt": "tiktok"}.get(red, "")
     muro = "/login" in pg.url or "accounts/login" in pg.url or bool(
@@ -607,6 +614,7 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
         muro = True
     muro = muro or codigo == 401
     if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
+        _mirar(pg, info, captura)
         return [], True, info
     out = []
     for _ in range(pasadas):
@@ -632,8 +640,65 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas):
                         "fuente": clave(red, q)})
         pg.mouse.wheel(0, 3000)
         pg.wait_for_timeout(1200)
-    info["final"] = pg.url
+    if red == "pin" and not out and not q.startswith("@"):
+        out = _pines_api(pg, q, ya)              # la página no mostró pines: los mismos, pedidos a la búsqueda de Pinterest
+        info["api"] = True
+    _mirar(pg, info, captura)
     return out, muro and not out, info
+
+
+def _mirar(pg, info: dict, captura) -> None:
+    """Para el diagnóstico: dónde terminó, qué texto se ve y una captura de la pantalla."""
+    info["final"] = pg.url
+    try:
+        info["texto"] = " ".join((pg.inner_text("body", timeout=3000) or "").split())[:300]
+    except Exception:
+        info["texto"] = ""
+    if captura:
+        try:
+            pg.screenshot(path=str(captura))
+        except Exception:
+            pass
+
+
+def _pines_api(pg, q: str, ya: set) -> list[dict]:
+    """La búsqueda de Pinterest por su servicio interno (lo que usa su propia página), con el navegador del buscador.
+    Pinterest no pide sesión para esto. Devuelve los pines con video primero."""
+    import json
+    p = urllib.parse.urlsplit(pg.url)
+    base = f"{p.scheme}://{p.netloc}" if p.scheme.startswith("http") else "https://www.pinterest.com"
+    datos = json.dumps({"options": {"query": q, "scope": "videos", "page_size": 50}, "context": {}},
+                       separators=(",", ":"))
+    url = (f"{base}/resource/BaseSearchResource/get/?source_url="
+           f"{urllib.parse.quote('/search/videos/?q=' + q)}&data={urllib.parse.quote(datos)}")
+    try:
+        r = pg.request.get(url, timeout=20000, headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest",
+            "X-Pinterest-PWS-Handler": "www/search/[scope].js"})
+        if not r.ok:
+            return []
+        d = r.json()
+    except Exception:
+        return []
+    datos_r = ((d or {}).get("resource_response") or {}).get("data") or {}
+    res = datos_r.get("results") if isinstance(datos_r, dict) else datos_r
+    con_video, otros = [], []
+    for x in res or []:
+        if not isinstance(x, dict) or not re.fullmatch(r"\d{5,25}", str(x.get("id") or "")):
+            continue
+        link = f"https://www.pinterest.com/pin/{x['id']}/"
+        imgs = x.get("images") or {}
+        src = next((str((imgs.get(k) or {}).get("url") or "") for k in ("474x", "236x", "736x", "orig")
+                    if (imgs.get(k) or {}).get("url")), "")
+        if link in ya or not src.startswith("http"):
+            continue
+        item = {"link": link, "src": src, "fuente": clave("pin", q),
+                "alt": str(x.get("grid_title") or x.get("title") or x.get("description") or "")[:160]}
+        es_video = bool(x.get("videos")) or x.get("story_pin_data") is not None or bool(x.get("is_video"))
+        (con_video if es_video else otros).append(item)
+    out = con_video or otros
+    ya.update(x["link"] for x in out)
+    return out
 
 
 def probar(consultas: list[str] | None = None) -> list[dict]:
@@ -662,10 +727,12 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
             red, q = m.group(1).lower(), m.group(2).strip()
             r = {"fuente": f"{red} {q}", "red": NOMBRE_RED[red], "url": _url(red, q),
                  "sesion": bool(hay.get({"ig": "instagram", "tt": "tiktok"}.get(red, ""), False))}
+            captura = almacen.dir_de("navegador") / f"probar-{red}.png"
             try:
-                cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3)
+                cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3, captura=captura)
                 r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=info["final"],
-                         estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]])
+                         estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]], texto=info.get("texto", ""),
+                         api=bool(info.get("api")), captura=str(captura) if captura.is_file() else "")
             except ErrorRed as ex:
                 r.update(ok=False, error=str(ex))
             except Exception as ex:

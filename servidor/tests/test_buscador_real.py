@@ -46,6 +46,7 @@ def _paginas(base):
         + f'<a href="/p/FOTO1/"><img src="{img(90)}"></a>'                                     # foto: no entra
         + f'<a href="/p/VID1/"><svg aria-label="Clip"></svg><img src="{img(91)}"></a>'         # video en /p/: entra
         + f'<a href="/reel/SINIMG/"></a>',                                                       # sin miniatura: no
+        "/pin-vacio": "<p>Pinterest · Registrate para ver más ideas</p>",
         "/ig-muro": '<form id="loginForm"><input name="username"></form>',
         "/tt": "".join(f'<a href="https://www.tiktok.com/@memero/video/7{n}00"><img src="{img(10 + n)}"></a>'
                        for n in range(4)),
@@ -79,6 +80,18 @@ def web():
                 self.end_headers()
                 self.wfile.write(cuerpo)
                 return
+            elif ruta == "/resource/BaseSearchResource/get/":    # la búsqueda interna de Pinterest
+                import urllib.parse as up
+                qs = up.parse_qs(self.path.split("?", 1)[1])
+                opts = json.loads(qs["data"][0])["options"]
+                assert opts["scope"] == "videos" and self.headers.get("X-Requested-With") == "XMLHttpRequest"
+                base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                res = [{"id": "111111111", "images": {"474x": {"url": f"{base}/img/40.jpg"}}, "videos": {"x": 1},
+                        "grid_title": "pov " + opts["query"]},
+                       {"id": "222222222", "images": {"236x": {"url": f"{base}/img/41.jpg"}}, "story_pin_data": {}},
+                       {"id": "333333333", "images": {"474x": {"url": f"{base}/img/42.jpg"}}},          # foto
+                       {"id": "malo", "images": {}}, "basura"]
+                cuerpo, tipo = json.dumps({"resource_response": {"data": {"results": res}}}).encode(), "application/json"
             elif ruta == "/corta":                           # corta la conexión sin contestar (chrome-error)
                 self.close_connection = True
                 return
@@ -115,7 +128,7 @@ def buscador(monkeypatch, web):
     monkeypatch.setattr(b, "PUERTO", 9391)
     rutas = {("ig", "@memes"): "/ig", ("ig", "@privada"): "/ig-redirige", ("ig", "#muro"): "/ig-muro",
              ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin", ("ig", "meme pov"): "/bloqueado",
-             ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido"}
+             ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido", ("pin", "sin dom"): "/pin-vacio"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -256,3 +269,21 @@ def test_la_busqueda_avisa_por_que_no_encontro(buscador):
     b._buscar({})
     e = b.estado()
     assert e["estado"] == "error" and "429" in e["mensaje"] and "TikTok no cargó" in e["mensaje"], e["mensaje"]
+
+
+def test_pinterest_sin_pines_en_la_pagina_usa_su_busqueda_interna_y_probar_deja_captura(buscador):
+    b = buscador
+    rs = b.probar(["pin: sin dom", "ig @privada"])
+    r = rs[0]
+    assert r["ok"] and r["api"] and r["videos"] == 2, r                       # solo los que tienen video
+    assert r["ejemplos"] == ["https://www.pinterest.com/pin/111111111/", "https://www.pinterest.com/pin/222222222/"]
+    assert Path(r["captura"]).is_file() and Path(r["captura"]).stat().st_size > 1000
+    assert "Registrate" in r["texto"]
+    assert not rs[1]["ok"] and "login" in rs[1]["texto"] and Path(rs[1]["captura"]).is_file()
+
+
+def test_que_paso_explica_cada_error():
+    from hookline.servicios import buscador as b
+    assert "pide sesión o que bloquea" in b.que_paso("ig", 0, "net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://x")
+    assert "ERR_CONNECTION_RESET" in b.que_paso("tt", 0, "net::ERR_CONNECTION_RESET")
+    assert "429" in b.que_paso("pin", 429) and "403" in b.que_paso("ig", 403) and "502" in b.que_paso("tt", 502)
