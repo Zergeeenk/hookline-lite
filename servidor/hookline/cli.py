@@ -95,9 +95,14 @@ def _latido(**kw):
 
 def cmd_buscador_probar(a):
     from .servicios import buscador
-    consultas = a.consultas or None
-    if a.fuentes:                                         # las de «Dónde busca», como las usa la búsqueda de verdad
-        consultas = [f["texto"] for f in buscador.fuentes() if f["activa"]][:6] or None
+    consultas = list(a.consultas or [])
+    if a.fuentes:                     # las de «Dónde busca», elegidas y ordenadas como las usa la búsqueda de verdad
+        elegidas = [f"{red}: {q}" for red, q, _ in buscador._elegir()][:6]
+        if not elegidas:
+            print("No hay fuentes activas en «Dónde busca» (o ya se descartaron todas por no dar buenos).")
+            sys.exit(1)
+        consultas += elegidas
+    consultas = consultas or None
     try:
         rs = buscador.probar(consultas)
     except ValueError as ex:
@@ -110,16 +115,24 @@ def cmd_buscador_probar(a):
             continue
         estado = "✓" if r["ok"] else "✗"
         ses = "" if r["red"] == "Pinterest" else (" · con sesión" if r["sesion"] else " · SIN sesión")
-        print(f"{estado} {r['fuente']}: {r['videos']} videos{ses}{' · PIDIÓ LOGIN' if r['pidio_login'] else ''}")
+        cuantos = (f"{r['videos']} tarjetas sin marca de video (no se sabe si son videos)" if r.get("sin_marca")
+                   else f"{r['videos']} videos")
+        print(f"{estado} {r['fuente']}: {cuantos}{ses}{' · PIDIÓ LOGIN' if r['pidio_login'] else ''}"
+              + (" · la página se fue a otro lado" if r.get("navego") else ""))
         via = ""
         if r.get("api"):
             via = " (por la búsqueda interna de Pinterest)" if r["red"] == "Pinterest" else " (por la API de Instagram)"
-        print(f"    abrió: {r['final']}{via}" + (" · sin marca de video: van todas" if r.get("sin_marca") else ""))
+        print(f"    abrió: {r['final']}{via}")
         t = r.get("tarjetas") or {}
         if t.get("links") or not r["ok"]:
             print(f"    tarjetas: {t.get('links', 0)} links · {t.get('con_video', 0)} con video · "
                   f"{t.get('con_img', 0)} con imagen · {t.get('con_icono', 0)} con ícono de video"
+                  + (f" · {t['capturas']} capturas" if t.get("capturas") else "")
                   + (f" · etiquetas: {t['etiquetas']}" if t.get("etiquetas") else ""))
+        api = r.get("api_ig") or {}
+        if api:
+            print(f"    API de Instagram: {api.get('estado') or 'sin respuesta'} · {api.get('medios', 0)} videos"
+                  + (f" · {api['inicio']}" if api.get("inicio") else ""))
         for e in r["ejemplos"]:
             print(f"    {e}")
         if not r["ok"] and r.get("texto"):

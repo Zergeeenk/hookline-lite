@@ -54,6 +54,21 @@ def _mp4():
     return _MP4[0]
 
 
+_PATRON = []
+
+
+def _mp4_patron():
+    """Un video con dibujo (no liso): lo que se ve en una tarjeta de reel que se reproduce sola."""
+    if not _PATRON:
+        from hookline import medios
+        import tempfile
+        f = Path(tempfile.mkdtemp()) / "p.mp4"
+        subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=180x320:rate=30:duration=4",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(f)], check=True)
+        _PATRON.append(f.read_bytes())
+    return _PATRON[0]
+
+
 def _paginas(base):
     img = lambda n: f"{base}/img/{n}.jpg"  # noqa: E731
     return {
@@ -64,8 +79,8 @@ def _paginas(base):
         "/pin-vacio": "<p>Pinterest · Registrate para ver más ideas</p>",
         # la búsqueda de Instagram con sesión (23/11): links /p/… y los reels con un <video> que se reproduce solo
         "/ig-grilla": f'<a href="/p/VIDPOSTER/" style="display:block"><video poster="{img(31)}"></video></a>'
-        + '<a href="/p/VIDSOLO/" style="display:block;width:90px;height:160px">'
-          '<div style="width:90px;height:160px;background:#c3305a"><video></video></div></a>'
+        + f'<a href="/p/VIDSOLO/" style="display:block;width:90px;height:160px">'
+          f'<video autoplay muted loop playsinline src="{base}/vid/patron.mp4" style="width:90px;height:160px"></video></a>'
         + f'<a href="/p/CONICONO/" style="display:block"><img src="{img(32)}"><svg aria-label="Clip"></svg></a>'
         + f'<a href="/p/FOTO/" style="display:block"><img src="{img(33)}" alt="foto"></a>'
         + f'<a href="/p/CARRUSEL/" style="display:block"><img src="{img(34)}"><svg aria-label="Carousel"></svg></a>'
@@ -73,6 +88,44 @@ def _paginas(base):
         "/ig-fotos": f'<a href="/p/SOLOFOTO1/" style="display:block"><img src="{img(35)}" alt="uno"></a>'
         + f'<a href="/p/SOLOFOTO2/" style="display:block"><img src="{img(36)}" alt="dos"></a>',
         "/ig-vacia": "<p>3 Meme pov</p>",
+        # el <video> aparece 2 s después (autoplay que arranca tarde): primero parecen fotos
+        "/ig-tarde": "".join(f'<a href="/p/TARDE{n}/" data-reel="s{n % 2}" style="display:block;height:260px">'
+                             f'<img src="{img(60 + n)}" style="width:90px;height:160px"></a>' for n in range(12))
+        + "<script>setTimeout(() => document.querySelectorAll('a[data-reel=s1]').forEach(a => "
+          "a.appendChild(document.createElement('video'))), 2000)</script>",
+        # TikTok con miniaturas perezosas: el src real llega 500 ms después de entrar en pantalla
+        "/tt-perezosa": "".join(f'<a href="https://www.tiktok.com/@lento/video/9{n}00" style="display:block;height:420px">'
+                                f'<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="{img(70 + n)}" '
+                                f'style="display:block;width:90px;height:160px"></a>' for n in range(10))
+        + "<script>const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) "
+          "setTimeout(() => { e.target.src = e.target.dataset.src }, 500) })); "
+          "document.querySelectorAll('img[data-src]').forEach(i => io.observe(i))</script>",
+        # un link oculto al mismo post antes de la tarjeta que se ve
+        "/ig-dup": f'<a href="/p/DUP1/" style="display:none"></a><a href="/p/DUP1/" style="display:block">'
+                   f'<video poster="{img(80)}" style="width:90px;height:160px"></video></a>'
+                   f'<a href="/p/DUP2/" style="visibility:hidden;display:block"><img src="{img(81)}"></a>'
+                   f'<a href="/p/DUP2/" style="display:block"><video poster="{img(82)}" style="width:90px;height:160px"></video></a>',
+        # el <video> al lado del link (un <a> encima de la tarjeta), no adentro
+        "/ig-al-lado": f'<div style="position:relative;width:120px;height:213px"><video poster="{img(83)}" '
+                       f'style="width:120px;height:213px"></video><a href="/p/SIB1/" style="position:absolute;inset:0"></a></div>'
+                       f'<div style="position:relative;width:120px;height:213px"><img src="{img(84)}" '
+                       f'style="width:120px;height:213px"><a href="/p/SIBFOTO/" style="position:absolute;inset:0"></a></div>',
+        # tarjeta de reel con el avatar del autor: la miniatura no puede ser el avatar
+        "/ig-avatar": f'<a href="/p/AVA1/" style="display:block;position:relative;width:120px;height:213px">'
+                      f'<img src="{img(85)}" alt="Foto del perfil de memero" style="position:absolute;width:24px;height:24px">'
+                      f'<video autoplay muted loop playsinline src="{base}/vid/patron.mp4" style="width:120px;height:213px"></video></a>',
+        # una tarjeta que nunca carga: la captura sale lisa y no entra
+        "/ig-lisa": '<a href="/p/LISA1/" style="display:block;width:90px;height:160px;background:#334">'
+                    '<video style="width:90px;height:160px"></video></a>',
+        # a los 2,5 s Instagram manda al login: lo juntado antes vale
+        "/ig-se-va": "".join(f'<a href="/p/SEVA{n}/" style="display:block"><video poster="{img(86 + n)}" '
+                             f'style="width:90px;height:160px"></video></a>' for n in range(2))
+        + "<script>setTimeout(() => { location.href = '/accounts/login/' }, 2500)</script>",
+        "/ig-fotos40": "".join(f'<a href="/p/FOTO40N{n}/" style="display:block"><img src="{img(100 + n)}" alt="f{n}"></a>'
+                               for n in range(40)),
+        "/ig-previos": "".join(f'<a href="/p/PREV{n}/" style="display:block"><video poster="{img(150 + n)}" '
+                               f'style="width:90px;height:160px"></video></a>' for n in range(3))
+        + "".join(f'<a href="/p/PREVFOTO{n}/" style="display:block"><img src="{img(160 + n)}"></a>' for n in range(2)),
         "/ig-muro": '<form id="loginForm"><input name="username"></form>',
         "/tt": "".join(f'<a href="https://www.tiktok.com/@memero/video/7{n}00"><img src="{img(10 + n)}"></a>'
                        for n in range(4)),
@@ -92,6 +145,12 @@ def web():
             ruta = self.path.split("?")[0]
             if ruta == "/vid/meme.mp4":
                 cuerpo, tipo = _mp4(), "video/mp4"
+            elif ruta == "/vid/patron.mp4":
+                cuerpo, tipo = _mp4_patron(), "video/mp4"
+            elif ruta == "/api/v1/tags/web_info/":             # una API que no contesta nunca (15 s y se corta)
+                import time as _t
+                _t.sleep(20)
+                return
             elif ruta.startswith("/img/"):
                 cuerpo, tipo = _jpg(), "image/jpeg"
             elif ruta == "/accounts/login/":
@@ -110,10 +169,23 @@ def web():
                 return
             elif ruta == "/api/v1/fbsearch/web/top_serp/":       # la API de Instagram: solo con sesión y app id
                 base = f"http://127.0.0.1:{self.server.server_address[1]}"
-                if self.headers.get("X-IG-App-ID") != "936619743392459" or "sessionid=" not in (self.headers.get("Cookie") or ""):
+                # como Instagram: solo contesta a la web (pedido del navegador, mismo origen) con sesión y app id; un
+                # pedido hecho fuera del navegador (page.request) no trae Sec-Fetch-Site y contesta 404 «not-logged-in»
+                if (self.headers.get("X-IG-App-ID") != "936619743392459" or self.headers.get("Sec-Fetch-Site") != "same-origin"
+                        or "sessionid=" not in (self.headers.get("Cookie") or "")):
                     cuerpo, tipo = b"<html class='not-logged-in'></html>", "text/html"
                     self.send_response(404)
                     self.send_header("Content-Type", tipo)
+                    self.end_headers()
+                    self.wfile.write(cuerpo)
+                    return
+                if "query=rara" in self.path:                   # 200 con una forma que no se esperaba
+                    cuerpo = json.dumps({"media_grid": {"x": [{"code": "RAROO1", "media_type": 2, "image_versions2": [1, 2]},
+                                                              {"code": "RAROO2", "media_type": 2,
+                                                               "image_versions2": {"candidates": 3}},
+                                                              {"code": "FOTOO1", "media_type": 1}]}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(cuerpo)
                     return
@@ -186,12 +258,19 @@ def web():
 def buscador(monkeypatch, web):
     from hookline.servicios import buscador as b
     monkeypatch.setattr(b, "_chrome", _chrome)
-    monkeypatch.setattr(b, "PUERTO", 9391)
+    import socket
+    with socket.socket() as so:                          # un puerto libre por test: dos corridas a la vez no se cruzan
+        so.bind(("127.0.0.1", 0))
+        monkeypatch.setattr(b, "PUERTO", so.getsockname()[1])
     rutas = {("ig", "@memes"): "/ig", ("ig", "@privada"): "/ig-redirige", ("ig", "#muro"): "/ig-muro",
              ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin", ("ig", "meme pov"): "/bloqueado",
              ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido", ("pin", "sin dom"): "/pin-vacio",
              ("pin", "meme real"): "/pin-vacio",
-             ("ig", "grilla"): "/ig-grilla", ("ig", "fotos"): "/ig-fotos", ("ig", "vacia"): "/ig-vacia"}
+             ("ig", "grilla"): "/ig-grilla", ("ig", "fotos"): "/ig-fotos", ("ig", "vacia"): "/ig-vacia",
+             ("ig", "tarde"): "/ig-tarde", ("tt", "@lento"): "/tt-perezosa", ("ig", "@dup"): "/ig-dup",
+             ("ig", "@al-lado"): "/ig-al-lado", ("ig", "@avatar"): "/ig-avatar", ("ig", "@lisa"): "/ig-lisa",
+             ("ig", "@se-va"): "/ig-se-va", ("ig", "fotos40"): "/ig-fotos40", ("ig", "previos"): "/ig-previos",
+             ("ig", "#lento"): "/ig-vacia", ("ig", "rara"): "/ig-grilla"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -403,6 +482,7 @@ def test_instagram_grilla_con_videos_que_se_reproducen_solos(buscador):
     assert sorted(por) == ["CONICONO", "VIDPOSTER", "VIDSOLO"], sorted(por)
     assert por["VIDPOSTER"]["src"].endswith("/img/31.jpg") and por["CONICONO"]["src"].endswith("/img/32.jpg")
     assert not por["VIDSOLO"]["src"] and por["VIDSOLO"]["captura"][:2] == b"\xff\xd8"           # captura JPEG
+    assert not b._lisa(por["VIDSOLO"]["captura"])                                              # con el cuadro del video
     assert all(x["link"].startswith("https://www.instagram.com/reel/") for x in out) and not muro
     t = info["tarjetas"]
     assert t["links"] == 5 and t["con_video"] == 2 and t["con_icono"] == 1 and not info.get("api")
@@ -459,3 +539,127 @@ def test_medios_ig_encuentra_videos_en_cualquier_forma():
     out = []
     b._medios_ig(datos, out, set())
     assert [(m["code"], m["src"]) for m in out] == [("VID_1", "https://i/1.jpg"), ("VID_2", "https://i/3.jpg")]
+
+
+def _juntar1(b, red, q, pasadas=2, ya=None):
+    return _con_pagina(b, lambda pg, ctx: b._juntar(ctx, red, q, b._url(red, q), set() if ya is None else ya, {},
+                                                     pasadas=pasadas))
+
+
+def test_el_video_que_aparece_tarde_se_reconoce_en_la_pasada_siguiente(buscador):
+    out, _, info = _juntar1(buscador, "ig", "tarde", pasadas=3)
+    assert sorted(x["link"].split("/")[-2] for x in out) == [f"TARDE{n}" for n in (1, 11, 3, 5, 7, 9)], out
+    assert all(x["src"] for x in out) and info["tarjetas"]["con_video"] == 6
+
+
+def test_tiktok_con_miniaturas_perezosas_espera_la_imagen_real(buscador):
+    out, _, info = _juntar1(buscador, "tt", "@lento", pasadas=3)
+    assert len(out) == 10 and all(x["src"].endswith(".jpg") and "captura" not in x for x in out), \
+        [(x["link"], x["src"][:30], "captura" in x) for x in out]
+
+
+def test_link_oculto_duplicado_no_tapa_la_tarjeta_que_se_ve(buscador):
+    out, _, _ = _juntar1(buscador, "ig", "@dup")
+    por = {x["link"].split("/")[-2]: x["src"] for x in out}
+    assert sorted(por) == ["DUP1", "DUP2"] and por["DUP1"].endswith("/img/80.jpg") and por["DUP2"].endswith("/img/82.jpg")
+
+
+def test_video_al_lado_del_link(buscador):
+    out, _, _ = _juntar1(buscador, "ig", "@al-lado")
+    assert [(x["link"].split("/")[-2], x["src"].split("/")[-1]) for x in out] == [("SIB1", "83.jpg")]
+
+
+def test_el_avatar_no_es_la_miniatura(buscador):
+    out, _, _ = _juntar1(buscador, "ig", "@avatar")
+    [x] = out
+    assert x["src"] == "" and x["captura"] and not buscador._lisa(x["captura"]) and "perfil" not in x["alt"]
+
+
+def test_tarjeta_que_nunca_carga_no_manda_un_cuadrado_liso(buscador):
+    out, _, info = _juntar1(buscador, "ig", "@lisa", pasadas=1)
+    assert out == [] and info["tarjetas"]["capturas"] >= 1 and info["tarjetas"]["con_video"] == 1
+
+
+def test_si_instagram_manda_al_login_a_mitad_se_queda_lo_juntado(buscador):
+    out, muro, info = _juntar1(buscador, "ig", "@se-va", pasadas=3)
+    assert sorted(x["link"].split("/")[-2] for x in out) == ["SEVA0", "SEVA1"] and not muro and info["navego"]
+
+
+def test_la_api_va_antes_que_las_fotos_y_las_fotos_tienen_tope(buscador, web):
+    b = buscador
+
+    def con_sesion(pg, ctx):
+        ctx.add_cookies([{"name": "sessionid", "value": "x", "url": web + "/"}])
+        return b._juntar(ctx, "ig", "fotos40", b._url("ig", "fotos40"), set(), {}, pasadas=1)
+    out, _, info = _con_pagina(b, con_sesion)
+    assert [x["link"].split("/")[-2] for x in out] == ["APIVID1", "APIVID2"] and info["api"]
+    assert not info.get("sin_marca_de_video") and info["api_ig"] == {"estado": 200, "medios": 2, "inicio": ""}
+    def sin_sesion(pg, ctx):                                           # el navegador sigue abierto: sin la cookie
+        ctx.clear_cookies()
+        return b._juntar(ctx, "ig", "fotos40", b._url("ig", "fotos40"), set(), {}, pasadas=1)
+    out, _, info = _con_pagina(b, sin_sesion)                          # sin sesión la API no da: van fotos, con tope
+    assert len(out) == b.MAX_FOTOS_RESERVA == 30 and info["sin_marca_de_video"]
+    assert info["api_ig"]["estado"] == 404 and "not-logged-in" in info["api_ig"]["inicio"]
+
+
+def test_reels_que_ya_estaban_en_el_banco_cuentan_como_marca(buscador):
+    ya = {f"https://www.instagram.com/reel/PREV{n}/" for n in range(3)}
+    out, _, info = _juntar1(buscador, "ig", "previos", pasadas=1, ya=ya)
+    assert out == [] and not info.get("sin_marca_de_video")      # las 2 fotos no se mandan: la página sí tiene reels
+
+
+def test_la_api_que_no_contesta_se_corta(buscador):
+    import time as _t
+    t0 = _t.monotonic()
+    out, _, info = _juntar1(buscador, "ig", "#lento", pasadas=1)
+    assert out == [] and info["api_ig"]["estado"] == 0 and "abort" in info["api_ig"]["inicio"].lower()
+    assert _t.monotonic() - t0 < 40
+
+
+def test_probar_numera_las_capturas_y_avisa_las_fotos_sin_marca(buscador):
+    b = buscador
+    rs = b.probar(["ig: grilla", "ig: fotos"])
+    assert [Path(r["captura"]).name for r in rs] == ["probar-1-ig.png", "probar-2-ig.png"]
+    assert rs[0]["ok"] and rs[0]["videos"] == 3
+    assert rs[1]["sin_marca"] and not rs[1]["ok"]
+
+
+def test_la_api_pedida_fuera_del_navegador_no_sirve_y_desde_la_pagina_si(buscador, web):
+    """Lo del 23/11: page.request manda la cookie, pero sale fuera del navegador y Instagram contesta 404."""
+    b = buscador
+
+    def correr(pg, ctx):
+        ctx.add_cookies([{"name": "sessionid", "value": "x", "url": web + "/"}])
+        pg.goto(web + "/ig-vacia")
+        afuera = pg.request.get(web + "/api/v1/fbsearch/web/top_serp/?query=x", headers={"X-IG-App-ID": b.IG_APP_ID})
+        info = {}
+        adentro = b._ig_api(pg, "x", set(), info)
+        return afuera.status, adentro, info
+    afuera, adentro, info = _con_pagina(b, correr)
+    assert afuera == 404 and [x["link"].split("/")[-2] for x in adentro] == ["APIVID1", "APIVID2"]
+    assert info["api_ig"]["estado"] == 200
+
+
+def test_respuesta_rara_de_la_api_no_tira_lo_de_la_grilla(buscador, web):
+    b = buscador
+
+    def correr(pg, ctx):
+        ctx.add_cookies([{"name": "sessionid", "value": "x", "url": web + "/"}])
+        return b._juntar(ctx, "ig", "rara", b._url("ig", "rara"), set(), {}, pasadas=1)
+    out, _, info = _con_pagina(b, correr)
+    assert sorted(x["link"].split("/")[-2] for x in out) == ["CONICONO", "VIDPOSTER", "VIDSOLO"]   # la grilla sigue
+    api = info["api_ig"]
+    assert api["estado"] == 200 and api["medios"] == 0 and "media_grid" in api["inicio"] and "3 medios" in api["inicio"]
+
+
+def test_medios_ig_no_baja_a_las_diapositivas_de_un_carrusel():
+    from hookline.servicios import buscador as b
+    datos = [{"code": "CARRU1", "media_type": 8, "carousel_media": [
+                {"code": "DIAPO1", "media_type": 2, "image_versions2": {"candidates": [{"url": "https://i/1.jpg"}]}}]},
+             {"node": {"__typename": "GraphSidecar", "shortcode": "SIDEC1", "is_video": False, "edge_sidecar_to_children": {
+                 "edges": [{"node": {"shortcode": "HIJOVIDEO1", "is_video": True, "display_url": "https://i/2.jpg"}}]}}},
+             {"code": "SUELTA1", "media_type": 2, "carousel_parent_id": "123", "display_url": "https://i/3.jpg"},
+             {"code": "REEL01", "product_type": "clips", "image_versions2": {"candidates": [{"url": "https://i/4.jpg"}]}}]
+    out, cuenta = [], {}
+    b._medios_ig(datos, out, set(), 0, cuenta)
+    assert [m["code"] for m in out] == ["REEL01"] and cuenta["con_code"] == 3

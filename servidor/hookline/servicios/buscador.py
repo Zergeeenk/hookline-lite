@@ -93,25 +93,83 @@ def _url(red: str, q: str) -> str:
 
 
 NOMBRE_RED = {"ig": "Instagram", "tt": "TikTok", "pin": "Pinterest"}
-# Lo que se ve de una tarjeta de la grilla. Instagram hoy muestra los reels como links /p/… con un <video> que se
-# reproduce solo (sin <img>), así que el video se reconoce por el <video>, por el ícono (aria-label Clip/Reel/Video) o
-# por el link /reel/; la miniatura sale del <img>, del poster del video, de un fondo CSS o, si no hay nada de eso, de una
-# captura de la tarjeta.
-TARJETA_JS = """el => {
-  const v = el.querySelector('video');
-  const img = el.querySelector('img');
-  const etiquetas = [...el.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
-    .filter(Boolean).join(' | ').slice(0, 200);
-  let bg = '';
-  for (const n of [el, ...el.querySelectorAll('*')]) {
-    const b = getComputedStyle(n).backgroundImage;
-    if (b && b.startsWith('url(')) { bg = b.slice(4, -1).replace(/^["']|["']$/g, ''); break; }
+# La grilla se lee entera dentro del navegador en una sola pasada de JS (sin ElementHandle que queden viejos cuando React
+# rearma la página). De cada link: si se ve, si está en pantalla, el contenedor de la tarjeta (se sube desde el <a>
+# mientras el padre tenga un solo link de la grilla: el <video> puede estar al lado y no adentro), si hay <video> y si ya
+# tiene cuadro, la imagen más grande (no el avatar ni un sprite) y los íconos (aria-label del link y de adentro, y los
+# <svg><title>). Instagram hoy muestra los reels como /p/… con un <video> que se reproduce solo y sin <img>.
+GRILLA_JS = """([sel]) => {
+  const RX = /\\b(clips?|reels?|v[ií]deos?)\\b/i;
+  const vh = window.innerHeight || 800;
+  const out = [];
+  for (const a of document.querySelectorAll(sel)) {
+    const href = a.getAttribute('href') || '';
+    let r = a.getBoundingClientRect();
+    if (r.width * r.height < 1600) {     // un <a> inline mide una línea: vale la caja de lo más grande que tiene adentro
+      for (const n of a.querySelectorAll('*')) {
+        const b = n.getBoundingClientRect();
+        if (b.width * b.height > r.width * r.height) r = b;
+      }
+    }
+    const visible = a.getClientRects().length > 0 && r.width >= 40 && r.height >= 40
+      && getComputedStyle(a).visibility !== 'hidden';
+    let c = a;
+    for (let i = 0; i < 4 && c.parentElement && c.parentElement !== document.body; i++) {
+      if (c.parentElement.querySelectorAll(sel).length > 1) break;
+      c = c.parentElement;
+    }
+    const v = c.querySelector('video');
+    let vArea = 0;
+    if (v) { const b = v.getBoundingClientRect(); vArea = b.width * b.height; }
+    let img = null, imgArea = -1, imgW = 0, imgH = 0;
+    for (const im of c.querySelectorAll('img')) {
+      const b = im.getBoundingClientRect(), s = b.width * b.height;
+      if (s > imgArea) { img = im; imgArea = s; imgW = b.width; imgH = b.height; }
+    }
+    // la miniatura: una imagen de verdad (no un avatar ni un ícono) que no sea mucho más chica que el video de la tarjeta
+    const grande = img && ((imgW >= 60 && imgH >= 60) || (img.naturalWidth || 0) >= 150) && !(vArea > 4 * imgArea);
+    let src = '', alt = '', imgLista = false;
+    if (grande) {
+      const u = img.currentSrc || img.getAttribute('src') || '';
+      if (/^https?:/.test(u)) {
+        src = u; alt = img.getAttribute('alt') || ''; imgLista = img.complete && img.naturalWidth > 1;
+      }
+    }
+    let bg = '';
+    if (!src) {
+      for (const n of [c, ...c.querySelectorAll('*')]) {
+        const b = n.getBoundingClientRect();
+        if (b.width < 60 || b.height < 60) continue;
+        const m = (getComputedStyle(n).backgroundImage || '').match(/^url\\(["']?([^"')]+)["']?\\)$/);
+        if (m && /^https?:/.test(m[1])) { bg = m[1]; break; }
+      }
+    }
+    const textos = [a, ...c.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
+      .concat([...c.querySelectorAll('svg title')].map(t => t.textContent || '')).filter(Boolean);
+    const poster = v ? (v.getAttribute('poster') || '') : '';
+    out.push({href, visible, enPantalla: r.bottom > 0 && r.top < vh, area: Math.round(r.width * r.height),
+              video: !!v, videoListo: !!v && v.readyState >= 2 && v.videoWidth > 0,
+              poster: /^https?:/.test(poster) ? poster : '', src, alt, imgLista, bg,
+              icono: textos.some(t => RX.test(t)), etiquetas: textos.join(' | ').slice(0, 120)});
   }
-  return {video: !!v, poster: v ? (v.getAttribute('poster') || '') : '',
-          img: img ? (img.currentSrc || img.getAttribute('src') || '') : '',
-          alt: img ? (img.getAttribute('alt') || '') : '', etiquetas, bg};
+  return out;
 }"""
-ICONO_VIDEO = re.compile(r"clip|reel|v[ií]deo", re.I)
+# Antes de capturar una tarjeta sin imagen: esperar (1,5 s como mucho) a que su video tenga cuadro o su imagen cargue.
+LISTA_JS = """(a, sel) => new Promise(res => {
+  let c = a;
+  for (let i = 0; i < 4 && c.parentElement && c.parentElement !== document.body; i++) {
+    if (c.parentElement.querySelectorAll(sel).length > 1) break;
+    c = c.parentElement;
+  }
+  const t0 = performance.now();
+  (function mirar() {
+    const v = c.querySelector('video'), im = c.querySelector('img');
+    const ok = (v && v.readyState >= 2 && v.videoWidth > 0) || (im && im.complete && im.naturalWidth > 1);
+    if (ok || performance.now() - t0 > 1500) res(!!ok); else setTimeout(mirar, 100);
+  })();
+})"""
+MAX_CAPTURAS = 40          # capturas de tarjetas por fuente (cada una tarda 1-3 s)
+MAX_FOTOS_RESERVA = 30     # fotos que se mandan a Claude cuando la página no marca ningún video
 SELECTOR = {"ig": "a[href*='/reel/'], a[href*='/p/']", "tt": "a[href*='/video/']", "pin": "a[href*='/pin/']"}
 
 
@@ -623,7 +681,7 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
     if codigo >= 400 and codigo not in (401,):
         raise ErrorRed(que_paso(red, codigo))
     try:                                 # los resultados los arma JavaScript: se espera a que aparezcan (12 s como mucho)
-        pg.wait_for_selector(SELECTOR[red], timeout=12000)
+        pg.wait_for_selector(SELECTOR[red], timeout=12000, state="attached")
     except Exception:
         pass
     pg.wait_for_timeout(1500)
@@ -639,55 +697,137 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
     if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
         _mirar(pg, info, captura)
         return [], True, info
-    out, fotos, malos = [], [], set()
-    vistos = {"links": 0, "con_video": 0, "con_img": 0, "con_icono": 0, "etiquetas": []}
-    for _ in range(pasadas):
-        for a in pg.query_selector_all(SELECTOR[red]):
-            href = a.get_attribute("href") or ""
-            link = _link(href, red)
-            if not link or link in ya or link in malos or any(x["link"] == link for x in fotos):
+    previos = set(ya)                    # el banco y lo que juntaron las fuentes anteriores de esta búsqueda
+    elegidos: dict = {}                  # link → candidato (video con miniatura), en el orden en que aparecen
+    fotos: dict = {}                     # IG: link → candidato que por ahora parece foto (se vuelve a mirar)
+    sin_mini: dict = {}                  # link → href de un video que todavía no tiene miniatura
+    visto_en: dict = {}                  # link → paso en que se vio por primera vez sin miniatura
+    intentos: dict = {}                  # link → capturas fallidas o lisas
+    ultimo: dict = {}                    # link → última lectura de su tarjeta (para el diagnóstico)
+    marcados: set = set()                # IG: links (también los previos) con marca de video
+    capturas = 0
+    pasos = max(2, pasadas * 2)
+    for paso in range(pasos + 1):
+        ultima = paso == pasos
+        try:
+            tarjetas = pg.evaluate(GRILLA_JS, [SELECTOR[red]])
+        except Exception as ex:
+            if _se_fue(ex):
+                info["navego"] = True    # la página se fue a otro lado (login, challenge): lo juntado hasta acá vale
+                break
+            tarjetas = []
+        mejor: dict = {}                 # de varios <a> al mismo post: el que se ve, con contenido y más grande
+        for t in tarjetas or []:
+            link = _link(str(t.get("href") or ""), red)
+            if link:
+                p = mejor.get(link)
+                clave_t = (bool(t.get("visible")), bool(t.get("video") or t.get("src")), t.get("area") or 0)
+                if p is None or clave_t > (bool(p.get("visible")), bool(p.get("video") or p.get("src")), p.get("area") or 0):
+                    mejor[link] = t
+        for link, t in mejor.items():
+            ultimo[link] = t
+            es_video = red != "ig" or "/reel/" in str(t.get("href")) or bool(t.get("video") or t.get("icono"))
+            if red == "ig" and es_video:
+                marcados.add(link)
+            if link in previos or link in elegidos:
                 continue
-            try:
-                t = a.evaluate(TARJETA_JS)
-            except Exception:
-                continue                         # la grilla se rearmó mientras se leía: en la próxima pasada
-
-            vistos["links"] += 1
-            vistos["con_video"] += bool(t.get("video"))
-            vistos["con_img"] += bool(t.get("img"))
-            icono = bool(ICONO_VIDEO.search(t.get("etiquetas") or ""))
-            vistos["con_icono"] += icono
-            if t.get("etiquetas") and len(vistos["etiquetas"]) < 4 and t["etiquetas"] not in vistos["etiquetas"]:
-                vistos["etiquetas"].append(t["etiquetas"][:80])
-            item = {"link": link, "alt": str(t.get("alt") or "")[:160], "fuente": clave(red, q),
-                    "src": next((u for u in (t.get("img"), t.get("poster"), t.get("bg"))
-                                 if str(u or "").startswith(("http://", "https://"))), "")}
-            if not item["src"]:                  # sin imagen a mano (video que se reproduce solo): captura de la tarjeta
-                try:
-                    item["captura"] = a.screenshot(type="jpeg", quality=80, timeout=2000)
-                except Exception:                # vacía o invisible: no se reintenta en cada pasada
-                    malos.add(link)
-                    continue
-            if red == "ig" and "/reel/" not in href and not t.get("video") and not icono:
-                fotos.append(item)               # parece foto: queda de reserva
+            mini = next((u for u in (t.get("src"), t.get("poster"), t.get("bg"))
+                         if str(u or "").startswith(("http://", "https://"))), "")
+            item = {"link": link, "alt": str(t.get("alt") or "")[:160], "fuente": clave(red, q), "src": mini}
+            if not es_video:
+                if mini:
+                    fotos[link] = item
                 continue
-            ya.add(link)
-            out.append(item)
-        pg.mouse.wheel(0, 3000)
-        pg.wait_for_timeout(1200)
-    info["tarjetas"] = vistos
-    if red == "ig" and not out and fotos and not (vistos["con_video"] or vistos["con_icono"]):
-        out = fotos                              # no se reconoce ningún video en la página: que Claude mire todo
+            fotos.pop(link, None)        # parecía foto y ahora tiene <video> o ícono
+            if mini:
+                elegidos[link] = item
+                sin_mini.pop(link, None)
+            elif t.get("visible") and intentos.get(link, 0) < 3 and (t.get("enPantalla") or link in visto_en):
+                sin_mini[link] = str(t.get("href"))      # se captura recién cuando ya pasó por la pantalla (lazy load)
+                visto_en.setdefault(link, paso)
+        # capturas: solo de las que ya tuvieron un paso para cargar (o al final), con un tope por fuente
+        for link, href in list(sin_mini.items()):
+            if capturas >= MAX_CAPTURAS:
+                break
+            if not ultima and visto_en.get(link, paso) >= paso:
+                continue
+            capturas += 1
+            img = _capturar(pg, href, SELECTOR[red])
+            if img:
+                elegidos[link] = {"link": link, "alt": str((ultimo.get(link) or {}).get("alt") or "")[:160],
+                                  "fuente": clave(red, q), "src": "", "captura": img}
+                del sin_mini[link]
+            else:
+                intentos[link] = intentos.get(link, 0) + 1
+                if intentos[link] >= 3:
+                    del sin_mini[link]
+        if ultima:
+            break
+        try:
+            pg.evaluate("() => window.scrollBy(0, Math.round((window.innerHeight || 800) * 0.8))")
+        except Exception as ex:
+            if _se_fue(ex):
+                info["navego"] = True
+                break
+        pg.wait_for_timeout(800)
+    if red != "pin" and ("/login" in pg.url or "/challenge" in pg.url):
+        muro = True                      # se fue al login o a un challenge a mitad de camino: lo juntado vale
+        info["navego"] = True
+    out = list(elegidos.values())
+    con_img = sum(1 for t in ultimo.values() if t.get("src") or t.get("poster") or t.get("bg"))
+    info["tarjetas"] = {"links": len(ultimo), "con_video": sum(1 for t in ultimo.values() if t.get("video")),
+                        "con_img": con_img, "con_icono": sum(1 for t in ultimo.values() if t.get("icono")),
+                        "capturas": capturas, "etiquetas": list(dict.fromkeys(
+                            str(t.get("etiquetas")) for t in ultimo.values() if t.get("etiquetas")))[:4]}
+    ya.update(x["link"] for x in out)
+    if red == "ig" and not muro and not q.startswith("@") and len(out) < 10:
+        api = _ig_api(pg, q, ya, info)   # pocos o ninguno en la grilla: la búsqueda de Instagram, desde la página
+        out += api
+        info["api"] = bool(api)
+    if red == "ig" and not out and fotos and not marcados:
+        out = list(fotos.values())[:MAX_FOTOS_RESERVA]   # la página no marca ningún video: que Claude mire las fotos
         ya.update(x["link"] for x in out)
         info["sin_marca_de_video"] = True
-    if red == "ig" and not out and not q.startswith("@"):
-        out = _ig_api(pg, q, ya)                 # la grilla no dio nada: la búsqueda de Instagram, desde la página
-        info["api"] = bool(out)
+        if len(fotos) > MAX_FOTOS_RESERVA:
+            log.info("buscador: %s sin marca de video: mando %s de %s fotos", q, MAX_FOTOS_RESERVA, len(fotos))
     if red == "pin" and not out and not q.startswith("@"):
         out = _pines_api(pg, q, ya)              # la página no mostró pines: los mismos, pedidos a la búsqueda de Pinterest
         info["api"] = True
     _mirar(pg, info, captura)
     return out, muro and not out, info
+
+
+def _se_fue(ex: Exception) -> bool:
+    """La página navegó mientras se la leía (Instagram manda al login o a un challenge)."""
+    t = str(ex).lower()
+    return "execution context was destroyed" in t or "navigat" in t or "target closed" in t or "has been closed" in t
+
+
+def _lisa(img: bytes) -> bool:
+    """Una captura sin nada: el fondo de la tarjeta antes de que cargue el video o la imagen."""
+    from io import BytesIO
+    from PIL import Image, ImageStat
+    try:
+        return sum(ImageStat.Stat(Image.open(BytesIO(img)).convert("L")).stddev) < 4
+    except Exception:
+        return True
+
+
+def _capturar(pg, href: str, sel: str) -> bytes | None:
+    """Captura JPEG de la tarjeta visible de ese link, después de esperar que tenga cuadro o imagen. None si no se pudo
+    o si salió lisa (se reintenta en otro paso)."""
+    h = href.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        loc = pg.locator(f'a[href="{h}"]:visible').first
+        loc.scroll_into_view_if_needed(timeout=2000)
+        try:
+            loc.evaluate(LISTA_JS, sel, timeout=3000)
+        except TypeError:                # Playwright viejo: evaluate sin timeout
+            loc.evaluate(LISTA_JS, sel)
+        img = loc.screenshot(type="jpeg", quality=80, timeout=3000)
+    except Exception:
+        return None
+    return None if _lisa(img) else img
 
 
 def _mirar(pg, info: dict, captura) -> None:
@@ -727,55 +867,91 @@ def video_de_pin(x: dict) -> tuple[str, float, str]:
 IG_APP_ID = "936619743392459"           # el de la web de Instagram (público: lo manda la propia página)
 
 
-def _medios_ig(x, out: list, vistos: set) -> None:
+CARRUSEL = ("carousel_media", "edge_sidecar_to_children")   # las diapositivas de un carrusel no son reels
+
+
+def _medios_ig(x, out: list, vistos: set, prof: int = 0, cuenta: dict | None = None) -> None:
     """Junta los videos de cualquier respuesta de la API de Instagram, sin depender de su forma: busca a fondo los
-    objetos de un medio (code + video) y se queda con su miniatura."""
+    objetos de un medio (code + video) y se queda con su miniatura. No baja a las diapositivas de un carrusel.
+    cuenta["con_code"] suma todos los medios que vio (fotos incluidas), para el diagnóstico."""
+    if prof > 40:                        # ninguna respuesta real anida tanto
+        return
     if isinstance(x, list):
         for y in x[:500]:
-            _medios_ig(y, out, vistos)
+            _medios_ig(y, out, vistos, prof + 1, cuenta)
         return
-    if not isinstance(x, dict):
+    if not isinstance(x, dict) or x.get("carousel_parent_id"):
         return
     code = x.get("code") or x.get("shortcode")
-    es_video = bool(x.get("video_versions")) or x.get("media_type") == 2 or x.get("product_type") == "clips" \
-        or x.get("is_video") is True
-    if isinstance(code, str) and re.fullmatch(r"[\w-]{5,40}", code) and es_video and code not in vistos:
-        cands = ((x.get("image_versions2") or {}).get("candidates") or [])
-        src = next((str(c.get("url")) for c in cands if isinstance(c, dict)
-                    and str(c.get("url") or "").startswith(("https://", "http://"))), "") or str(x.get("display_url") or "")
-        if src.startswith(("https://", "http://")):
-            vistos.add(code)
-            cap = x.get("caption")
-            alt = (cap.get("text") if isinstance(cap, dict) else "") or x.get("accessibility_caption") or ""
-            out.append({"code": code, "src": src, "alt": str(alt)[:160]})
+    if isinstance(code, str) and re.fullmatch(r"[\w-]{5,40}", code):
+        if cuenta is not None:
+            cuenta["con_code"] = cuenta.get("con_code", 0) + 1
+        es_video = bool(x.get("video_versions")) or x.get("media_type") == 2 or x.get("product_type") == "clips" \
+            or x.get("is_video") is True
+        if es_video and code not in vistos:
+            iv = x.get("image_versions2")
+            cands = iv.get("candidates") if isinstance(iv, dict) else None
+            src = next((str(c.get("url")) for c in (cands if isinstance(cands, list) else [])
+                        if isinstance(c, dict) and str(c.get("url") or "").startswith(("https://", "http://"))), "") \
+                or str(x.get("display_url") or "")
+            if src.startswith(("https://", "http://")):
+                vistos.add(code)
+                cap = x.get("caption")
+                alt = (cap.get("text") if isinstance(cap, dict) else "") or x.get("accessibility_caption") or ""
+                out.append({"code": code, "src": src, "alt": str(alt)[:160]})
     for k, v in list(x.items())[:200]:
-        if isinstance(v, (dict, list)):
-            _medios_ig(v, out, vistos)
+        if k not in CARRUSEL and isinstance(v, (dict, list)):
+            _medios_ig(v, out, vistos, prof + 1, cuenta)
 
 
-def _ig_api(pg, q: str, ya: set) -> list[dict]:
-    """La búsqueda de Instagram por su API web, pedida desde la propia página (así va con la sesión; un pedido aparte
-    no la lleva y contesta 404 «not-logged-in»). Frases → fbsearch/web/top_serp; #tag → tags/web_info."""
-    ruta = (f"/api/v1/tags/web_info/?tag_name={urllib.parse.quote(q[1:])}" if q.startswith("#") else
-            f"/api/v1/fbsearch/web/top_serp/?enable_metadata=true&query={urllib.parse.quote(q)}")
+def _ig_api(pg, q: str, ya: set, info: dict | None = None) -> list[dict]:
+    """La búsqueda de Instagram por su API web, pedida con fetch() desde la propia página: así sale como la pide la
+    web (mismo origen, con la sesión y los encabezados del navegador). Pedida fuera del navegador (page.request)
+    contestó 404 «not-logged-in» el 23/11. Frases → fbsearch/web/top_serp; #tag → tags/web_info. 15 s como mucho.
+    Deja en info["api_ig"] qué contestó (para `buscador-probar`)."""
+    diag = {"estado": 0, "medios": 0, "inicio": ""}
+    if info is not None:
+        info["api_ig"] = diag
+    p = urllib.parse.urlsplit(pg.url or "")
+    if p.scheme not in ("http", "https"):            # la página quedó en un error: no hay desde dónde pedir
+        diag["inicio"] = f"la página quedó en {pg.url[:60]}"
+        return []
+    base = f"{p.scheme}://{p.netloc}"
+    ruta = base + (f"/api/v1/tags/web_info/?tag_name={urllib.parse.quote(q[1:])}" if q.startswith("#") else
+                   f"/api/v1/fbsearch/web/top_serp/?enable_metadata=true&query={urllib.parse.quote(q)}")
     try:
         estado_, texto = pg.evaluate("""async ([ruta, app]) => {
+            const c = new AbortController();
+            const t = setTimeout(() => c.abort(), 15000);
             try {
-              const r = await fetch(ruta, {credentials: 'include', headers: {'X-IG-App-ID': app,
+              const r = await fetch(ruta, {signal: c.signal, credentials: 'include', headers: {'X-IG-App-ID': app,
                 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}});
               return [r.status, await r.text()];
-            } catch (e) { return [0, String(e)]; }
+            } catch (e) { return [0, String(e)]; } finally { clearTimeout(t); }
         }""", [ruta, IG_APP_ID])
-        if estado_ != 200:
-            log.info("buscador: la API de Instagram contestó %s para %s", estado_, q)
-            return []
-        import json
-        datos = json.loads(texto)
     except Exception as ex:
+        diag["inicio"] = str(ex)[:120]
         log.info("buscador: la API de Instagram no sirvió para %s: %s", q, ex)
         return []
+    diag["estado"] = estado_
+    if estado_ != 200:
+        diag["inicio"] = " ".join(str(texto or "").split())[:120]
+        log.info("buscador: la API de Instagram contestó %s para %s", estado_, q)
+        return []
+    import json
     medios: list[dict] = []
-    _medios_ig(datos, medios, set())
+    cuenta: dict = {}
+    try:                                 # una forma rara no puede tirar lo que ya dio la grilla
+        datos = json.loads(texto)
+        _medios_ig(datos, medios, set(), 0, cuenta)
+    except Exception as ex:
+        diag["inicio"] = f"respuesta rara ({type(ex).__name__}): " + " ".join(str(texto or "").split())[:90]
+        return []
+    diag["medios"] = len(medios)
+    if not medios:                       # 200 pero nada reconocible: qué trajo, para saber qué cambió
+        claves = ",".join(list(datos)[:10]) if isinstance(datos, dict) else type(datos).__name__
+        diag["inicio"] = (f"claves: {claves} · {cuenta.get('con_code', 0)} medios (ninguno video) · "
+                          + " ".join(str(texto or "").split())[:80])
     out = []
     for m in medios:
         link = f"https://www.instagram.com/reel/{m['code']}/"
@@ -848,7 +1024,10 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
         _, ctx = _contexto(p)
         _cargar_sesion(ctx)
         hay = estado_sesion()
-        for c in consultas:
+        carpeta = almacen.dir_de("navegador")
+        for viejo in carpeta.glob("probar-*.png"):
+            viejo.unlink(missing_ok=True)
+        for i, c in enumerate(consultas, 1):
             m = re.match(r"\s*(ig|tt|pin)\s*:?\s*(.+)", str(c), re.I)
             if not m:
                 out.append({"fuente": c, "ok": False, "error": "formato: ig: frase · tt @cuenta · pin: frase"})
@@ -856,13 +1035,16 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
             red, q = m.group(1).lower(), m.group(2).strip()
             r = {"fuente": f"{red} {q}", "red": NOMBRE_RED[red], "url": _url(red, q),
                  "sesion": bool(hay.get({"ig": "instagram", "tt": "tiktok"}.get(red, ""), False))}
-            captura = almacen.dir_de("navegador") / f"probar-{red}.png"
+            captura = carpeta / f"probar-{i}-{red}.png"
             try:
                 cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3, captura=captura)
                 r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=info["final"],
                          estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]], texto=info.get("texto", ""),
                          api=bool(info.get("api")), captura=str(captura) if captura.is_file() else "",
-                         tarjetas=info.get("tarjetas") or {}, sin_marca=bool(info.get("sin_marca_de_video")))
+                         tarjetas=info.get("tarjetas") or {}, sin_marca=bool(info.get("sin_marca_de_video")),
+                         api_ig=info.get("api_ig") or {}, navego=bool(info.get("navego")))
+                if r["sin_marca"]:               # fotos que fueron a Claude sin saber si son videos: no es un ok
+                    r["ok"] = False
             except ErrorRed as ex:
                 r.update(ok=False, error=str(ex))
             except Exception as ex:
