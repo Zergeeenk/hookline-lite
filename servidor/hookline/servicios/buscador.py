@@ -31,7 +31,7 @@ from ..config import config
 from ..db import sesion
 from ..ia import tareas
 from ..modelos import FuenteBusqueda, LinkBanco
-from ..trabajos import encolar, manejador
+from ..trabajos import encolar, latido, manejador
 from . import fabrica
 from .material import video_valido
 
@@ -42,6 +42,8 @@ MAX_CANDIDATOS = 400
 FUENTES_POR_VEZ = 12
 MAX_VUELTAS = 5
 MUERTA = 60             # una fuente con 60 vistos y ningún bueno se deja de usar
+VACIA = 20              # una fuente que carga bien pero sin ningún resultado cuenta como 20 vistos sin buenos:
+                        # pierde prioridad y a la 3.ª vez vacía se descarta (antes quedaba «sin probar» para siempre)
 _lock_tandas = threading.Lock()   # varias tandas pueden terminar a la vez
 
 
@@ -169,6 +171,8 @@ LISTA_JS = """(a, sel) => new Promise(res => {
   })();
 })"""
 MAX_CAPTURAS = 40          # capturas de tarjetas por fuente (cada una tarda 1-3 s)
+TIEMPO_MAX_FUENTE = 150    # segundos por fuente: pasado eso se devuelve lo juntado
+TIEMPO_MAX_BUSQUEDA = 720  # segundos por vuelta de búsqueda: pasado eso no se abren más fuentes
 MAX_FOTOS_RESERVA = 30     # fotos que se mandan a Claude cuando la página no marca ningún video
 SELECTOR = {"ig": "a[href*='/reel/'], a[href*='/p/']", "tt": "a[href*='/video/']", "pin": "a[href*='/pin/']"}
 
@@ -247,6 +251,14 @@ def sembrar_desde_banco() -> int:
         if "instagram.com" in l.link and re.fullmatch(r"[\w.]{2,30}", usuario):
             nuevas.append(f"ig @{usuario}")
     return sumar_fuentes(nuevas)
+
+
+def _fuente_vacia(red: str, q: str) -> None:
+    with sesion() as s:
+        f = next((x for x in s.scalars(select(FuenteBusqueda).where(FuenteBusqueda.red == red))
+                  if clave(x.red, x.consulta) == clave(red, q)), None)
+        if f:
+            f.vistos += VACIA
 
 
 def _elegir() -> list[tuple[str, str, str]]:
@@ -568,12 +580,18 @@ def _buscar(_d: dict) -> None:
                 pg.close()
                 estado(estado="error", mensaje="Ya probé todas las fuentes y ninguna dio buenos: pasame cuentas que suban este tipo de video.")
                 return
+            t_inicio = time.monotonic()
             for i, (red, q, url) in enumerate(elegidas):
                 if len(cands) >= MAX_CANDIDATOS:
                     break
+                latido()                         # sigue viva: que la toma del trabajo no venza en una búsqueda larga
+                if time.monotonic() - t_inicio > TIEMPO_MAX_BUSQUEDA:
+                    log.info("buscador: tope de tiempo de la vuelta: miré %s de %s fuentes", i, len(elegidas))
+                    problemas.append(f"se cortó por tiempo después de {i} de {len(elegidas)} fuentes")
+                    break
                 estado(mensaje=f"Buscando «{q}» ({i + 1} de {len(elegidas)})…", juntados=len(cands))
                 try:
-                    nuevos, muro, _ = _juntar(ctx, red, q, url, ya, hay)
+                    nuevos, muro, info_f = _juntar(ctx, red, q, url, ya, hay)
                 except ErrorRed as ex:
                     log.info("buscador: %s %s: %s", red, q, ex)
                     problemas.append(str(ex))
@@ -583,6 +601,8 @@ def _buscar(_d: dict) -> None:
                     continue
                 if muro and red != "pin":         # Pinterest no usa la sesión: no hay nada que cargar
                     sin_sesion.add(NOMBRE_RED[red])
+                elif not nuevos and not (info_f.get("tarjetas") or {}).get("links") and not info_f.get("navego"):
+                    _fuente_vacia(red, q)         # la red cargó bien y no mostró nada (ej. «No results» de Instagram)
                 cands += nuevos
             estado(mensaje="Bajando miniaturas…", juntados=len(cands))
             buenos = []
@@ -707,8 +727,11 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
     marcados: set = set()                # IG: links (también los previos) con marca de video
     capturas = 0
     pasos = max(2, pasadas * 2)
+    hasta = time.monotonic() + TIEMPO_MAX_FUENTE
     for paso in range(pasos + 1):
-        ultima = paso == pasos
+        ultima = paso == pasos or time.monotonic() > hasta
+        if ultima and paso < pasos:
+            info["corto_por_tiempo"] = True
         try:
             tarjetas = pg.evaluate(GRILLA_JS, [SELECTOR[red]])
         except Exception as ex:
@@ -747,7 +770,7 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
                 visto_en.setdefault(link, paso)
         # capturas: solo de las que ya tuvieron un paso para cargar (o al final), con un tope por fuente
         for link, href in list(sin_mini.items()):
-            if capturas >= MAX_CAPTURAS:
+            if capturas >= MAX_CAPTURAS or (time.monotonic() > hasta + 20):
                 break
             if not ultima and visto_en.get(link, paso) >= paso:
                 continue

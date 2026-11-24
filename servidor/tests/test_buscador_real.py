@@ -684,3 +684,40 @@ def test_la_api_de_hashtags_con_sesion(buscador, web):
         return b._juntar(ctx, "ig", "#memes", b._url("ig", "#memes"), set(), {}, pasadas=1)
     out, _, info = _con_pagina(b, correr)
     assert [x["link"].split("/")[-2] for x in out] == ["TAGVID1"] and info["api"] and info["api_ig"]["estado"] == 200
+
+
+def test_tope_de_tiempo_por_fuente_devuelve_lo_juntado(buscador, monkeypatch):
+    b = buscador
+    monkeypatch.setattr(b, "TIEMPO_MAX_FUENTE", 0)
+    out, _, info = _juntar1(b, "ig", "grilla", pasadas=6)
+    assert info["corto_por_tiempo"] and {"VIDPOSTER", "CONICONO"} <= {x["link"].split("/")[-2] for x in out}
+
+
+def test_la_busqueda_late_por_fuente_y_tiene_tope(buscador, monkeypatch):
+    b = buscador
+    latidos = []
+    monkeypatch.setattr(b, "latido", lambda: latidos.append(1))
+    b.sumar_fuentes(["ig: grilla", "tt @memero"])
+    b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    b._buscar({})
+    assert len(latidos) == 2 and b.estado()["estado"] == "filtrando"
+    monkeypatch.setattr(b, "TIEMPO_MAX_BUSQUEDA", -1)               # vencido antes de empezar: no abre ninguna
+    b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    b._buscar({})
+    e = b.estado()
+    assert e["estado"] == "error" and "se cortó por tiempo después de 0 de" in e["mensaje"], e
+
+
+def test_una_fuente_sin_resultados_pierde_prioridad_y_se_descarta(buscador):
+    """Lo que dio el servidor (24/11): 4 frases largas con «No results» de Instagram. Nunca sumaban vistos, así que
+    quedaban «sin probar» y salían primeras en cada búsqueda, para siempre."""
+    b = buscador
+    b.sumar_fuentes(["ig: vacia", "ig: grilla"])
+    for vez in range(3):
+        b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+        b._buscar({})
+        f = next(x for x in b.fuentes() if x["texto"] == "ig: vacia")
+        assert f["vistos"] == b.VACIA * (vez + 1) and f["sirven"] == 0
+    assert [q for _, q, _ in b._elegir()] == ["grilla"]                  # la vacía ya no se usa
+    g = next(x for x in b.fuentes() if x["texto"] == "ig: grilla")
+    assert g["vistos"] < b.VACIA                                       # la que da resultados no se castiga
