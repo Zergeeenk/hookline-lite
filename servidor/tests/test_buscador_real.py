@@ -147,10 +147,20 @@ def web():
                 cuerpo, tipo = _mp4(), "video/mp4"
             elif ruta == "/vid/patron.mp4":
                 cuerpo, tipo = _mp4_patron(), "video/mp4"
-            elif ruta == "/api/v1/tags/web_info/":             # una API que no contesta nunca (15 s y se corta)
+            elif ruta == "/api/v1/tags/web_info/" and "tag_name=lento" in self.path:   # no contesta nunca (se corta a 15 s)
                 import time as _t
                 _t.sleep(20)
                 return
+            elif ruta == "/api/v1/tags/web_info/":             # #tag: la misma regla que top_serp
+                base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                if (self.headers.get("X-IG-App-ID") != "936619743392459" or self.headers.get("Sec-Fetch-Site") != "same-origin"
+                        or "sessionid=" not in (self.headers.get("Cookie") or "")):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                datos = {"data": {"top": {"sections": [{"layout_content": {"medias": [{"media": {
+                    "code": "TAGVID1", "media_type": 2, "image_versions2": {"candidates": [{"url": f"{base}/img/44.jpg"}]}}}]}}]}}}
+                cuerpo, tipo = json.dumps(datos).encode(), "application/json"
             elif ruta.startswith("/img/"):
                 cuerpo, tipo = _jpg(), "image/jpeg"
             elif ruta == "/accounts/login/":
@@ -270,7 +280,7 @@ def buscador(monkeypatch, web):
              ("ig", "tarde"): "/ig-tarde", ("tt", "@lento"): "/tt-perezosa", ("ig", "@dup"): "/ig-dup",
              ("ig", "@al-lado"): "/ig-al-lado", ("ig", "@avatar"): "/ig-avatar", ("ig", "@lisa"): "/ig-lisa",
              ("ig", "@se-va"): "/ig-se-va", ("ig", "fotos40"): "/ig-fotos40", ("ig", "previos"): "/ig-previos",
-             ("ig", "#lento"): "/ig-vacia", ("ig", "rara"): "/ig-grilla"}
+             ("ig", "#lento"): "/ig-vacia", ("ig", "rara"): "/ig-grilla", ("ig", "#memes"): "/ig-vacia"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -509,6 +519,7 @@ def test_instagram_api_sin_sesion_no_rompe(buscador):
     b = buscador
     out, _, info = _con_pagina(b, lambda pg, ctx: b._juntar(ctx, "ig", "vacia", b._url("ig", "vacia"), set(), {}, pasadas=1))
     assert out == [] and not info.get("api")
+    assert info["api_ig"]["estado"] == 404 and "not-logged-in" in info["api_ig"]["inicio"]       # se intentó y contestó 404
 
 
 def test_busqueda_completa_con_capturas_de_tarjetas(buscador):
@@ -663,3 +674,13 @@ def test_medios_ig_no_baja_a_las_diapositivas_de_un_carrusel():
     out, cuenta = [], {}
     b._medios_ig(datos, out, set(), 0, cuenta)
     assert [m["code"] for m in out] == ["REEL01"] and cuenta["con_code"] == 3
+
+
+def test_la_api_de_hashtags_con_sesion(buscador, web):
+    b = buscador
+
+    def correr(pg, ctx):
+        ctx.add_cookies([{"name": "sessionid", "value": "x", "url": web + "/"}])
+        return b._juntar(ctx, "ig", "#memes", b._url("ig", "#memes"), set(), {}, pasadas=1)
+    out, _, info = _con_pagina(b, correr)
+    assert [x["link"].split("/")[-2] for x in out] == ["TAGVID1"] and info["api"] and info["api_ig"]["estado"] == 200
