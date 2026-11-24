@@ -95,8 +95,11 @@ def _latido(**kw):
 
 def cmd_buscador_probar(a):
     from .servicios import buscador
+    consultas = a.consultas or None
+    if a.fuentes:                                         # las de «Dónde busca», como las usa la búsqueda de verdad
+        consultas = [f["texto"] for f in buscador.fuentes() if f["activa"]][:6] or None
     try:
-        rs = buscador.probar(a.consultas or None)
+        rs = buscador.probar(consultas)
     except ValueError as ex:
         print(f"No se pudo probar: {ex}")
         sys.exit(1)
@@ -108,7 +111,15 @@ def cmd_buscador_probar(a):
         estado = "✓" if r["ok"] else "✗"
         ses = "" if r["red"] == "Pinterest" else (" · con sesión" if r["sesion"] else " · SIN sesión")
         print(f"{estado} {r['fuente']}: {r['videos']} videos{ses}{' · PIDIÓ LOGIN' if r['pidio_login'] else ''}")
-        print(f"    abrió: {r['final']}" + (" (pines por la búsqueda interna de Pinterest)" if r.get("api") else ""))
+        via = ""
+        if r.get("api"):
+            via = " (por la búsqueda interna de Pinterest)" if r["red"] == "Pinterest" else " (por la API de Instagram)"
+        print(f"    abrió: {r['final']}{via}" + (" · sin marca de video: van todas" if r.get("sin_marca") else ""))
+        t = r.get("tarjetas") or {}
+        if t.get("links") or not r["ok"]:
+            print(f"    tarjetas: {t.get('links', 0)} links · {t.get('con_video', 0)} con video · "
+                  f"{t.get('con_img', 0)} con imagen · {t.get('con_icono', 0)} con ícono de video"
+                  + (f" · etiquetas: {t['etiquetas']}" if t.get("etiquetas") else ""))
         for e in r["ejemplos"]:
             print(f"    {e}")
         if not r["ok"] and r.get("texto"):
@@ -204,6 +215,7 @@ def main(argv=None):
     x.set_defaults(f=cmd_migrar_lite)
     x = sub.add_parser("buscador-probar", help="prueba el buscador contra Instagram, TikTok y Pinterest (no guarda nada)")
     x.add_argument("consultas", nargs="*", help='ej.: "ig: meme pov" "tt @cuenta" "pin: meme pov"')
+    x.add_argument("--fuentes", action="store_true", help="prueba las fuentes guardadas en «Dónde busca» (hasta 6)")
     x.set_defaults(f=cmd_buscador_probar)
     x = sub.add_parser("puente")
     x.add_argument("accion", choices=["esperar", "responder", "estado"])

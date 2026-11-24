@@ -62,6 +62,17 @@ def _paginas(base):
         + f'<a href="/p/VID1/"><svg aria-label="Clip"></svg><img src="{img(91)}"></a>'         # video en /p/: entra
         + f'<a href="/reel/SINIMG/"></a>',                                                       # sin miniatura: no
         "/pin-vacio": "<p>Pinterest · Registrate para ver más ideas</p>",
+        # la búsqueda de Instagram con sesión (23/11): links /p/… y los reels con un <video> que se reproduce solo
+        "/ig-grilla": f'<a href="/p/VIDPOSTER/" style="display:block"><video poster="{img(31)}"></video></a>'
+        + '<a href="/p/VIDSOLO/" style="display:block;width:90px;height:160px">'
+          '<div style="width:90px;height:160px;background:#c3305a"><video></video></div></a>'
+        + f'<a href="/p/CONICONO/" style="display:block"><img src="{img(32)}"><svg aria-label="Clip"></svg></a>'
+        + f'<a href="/p/FOTO/" style="display:block"><img src="{img(33)}" alt="foto"></a>'
+        + f'<a href="/p/CARRUSEL/" style="display:block"><img src="{img(34)}"><svg aria-label="Carousel"></svg></a>'
+        + '<a href="/" style="display:block">inicio</a>',
+        "/ig-fotos": f'<a href="/p/SOLOFOTO1/" style="display:block"><img src="{img(35)}" alt="uno"></a>'
+        + f'<a href="/p/SOLOFOTO2/" style="display:block"><img src="{img(36)}" alt="dos"></a>',
+        "/ig-vacia": "<p>3 Meme pov</p>",
         "/ig-muro": '<form id="loginForm"><input name="username"></form>',
         "/tt": "".join(f'<a href="https://www.tiktok.com/@memero/video/7{n}00"><img src="{img(10 + n)}"></a>'
                        for n in range(4)),
@@ -97,6 +108,22 @@ def web():
                 self.end_headers()
                 self.wfile.write(cuerpo)
                 return
+            elif ruta == "/api/v1/fbsearch/web/top_serp/":       # la API de Instagram: solo con sesión y app id
+                base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                if self.headers.get("X-IG-App-ID") != "936619743392459" or "sessionid=" not in (self.headers.get("Cookie") or ""):
+                    cuerpo, tipo = b"<html class='not-logged-in'></html>", "text/html"
+                    self.send_response(404)
+                    self.send_header("Content-Type", tipo)
+                    self.end_headers()
+                    self.wfile.write(cuerpo)
+                    return
+                medio = lambda code, tipo_, n: {"code": code, "media_type": tipo_, "caption": {"text": f"pov {code}"},  # noqa: E731
+                                                "image_versions2": {"candidates": [{"url": f"{base}/img/{n}.jpg"}]}}
+                datos = {"media_grid": {"sections": [
+                    {"layout_content": {"medias": [{"media": medio("APIVID1", 2, 41)}, {"media": medio("APIFOTO", 1, 42)}]}},
+                    {"layout_content": {"fill_items": [{"media": {**medio("APIVID2", 1, 43), "product_type": "clips"}}]}},
+                    {"layout_content": {"medias": [{"media": medio("APIVID1", 2, 41)}]}}]}}              # repetido
+                cuerpo, tipo = json.dumps(datos).encode(), "application/json"
             elif ruta == "/resource/BaseSearchResource/get/":    # la búsqueda interna de Pinterest
                 import urllib.parse as up
                 qs = up.parse_qs(self.path.split("?", 1)[1])
@@ -163,7 +190,8 @@ def buscador(monkeypatch, web):
     rutas = {("ig", "@memes"): "/ig", ("ig", "@privada"): "/ig-redirige", ("ig", "#muro"): "/ig-muro",
              ("tt", "@memero"): "/tt", ("pin", "meme pov"): "/pin", ("ig", "meme pov"): "/bloqueado",
              ("tt", "meme pov"): "/corta", ("ig", "@prohibida"): "/prohibido", ("pin", "sin dom"): "/pin-vacio",
-             ("pin", "meme real"): "/pin-vacio"}
+             ("pin", "meme real"): "/pin-vacio",
+             ("ig", "grilla"): "/ig-grilla", ("ig", "fotos"): "/ig-fotos", ("ig", "vacia"): "/ig-vacia"}
     monkeypatch.setattr(b, "_url", lambda red, q: web + rutas.get((red, q), "/nada"))
     AGENTES.clear()
     yield b
@@ -362,3 +390,72 @@ def test_video_de_pin_con_hls_solo_y_con_idea_pin():
     assert b.video_de_pin(idea) == ("https://v1.pinimg.com/a.mp4", 8.0, "")
     assert b.video_de_pin({"videos": {"video_list": {"X": {"url": "http://evil/x.mp4"}}}}) == ("", 0.0, "")
     assert b.video_de_pin({}) == ("", 0.0, "")
+
+
+def test_instagram_grilla_con_videos_que_se_reproducen_solos(buscador):
+    """Lo que dio el servidor con sesión (23/11): 24 links /p/… y 11 <video>, 0 juntados. Los reels se reconocen por
+    el <video> (o el ícono) y la miniatura sale del poster o de una captura de la tarjeta; fotos y carruseles, afuera."""
+    b = buscador
+    def correr(pg, ctx):
+        return b._juntar(ctx, "ig", "grilla", b._url("ig", "grilla"), set(), {}, pasadas=2)
+    out, muro, info = _con_pagina(b, correr)
+    por = {x["link"].split("/")[-2]: x for x in out}
+    assert sorted(por) == ["CONICONO", "VIDPOSTER", "VIDSOLO"], sorted(por)
+    assert por["VIDPOSTER"]["src"].endswith("/img/31.jpg") and por["CONICONO"]["src"].endswith("/img/32.jpg")
+    assert not por["VIDSOLO"]["src"] and por["VIDSOLO"]["captura"][:2] == b"\xff\xd8"           # captura JPEG
+    assert all(x["link"].startswith("https://www.instagram.com/reel/") for x in out) and not muro
+    t = info["tarjetas"]
+    assert t["links"] == 5 and t["con_video"] == 2 and t["con_icono"] == 1 and not info.get("api")
+
+
+def test_instagram_sin_ninguna_marca_de_video_manda_todas_a_claude(buscador):
+    b = buscador
+    out, _, info = _con_pagina(b, lambda pg, ctx: b._juntar(ctx, "ig", "fotos", b._url("ig", "fotos"), set(), {}, pasadas=1))
+    assert sorted(x["link"].split("/")[-2] for x in out) == ["SOLOFOTO1", "SOLOFOTO2"] and info["sin_marca_de_video"]
+
+
+def test_instagram_sin_grilla_usa_la_api_desde_la_pagina_con_la_sesion(buscador, web):
+    """La API pedida aparte contestó 404 «not-logged-in» (no llevaba la sesión): se pide desde la página."""
+    b = buscador
+    def correr(pg, ctx):
+        ctx.add_cookies([{"name": "sessionid", "value": "111%3Aabc%3A22", "url": web + "/"}])   # como la de .instagram.com
+        return b._juntar(ctx, "ig", "vacia", b._url("ig", "vacia"), set(), {}, pasadas=1)
+    out, muro, info = _con_pagina(b, correr)
+    assert [x["link"] for x in out] == ["https://www.instagram.com/reel/APIVID1/", "https://www.instagram.com/reel/APIVID2/"]
+    assert out[0]["src"].endswith("/img/41.jpg") and out[0]["alt"] == "pov APIVID1" and info["api"] and not muro
+
+
+def test_instagram_api_sin_sesion_no_rompe(buscador):
+    b = buscador
+    out, _, info = _con_pagina(b, lambda pg, ctx: b._juntar(ctx, "ig", "vacia", b._url("ig", "vacia"), set(), {}, pasadas=1))
+    assert out == [] and not info.get("api")
+
+
+def test_busqueda_completa_con_capturas_de_tarjetas(buscador):
+    """Las miniaturas que son capturas (bytes) llegan a la hoja de Claude y no rompen el candidatos.json."""
+    import json as _json
+    from hookline.ia import tareas
+    b = buscador
+    b.sumar_fuentes(["ig: grilla"])
+    b.estado(estado="buscando", objetivo=1, vuelta=1, acumulado=0, lote="", hojas=0, hechas=0)
+    b._buscar({})
+    e = b.estado()
+    assert e["estado"] == "filtrando" and e["juntados"] == 3, e
+    d = b.almacen.dir_de("candidatos", e["lote"])
+    cands = _json.loads((d / "candidatos.json").read_text())
+    assert len(cands) == 3 and all("captura" not in c for c in cands)
+    assert all((d / f"{c['n']}.jpg").is_file() for c in cands)
+    assert [t for t in tareas.pendientes_claude_code() if t.tipo == "filtrar"]
+
+
+def test_medios_ig_encuentra_videos_en_cualquier_forma():
+    from hookline.servicios import buscador as b
+    datos = {"a": [{"x": {"code": "VID_1", "video_versions": [{"url": "u"}], "image_versions2": {"candidates": [{"url": "https://i/1.jpg"}]}}},
+                   {"code": "FOTO_1", "media_type": 1, "image_versions2": {"candidates": [{"url": "https://i/2.jpg"}]}},
+                   {"node": {"shortcode": "VID_2", "is_video": True, "display_url": "https://i/3.jpg"}},
+                   {"code": "VID_3", "media_type": 2},                                         # sin miniatura: no
+                   {"code": "x", "media_type": 2, "display_url": "https://i/4.jpg"},           # code inválido
+                   {"code": "VID_1", "media_type": 2, "display_url": "https://i/5.jpg"}]}      # repetido
+    out = []
+    b._medios_ig(datos, out, set())
+    assert [(m["code"], m["src"]) for m in out] == [("VID_1", "https://i/1.jpg"), ("VID_2", "https://i/3.jpg")]

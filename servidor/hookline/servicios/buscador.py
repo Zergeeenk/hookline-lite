@@ -93,6 +93,25 @@ def _url(red: str, q: str) -> str:
 
 
 NOMBRE_RED = {"ig": "Instagram", "tt": "TikTok", "pin": "Pinterest"}
+# Lo que se ve de una tarjeta de la grilla. Instagram hoy muestra los reels como links /p/… con un <video> que se
+# reproduce solo (sin <img>), así que el video se reconoce por el <video>, por el ícono (aria-label Clip/Reel/Video) o
+# por el link /reel/; la miniatura sale del <img>, del poster del video, de un fondo CSS o, si no hay nada de eso, de una
+# captura de la tarjeta.
+TARJETA_JS = """el => {
+  const v = el.querySelector('video');
+  const img = el.querySelector('img');
+  const etiquetas = [...el.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label') || '')
+    .filter(Boolean).join(' | ').slice(0, 200);
+  let bg = '';
+  for (const n of [el, ...el.querySelectorAll('*')]) {
+    const b = getComputedStyle(n).backgroundImage;
+    if (b && b.startsWith('url(')) { bg = b.slice(4, -1).replace(/^["']|["']$/g, ''); break; }
+  }
+  return {video: !!v, poster: v ? (v.getAttribute('poster') || '') : '',
+          img: img ? (img.currentSrc || img.getAttribute('src') || '') : '',
+          alt: img ? (img.getAttribute('alt') || '') : '', etiquetas, bg};
+}"""
+ICONO_VIDEO = re.compile(r"clip|reel|v[ií]deo", re.I)
 SELECTOR = {"ig": "a[href*='/reel/'], a[href*='/p/']", "tt": "a[href*='/video/']", "pin": "a[href*='/pin/']"}
 
 
@@ -511,11 +530,14 @@ def _buscar(_d: dict) -> None:
             buenos = []
             for c in cands[:MAX_CANDIDATOS]:
                 try:
-                    r = pg.request.get(c["src"], timeout=15000)
-                    if not r.ok:
-                        continue
+                    imagen = c.pop("captura", None)
+                    if not imagen:
+                        r = pg.request.get(c["src"], timeout=15000)
+                        if not r.ok:
+                            continue
+                        imagen = r.body()
                     n = len(buenos) + 1
-                    (d / f"{n}.img").write_bytes(r.body())
+                    (d / f"{n}.img").write_bytes(imagen)
                     im = Image.open(d / f"{n}.img").convert("RGB")
                     im.thumbnail((300, 534))
                     im.save(d / f"{n}.jpg", quality=80)
@@ -617,30 +639,50 @@ def _juntar_en(pg, ctx, red, q, url, ya, hay, pasadas, captura=None):
     if muro and red != "pin":            # Pinterest muestra los resultados aunque tape con el cartel de registrarse
         _mirar(pg, info, captura)
         return [], True, info
-    out = []
+    out, fotos, malos = [], [], set()
+    vistos = {"links": 0, "con_video": 0, "con_img": 0, "con_icono": 0, "etiquetas": []}
     for _ in range(pasadas):
         for a in pg.query_selector_all(SELECTOR[red]):
             href = a.get_attribute("href") or ""
             link = _link(href, red)
-            if not link or link in ya:
+            if not link or link in ya or link in malos or any(x["link"] == link for x in fotos):
                 continue
-            if red == "ig" and "/reel/" not in href and not a.query_selector(
-                    "svg[aria-label*='Clip'], svg[aria-label*='Reel'], svg[aria-label*='Video'], svg[aria-label*='clip']"):
-                continue
-            img = a.query_selector("img")
-            src = img.get_attribute("src") if img else ""
-            if not src:
-                src = a.evaluate("""el => { for (const n of [el, ...el.querySelectorAll('*')]) {
-                    const b = getComputedStyle(n).backgroundImage;
-                    if (b && b.startsWith('url(')) return b.slice(4, -1).replace(/^["']|["']$/g, ''); }
-                    return ''; }""")
-            if not src:
+            try:
+                t = a.evaluate(TARJETA_JS)
+            except Exception:
+                continue                         # la grilla se rearmó mientras se leía: en la próxima pasada
+
+            vistos["links"] += 1
+            vistos["con_video"] += bool(t.get("video"))
+            vistos["con_img"] += bool(t.get("img"))
+            icono = bool(ICONO_VIDEO.search(t.get("etiquetas") or ""))
+            vistos["con_icono"] += icono
+            if t.get("etiquetas") and len(vistos["etiquetas"]) < 4 and t["etiquetas"] not in vistos["etiquetas"]:
+                vistos["etiquetas"].append(t["etiquetas"][:80])
+            item = {"link": link, "alt": str(t.get("alt") or "")[:160], "fuente": clave(red, q),
+                    "src": next((u for u in (t.get("img"), t.get("poster"), t.get("bg"))
+                                 if str(u or "").startswith(("http://", "https://"))), "")}
+            if not item["src"]:                  # sin imagen a mano (video que se reproduce solo): captura de la tarjeta
+                try:
+                    item["captura"] = a.screenshot(type="jpeg", quality=80, timeout=2000)
+                except Exception:                # vacía o invisible: no se reintenta en cada pasada
+                    malos.add(link)
+                    continue
+            if red == "ig" and "/reel/" not in href and not t.get("video") and not icono:
+                fotos.append(item)               # parece foto: queda de reserva
                 continue
             ya.add(link)
-            out.append({"link": link, "src": src, "alt": ((img.get_attribute("alt") if img else "") or "")[:160],
-                        "fuente": clave(red, q)})
+            out.append(item)
         pg.mouse.wheel(0, 3000)
         pg.wait_for_timeout(1200)
+    info["tarjetas"] = vistos
+    if red == "ig" and not out and fotos and not (vistos["con_video"] or vistos["con_icono"]):
+        out = fotos                              # no se reconoce ningún video en la página: que Claude mire todo
+        ya.update(x["link"] for x in out)
+        info["sin_marca_de_video"] = True
+    if red == "ig" and not out and not q.startswith("@"):
+        out = _ig_api(pg, q, ya)                 # la grilla no dio nada: la búsqueda de Instagram, desde la página
+        info["api"] = bool(out)
     if red == "pin" and not out and not q.startswith("@"):
         out = _pines_api(pg, q, ya)              # la página no mostró pines: los mismos, pedidos a la búsqueda de Pinterest
         info["api"] = True
@@ -680,6 +722,68 @@ def video_de_pin(x: dict) -> tuple[str, float, str]:
         mini = next((str(w["thumbnail"]) for w in vs if str(w.get("thumbnail") or "").startswith("http")), "")
         return v["url"], round(dur, 1), mini
     return "", 0.0, ""
+
+
+IG_APP_ID = "936619743392459"           # el de la web de Instagram (público: lo manda la propia página)
+
+
+def _medios_ig(x, out: list, vistos: set) -> None:
+    """Junta los videos de cualquier respuesta de la API de Instagram, sin depender de su forma: busca a fondo los
+    objetos de un medio (code + video) y se queda con su miniatura."""
+    if isinstance(x, list):
+        for y in x[:500]:
+            _medios_ig(y, out, vistos)
+        return
+    if not isinstance(x, dict):
+        return
+    code = x.get("code") or x.get("shortcode")
+    es_video = bool(x.get("video_versions")) or x.get("media_type") == 2 or x.get("product_type") == "clips" \
+        or x.get("is_video") is True
+    if isinstance(code, str) and re.fullmatch(r"[\w-]{5,40}", code) and es_video and code not in vistos:
+        cands = ((x.get("image_versions2") or {}).get("candidates") or [])
+        src = next((str(c.get("url")) for c in cands if isinstance(c, dict)
+                    and str(c.get("url") or "").startswith(("https://", "http://"))), "") or str(x.get("display_url") or "")
+        if src.startswith(("https://", "http://")):
+            vistos.add(code)
+            cap = x.get("caption")
+            alt = (cap.get("text") if isinstance(cap, dict) else "") or x.get("accessibility_caption") or ""
+            out.append({"code": code, "src": src, "alt": str(alt)[:160]})
+    for k, v in list(x.items())[:200]:
+        if isinstance(v, (dict, list)):
+            _medios_ig(v, out, vistos)
+
+
+def _ig_api(pg, q: str, ya: set) -> list[dict]:
+    """La búsqueda de Instagram por su API web, pedida desde la propia página (así va con la sesión; un pedido aparte
+    no la lleva y contesta 404 «not-logged-in»). Frases → fbsearch/web/top_serp; #tag → tags/web_info."""
+    ruta = (f"/api/v1/tags/web_info/?tag_name={urllib.parse.quote(q[1:])}" if q.startswith("#") else
+            f"/api/v1/fbsearch/web/top_serp/?enable_metadata=true&query={urllib.parse.quote(q)}")
+    try:
+        estado_, texto = pg.evaluate("""async ([ruta, app]) => {
+            try {
+              const r = await fetch(ruta, {credentials: 'include', headers: {'X-IG-App-ID': app,
+                'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}});
+              return [r.status, await r.text()];
+            } catch (e) { return [0, String(e)]; }
+        }""", [ruta, IG_APP_ID])
+        if estado_ != 200:
+            log.info("buscador: la API de Instagram contestó %s para %s", estado_, q)
+            return []
+        import json
+        datos = json.loads(texto)
+    except Exception as ex:
+        log.info("buscador: la API de Instagram no sirvió para %s: %s", q, ex)
+        return []
+    medios: list[dict] = []
+    _medios_ig(datos, medios, set())
+    out = []
+    for m in medios:
+        link = f"https://www.instagram.com/reel/{m['code']}/"
+        if link in ya:
+            continue
+        ya.add(link)
+        out.append({"link": link, "src": m["src"], "alt": m["alt"], "fuente": clave("ig", q)})
+    return out
 
 
 def _pines_api(pg, q: str, ya: set) -> list[dict]:
@@ -757,7 +861,8 @@ def probar(consultas: list[str] | None = None) -> list[dict]:
                 cands, muro, info = _juntar(ctx, red, q, r["url"], set(), hay, pasadas=3, captura=captura)
                 r.update(ok=bool(cands), videos=len(cands), pidio_login=muro, final=info["final"],
                          estado=info["estado"], ejemplos=[x["link"] for x in cands[:3]], texto=info.get("texto", ""),
-                         api=bool(info.get("api")), captura=str(captura) if captura.is_file() else "")
+                         api=bool(info.get("api")), captura=str(captura) if captura.is_file() else "",
+                         tarjetas=info.get("tarjetas") or {}, sin_marca=bool(info.get("sin_marca_de_video")))
             except ErrorRed as ex:
                 r.update(ok=False, error=str(ex))
             except Exception as ex:
