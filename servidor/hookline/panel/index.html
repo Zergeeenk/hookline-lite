@@ -1386,7 +1386,7 @@ function cargarCopias(forzar) {
     if ((pagina === "copiar" || pagina === "inspiracion") && JSON.stringify(d) !== antes && !editando && !sonando) render();
     if (d.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((d.busqueda || {}).estado)
         || ["iniciando", "pide_codigo"].includes((d.sesion_ig || {}).estado)) setTimeout(() => { if (pagina === "copiar" || pagina === "inspiracion") cargarCopias(true); }, 2500);
-  }).catch(() => {});
+  }).catch(() => { if (ocupada) setTimeout(() => { if (pagina === "copiar" || pagina === "inspiracion") cargarCopias(true); }, 5000); });
 }
 const cpCopia = () => CP && CP.items.find(x => x.id === cpSel);
 const cpDr = c => ({ ...c, ...(cpDraft[c.id] || {}) });
@@ -1727,7 +1727,7 @@ const IN_MOTIVOS = ["No sale chica", "Parece menor", "Muy infantil", "Aburrido",
 function sesionesHtml(se) {
   if (!se) return "";
   const red = (k, n) => { const x = se[k] || {};
-    const [cl, ic, txt] = x.vencida ? ["err", "alert", `${n}: la sesión venció${x.motivo ? ` (${esc(x.motivo)})` : ""}. Cargala de nuevo.`]
+    const [cl, ic, txt] = x.vencida ? ["err", "alert", `${n}: la sesión venció${x.motivo ? ` (${esc(x.motivo)})` : ""}. Tocá para iniciarla de nuevo.`]
       : x.cargada ? ["ok", "check", `${n}: sesión cargada${x.cargada_el ? ` el ${x.cargada_el}` : ""}`]
       : ["", "key", `${n}: sin sesión${k === "instagram" ? " (los /p/ no bajan y el buscador ve poco)" : ""}`];
     return x.vencida ? `<button type="button" class="chip ${cl}" data-sesion="${k}" data-incookies title="Cargar la sesión de nuevo" style="cursor:pointer;border:0">${icn(ic, "sm")}${esc(txt)}</button>`
@@ -2331,7 +2331,7 @@ function cargarCookies() {
     </details>
     <div class="dlg-pie">${si.tiene_credenciales ? `<button class="btn fant" data-olvidar>Olvidar la cuenta</button>` : ""}<span style="flex:1"></span><button class="btn" data-x>Cerrar</button><button class="btn prim" data-iglogin>${icn("key")}Iniciar sesión</button></div></div>`;
   document.body.appendChild(f);
-  let reloj = null, ultimo = "", pintado = null, actual = si;
+  let reloj = null, ultimo = "", pintado = null, actual = si, enviando = false, seq = 0, fallas = 0;
   const pintar = e => {
     const box = f.querySelector("#igEstado"); if (!box) return;
     if (e) actual = e;
@@ -2339,7 +2339,7 @@ function cargarCookies() {
     // Se consulta cada 2 s: repintar solo si cambió algo, si no se borra el código que están escribiendo.
     if (pintado !== est + "|" + msg) {
       const viejo = box.querySelector("#igCodigo"), valor = viejo ? viejo.value : "", foco = !!viejo && document.activeElement === viejo;
-      if (est === "iniciando") box.innerHTML = `<span class="chip info anim">${icn("loader", "sm")}${msg || "Iniciando sesión en Instagram…"}</span><small class="muted" style="display:block;margin-top:4px">Puede tardar un minuto. Si está corriendo una búsqueda, espera a que termine.</small>`;
+      if (est === "iniciando") box.innerHTML = `<div class="fila" style="gap:8px;flex-wrap:wrap;align-items:center"><span class="chip info anim">${icn("loader", "sm")}${msg || "Iniciando sesión en Instagram…"}</span><button class="btn fant sm" data-igcancelar>Cancelar</button></div><small class="muted" style="display:block;margin-top:4px">Puede tardar un minuto. Si está corriendo una búsqueda, espera a que termine.</small>`;
       else if (est === "pide_codigo") box.innerHTML = `<div class="card pad" style="border:1px solid var(--warn)"><b>${icn("alert", "sm")} Instagram pide un código</b><div class="muted" style="margin:4px 0 8px">${msg || "Mirá el mail o los SMS de la cuenta para mirar."}</div><div class="fila"><input class="in" id="igCodigo" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" style="max-width:160px"><button class="btn prim" data-igcodigo>Enviar código</button><button class="btn fant sm" data-igcancelar title="Por ejemplo, si el código no llega: cancelá y volvé a iniciar sesión">Cancelar</button></div></div>`;
       else if (est === "listo") box.innerHTML = `<span class="chip ok">${icn("check", "sm")}${msg || "Sesión iniciada"}</span>`;
       else if (est === "error") box.innerHTML = `<span class="chip err">${icn("alert", "sm")}${msg || "No se pudo iniciar sesión"}</span>`;
@@ -2352,13 +2352,30 @@ function cargarCookies() {
     if (est === "listo" && ultimo && ultimo !== "listo") { toast("Sesión de Instagram iniciada"); cargarCopias(true); }
     ultimo = est;
   };
+  // Consulta mientras haya algo en marcha. Una respuesta vieja (salió antes que otra cosa) no pisa lo nuevo; una que
+  // falla (la red, un deploy) no corta las consultas; una sin estado no repinta.
   const mirar = async () => {
-    try { const r = await api("/api/sesion_ig"); if (CP) { CP.sesion_ig = r.sesion_ig; CP.sesiones = r.sesiones; } pintar(r.sesion_ig);
-      clearTimeout(reloj); if (["iniciando", "pide_codigo"].includes(r.sesion_ig.estado) && document.body.contains(f)) reloj = setTimeout(mirar, 2000);
-    } catch (e) { clearTimeout(reloj); }
+    const n = ++seq; clearTimeout(reloj);
+    try {
+      const r = await api("/api/sesion_ig");
+      if (n !== seq || !document.body.contains(f)) return;
+      fallas = 0;
+      if (r && r.sesion_ig && r.sesion_ig.estado) { if (CP) { CP.sesion_ig = r.sesion_ig; CP.sesiones = r.sesiones; } pintar(r.sesion_ig); }
+      if (["iniciando", "pide_codigo"].includes((actual || {}).estado)) reloj = setTimeout(mirar, 2000);
+    } catch (e) {
+      if (e instanceof SinSesion || n !== seq || !document.body.contains(f)) return;    // sin sesión del panel: ya pide entrar
+      fallas++; reloj = setTimeout(mirar, Math.min(15000, 1000 * 2 ** Math.min(fallas, 4)));
+    }
   };
-  if (["iniciando", "pide_codigo"].includes(si.estado)) mirar(); else pintar(["error", "listo"].includes(si.estado) ? si : null);
-  (si.tiene_credenciales ? f.querySelector("#igClave") : f.querySelector("#igUsuario")).focus();
+  // Manda algo al servidor sin que se cruce con una consulta ni salga dos veces (dos Enter seguidos).
+  const mandar = async (datos, despues) => {
+    if (enviando) return; enviando = true; clearTimeout(reloj); const n = ++seq;
+    try { const r = await api("/api/copiar", datos); if (despues) despues(r); if (n === seq && r.sesion_ig && r.sesion_ig.estado) pintar(r.sesion_ig); }
+    catch (e) { fallo(e); } finally { enviando = false; if (document.body.contains(f)) mirar(); }
+  };
+  pintar(si.estado ? si : null);
+  if (si.estado !== "pide_codigo") (si.tiene_credenciales ? f.querySelector("#igClave") : f.querySelector("#igUsuario")).focus();
+  mirar();
   const cerrar = () => { clearTimeout(reloj); f.remove(); render(); };
   f.addEventListener("click", async ev => {
     if (ev.target === f || ev.target.closest("[data-x]")) return cerrar();
@@ -2366,17 +2383,17 @@ function cargarCookies() {
       const usuario = f.querySelector("#igUsuario").value.trim(), clave = f.querySelector("#igClave").value;
       if (!usuario) return toast("Escribí el usuario de la cuenta para mirar", true);
       if (!clave && !actual.tiene_credenciales) return toast("Escribí la contraseña", true);
-      try { const r = await api("/api/copiar", { op: "ig_login", usuario, clave }); f.querySelector("#igClave").value = ""; ultimo = "iniciando"; pintar(r.sesion_ig); mirar(); } catch (e) { fallo(e); }
+      await mandar({ op: "ig_login", usuario, clave }, () => { f.querySelector("#igClave").value = ""; ultimo = "iniciando"; });
       return;
     }
     if (ev.target.closest("[data-igcodigo]")) {
       const codigo = (f.querySelector("#igCodigo") || {}).value || "";
       if (!codigo.replace(/\D/g, "")) { toast("Escribí el código que te mandó Instagram", true); const c = f.querySelector("#igCodigo"); if (c) c.focus(); return; }
-      try { const r = await api("/api/copiar", { op: "ig_codigo", codigo }); pintar(r.sesion_ig); mirar(); } catch (e) { fallo(e); }
+      await mandar({ op: "ig_codigo", codigo });
       return;
     }
     if (ev.target.closest("[data-igcancelar]")) {
-      try { const r = await api("/api/copiar", { op: "ig_cancelar" }); pintar(r.sesion_ig); } catch (e) { fallo(e); }
+      await mandar({ op: "ig_cancelar" });
       return;
     }
     if (ev.target.closest("[data-olvidar]")) {

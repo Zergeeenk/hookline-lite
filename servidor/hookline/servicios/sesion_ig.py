@@ -51,6 +51,10 @@ BOTON_CONFIRMAR = re.compile(r"^(confirm|confirmar|submit|enviar|next|siguiente|
 BOTON_COOKIES = re.compile(r"^(allow all cookies|allow essential and optional cookies|accept all( cookies)?|accept|"
                            r"permitir todas las cookies|permitir cookies esenciales y opcionales|aceptar todas"
                            r"( las cookies)?|aceptar)$", re.I)
+BOTON_FUI_YO = re.compile(r"^(this was me|it was me|yes, it was me|fui yo|s[ií], fui yo|era yo)$", re.I)
+CAPTCHA = re.compile(r"captcha|i.?m not a robot|no soy un robot|confirm (that )?you.?re (a )?human|"
+                     r"confirm[aá] que (sos|eres) (una persona|humano)", re.I)
+MARCO_CAPTCHA = "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[title*='captcha' i]"
 PIDE_APROBAR = re.compile(r"check your notifications|approve (this|the) login|was this you|"
                           r"revis[aá] tus notificaciones|aprob[aá] (el|este) inicio|¿fuiste tú\?", re.I)
 
@@ -66,8 +70,14 @@ M_MUCHOS_CODIGOS = "Instagram no aceptó los códigos. Iniciá sesión de nuevo 
 M_OTRO_CODIGO = "El código no es correcto: escribí el último que te llegó."
 M_APROBAR = ("Instagram pide aprobar el inicio de sesión desde la app (en el celular de la cuenta para mirar). "
              "Aprobalo y esperá acá.")
+M_CAPTCHA = ("Instagram pide resolver un captcha y desde el servidor no se puede. Probá de nuevo más tarde o cargá "
+             "la sesión con cookies (en «Avanzado»).")
+M_SIN_APROBAR = ("Nadie aprobó el inicio de sesión desde la app a tiempo. Iniciá sesión de nuevo cuando tengas a mano "
+                 "el celular de esa cuenta.")
 M_CORTADO = "El inicio de sesión se cortó (se reinició el servidor). Probá de nuevo."
+M_CORTANDO = "Se está cortando el intento anterior: probá de nuevo en unos segundos."
 M_EN_ESPERA = "En espera: arranca apenas termine la búsqueda que está corriendo."
+M_ESPERANDO = "Esperando a que el servidor lo tome (si se está reiniciando, tarda un poco más)."
 M_CANCELADO = "Se canceló el inicio de sesión."
 ERRORES = [
     (re.compile(r"password (was|is) incorrect|incorrect password|contraseña (no es correcta|es incorrecta)", re.I), M_CLAVE),
@@ -81,7 +91,9 @@ ERRORES = [
     (re.compile(r"your account has been (disabled|suspended)|tu cuenta (fue|ha sido) (desactivada|suspendida)|"
                 r"we suspended your account|suspendimos tu cuenta", re.I), M_SUSPENDIDA),
     (re.compile(r"(there was a|we had a) problem logging you in|problem logging you into instagram|"
-                r"hubo un problema al iniciar (tu )?sesión|try again soon|inténtalo de nuevo (más tarde|pronto)", re.I),
+                r"hubo un problema al iniciar (tu )?sesión|try again soon|inténtalo de nuevo (más tarde|pronto)|"
+                r"problem with (your|this) request|(problema|error) con (tu|la|esta) solicitud|"
+                r"couldn.t connect to instagram|no (pudimos|se pudo) conectar(nos|se)? (con|a) instagram", re.I),
      M_NO_DEJA),
 ]
 
@@ -105,7 +117,7 @@ def _tipo(msg: str) -> str:
         return "definitivo"
     if msg == M_CODIGO:
         return "codigo"
-    if msg in (M_ESPERAR, M_NO_DEJA):
+    if msg in (M_ESPERAR, M_NO_DEJA, M_CAPTCHA):
         return "freno"
     return "pasajero"
 
@@ -184,6 +196,17 @@ def _trabajo_activo() -> str:
     return ""
 
 
+def _buscando() -> bool:
+    """¿Hay una búsqueda corriendo (con el navegador del buscador, que el login espera)?"""
+    from sqlalchemy import func, select
+
+    from ..db import ahora, sesion
+    from ..modelos import Trabajo
+    with sesion() as s:
+        return bool(s.scalar(select(func.count()).select_from(Trabajo).where(
+            Trabajo.tipo == "buscar", Trabajo.estado == "corriendo", Trabajo.tomado_hasta >= ahora())))
+
+
 def _cancelar_pendientes() -> None:
     from sqlalchemy import update
 
@@ -220,7 +243,10 @@ def publico() -> dict:
     est = e.get("estado") or "parado"
     msg = str(e.get("mensaje") or "")
     if est == "iniciando" and e.get("_trabajo") == "pendiente":
-        msg = M_EN_ESPERA
+        if _buscando():
+            msg = M_EN_ESPERA
+        elif time.time() - float(e.get("desde") or e.get("cuando") or 0) > 20:
+            msg = M_ESPERANDO
     return {"estado": est, "mensaje": msg, "usuario": cred[0] if cred else "", "tiene_credenciales": bool(cred),
             "auto": bool(e.get("auto"))}
 
@@ -231,6 +257,22 @@ def olvidar() -> None:
         guardar_ajuste(CODIGO, None)
         _cancelar_pendientes()
         estado(estado="parado", mensaje="", auto=False, bloqueado=False, espera_hasta=0)
+
+
+def cookies_cargadas() -> None:
+    """Cargaron la sesión de Instagram con cookies (en «Avanzado»): el error viejo del login ya no aplica, y lo que
+    frenaba el reintento por un código que nadie escribió tampoco. Lo de una contraseña o una cuenta mala queda."""
+    with candado("ig_login"):
+        e = estado()
+        if e.get("estado") in ACTIVOS:
+            return                           # es el propio login guardando sus cookies, o hay uno en marcha
+        cambios = {}
+        if e.get("estado") == "error":
+            cambios.update(estado="parado", mensaje="")
+        if e.get("bloqueado") and e.get("bloqueado") != "definitivo":
+            cambios["bloqueado"] = False
+        if cambios:
+            estado(**cambios)
 
 
 def cancelar() -> dict:
@@ -252,8 +294,10 @@ def iniciar(auto: bool = False) -> dict:
         raise ValueError("Primero cargá el usuario y la contraseña de la cuenta «para mirar».")
     with candado("ig_login"):
         e = _vigente()
-        if e.get("estado") in ACTIVOS or _trabajo_activo() == "corriendo":
+        if e.get("estado") in ACTIVOS:
             raise ValueError("Ya está iniciando sesión: esperá un momento.")
+        if _trabajo_activo() == "corriendo":
+            raise ValueError(M_CORTANDO)     # cancelado u olvidado: el worker todavía no lo soltó
         falta = float(e.get("espera_hasta") or 0) - time.time()
         if falta > 0:
             minutos = max(1, round(falta / 60))
@@ -393,6 +437,12 @@ def _apretar(pg, boton, campo) -> None:
             pass
 
 
+def _sigue() -> None:
+    """Desde cualquier espera del intento: si lo cancelaron u olvidaron la cuenta desde el panel, cortar ya."""
+    if estado().get("estado") not in ACTIVOS:
+        raise ErrorLogin(M_CANCELADO, "cancelado")
+
+
 def _avance(**cambios) -> None:
     """Un paso del intento en curso, salvo que lo hayan cancelado desde el panel (el estado ya no está activo)."""
     with candado("ig_login"):
@@ -432,14 +482,21 @@ def _esperar_codigo(pg, ctx, hasta: float) -> str | None:
     return None
 
 
-def _esperar_resultado(pg, ctx, navs: list, antes: int, error_antes: str | None) -> None:
-    """Después de mandar el código, hasta que Instagram conteste: navega, inicia la sesión, saca el campo o muestra un
-    error nuevo. Como mucho ESPERA_RESULTADO: Instagram valida por detrás y desde un servidor a veces tarda."""
+def _ruta(url: str) -> str:
+    return str(url or "").split("#")[0].split("?")[0]
+
+
+def _esperar_resultado(pg, ctx, navs: list, antes: int, ruta_antes: str, error_antes: str | None) -> None:
+    """Después de mandar el código, hasta que Instagram conteste: carga otra página (o la app cambia de ruta), inicia
+    la sesión, saca el campo o muestra un error nuevo. Como mucho ESPERA_RESULTADO: Instagram valida por detrás y desde
+    un servidor a veces tarda. Un history.replaceState en la misma ruta no es una respuesta."""
     fin = time.time() + ESPERA_RESULTADO
     pg.wait_for_timeout(800)
     while time.time() < fin:
         latido()
-        if navs[0] != antes or not _visible(pg, CAMPO_CODIGO) or (_tiene_sesion(ctx) and not _en_paso(pg.url)):
+        _sigue()
+        if (navs[0] != antes or _ruta(pg.url) != ruta_antes or not _visible(pg, CAMPO_CODIGO)
+                or (_tiene_sesion(ctx) and not _en_paso(pg.url))):
             break
         if error_antes is None and _error(_texto(pg)):
             break
@@ -511,14 +568,16 @@ def _verificar(pg, ctx) -> int | None:
         return None
     if "/accounts/login" in url or not _tiene_sesion(ctx):
         raise ErrorLogin(M_NO_DEJA, "freno")
-    return _guardar_cookies(ctx)
+    with candado("ig_login"):                    # no guardar la sesión de una cuenta que cancelaron u olvidaron
+        _sigue()
+        return _guardar_cookies(ctx)
 
 
 def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
     """Completa el inicio de sesión en la página `pg`. Devuelve cuántas cookies guardó; ErrorLogin si no se pudo."""
     hasta = time.time() + TIEMPO_MAX
-    navs = [0]                                   # navegaciones de la página (también las de una app de una página)
-    pg.on("framenavigated", lambda fr: fr == pg.main_frame and navs.__setitem__(0, navs[0] + 1))
+    navs = [0]                                   # páginas cargadas (no cuenta un pushState/replaceState)
+    pg.on("domcontentloaded", lambda _pg: navs.__setitem__(0, navs[0] + 1))
     try:
         pg.goto(URL_LOGIN, wait_until="domcontentloaded", timeout=40000)
     except Exception as ex:
@@ -529,6 +588,7 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
         if time.time() > fin or (_tiene_sesion(ctx) and not _en_paso(pg.url)):
             break
         latido()
+        _sigue()
         _aceptar_cookies(pg)
         pg.wait_for_timeout(400)
     if not campo_usuario:
@@ -537,16 +597,18 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             if n is not None:
                 return n
         texto = _texto(pg)
-        raise ErrorLogin("No apareció el formulario de Instagram. " + (_error(texto) or texto[:160]))
+        err = _error(texto)
+        raise ErrorLogin("No apareció el formulario de Instagram. " + (err or texto[:160]), _tipo(err) if err else "pasajero")
     _aceptar_cookies(pg)
     _escribir(campo_usuario, usuario, "el usuario")
     campo_clave = _visible(pg, CLAVE)
     _escribir(campo_clave, clave, "la contraseña")
     _aceptar_cookies(pg)
     _apretar(pg, _visible(pg, "button[type='submit']") or _boton(pg, BOTON_ENTRAR), campo_clave)
-    enviado, codigos, sesion_desde, aprobar = time.time(), 0, 0.0, False
+    enviado, codigos, sesion_desde, aprobar, fui_yo = time.time(), 0, 0.0, 0.0, 0
     while time.time() < hasta:
         latido()
+        _sigue()
         pg.wait_for_timeout(1500)
         _aceptar_cookies(pg)
         if _tiene_sesion(ctx):
@@ -566,6 +628,8 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
         else:
             sesion_desde = 0.0
         texto = _texto(pg)
+        if CAPTCHA.search(texto) or _visible(pg, MARCO_CAPTCHA):
+            raise ErrorLogin(M_CAPTCHA, "freno")
         err = _error(texto)
         campo = _visible(pg, CAMPO_CODIGO)
         if campo:
@@ -589,10 +653,10 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
                 if _tiene_sesion(ctx):
                     continue
                 raise ErrorLogin("La página de Instagram cambió mientras esperaba el código. Iniciá sesión de nuevo.")
-            antes = navs[0]
+            antes, ruta_antes = navs[0], _ruta(pg.url)
             _escribir(campo, codigo, "el código")
             _apretar(pg, _visible(pg, "button[type='submit']") or _boton(pg, BOTON_CONFIRMAR), campo)
-            _esperar_resultado(pg, ctx, navs, antes, err)
+            _esperar_resultado(pg, ctx, navs, antes, ruta_antes, err)
             continue
         if err:
             raise ErrorLogin(err, _tipo(err))
@@ -604,13 +668,26 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
                 _aceptar_cookies(pg)
             pg.wait_for_timeout(2000)
             continue
+        fui = _boton(pg, BOTON_FUI_YO)
+        if fui and fui_yo < 3:                       # «¿Fuiste vos?» → «Fui yo»
+            fui_yo += 1
+            try:
+                fui.click(timeout=8000)
+            except Exception:
+                _aceptar_cookies(pg)
+            pg.wait_for_timeout(2000)
+            continue
+        if aprobar and time.time() > aprobar:       # nadie la aprobó: como un código que nadie escribió
+            raise ErrorLogin(M_SIN_APROBAR, "codigo")
         if not aprobar and PIDE_APROBAR.search(texto):   # «aprobalo desde la app»: no hay nada que escribir, solo esperar
-            aprobar = True
+            aprobar = time.time() + ESPERA_CODIGO
             _avance(estado="iniciando", mensaje=M_APROBAR)
             continue
         if (not codigos and "/accounts/login" in pg.url and _visible(pg, CLAVE)
                 and time.time() - enviado > SIN_RESPUESTA):
             raise ErrorLogin("Instagram no contestó al iniciar sesión. Probá de nuevo en un rato.")
+    if aprobar:
+        raise ErrorLogin(M_SIN_APROBAR, "codigo")
     raise ErrorLogin("Instagram no terminó el inicio de sesión. " + (_texto(pg)[:160] or ""))
 
 
@@ -623,16 +700,17 @@ def _final(**cambios) -> None:
 
 @manejador("ig_login")
 def _login(datos: dict) -> None:
-    e = estado()
-    auto = bool(e.get("auto")) if e.get("estado") in ACTIVOS else bool((datos or {}).get("auto"))
-    cred = credenciales()
-    if not cred:
-        _final(estado="error", mensaje="Faltan el usuario y la contraseña de la cuenta «para mirar».")
-        return
-    if e.get("estado") not in ACTIVOS and e.get("mensaje") == M_CANCELADO:
-        return                                   # lo cancelaron mientras esperaba en la cola
-    _secretos[:] = [cred[1]]
-    estado(estado="iniciando", mensaje="Iniciando sesión en Instagram…", auto=auto, desde=time.time())
+    with candado("ig_login"):
+        e = estado()
+        if e.get("estado") not in ACTIVOS:
+            return                           # lo cancelaron u olvidaron mientras esperaba, o es un trabajo que sobró
+        auto = bool(e.get("auto"))
+        cred = credenciales()
+        if not cred:
+            estado(estado="error", mensaje="Faltan el usuario y la contraseña de la cuenta «para mirar».")
+            return
+        _secretos[:] = [cred[1]]
+        estado(estado="iniciando", mensaje="Iniciando sesión en Instagram…", desde=time.time())
     try:
         from .buscador import _contexto, _playwright, abrir
         sync_playwright = _playwright()
@@ -643,20 +721,24 @@ def _login(datos: dict) -> None:
             pg = ctx.new_page()
             try:
                 n = hacer_login(pg, ctx, *cred)
+            except ErrorLogin as ex:
+                if ex.tipo == "cancelado" and _tiene_sesion(ctx):
+                    _borrar_sesion_vieja(ctx)    # entró justo cuando la cancelaban: que no quede en el perfil
+                raise
             finally:
                 try:
                     pg.close()
                 except Exception:
                     pass
         _final(estado="listo", mensaje=f"Sesión iniciada como @{cred[0]} ({n} cookies).", bloqueado=False,
-               espera_hasta=0)
+               espera_hasta=0, ultimo_auto=time.time())   # recién iniciada: el automático no la pisa por 6 h
         log.info("sesión de Instagram iniciada (%s cookies)", n)
     except ErrorLogin as ex:
         if ex.tipo == "cancelado":
             return
         cambios = {"estado": "error", "mensaje": str(ex)}
         if ex.tipo == "definitivo" or (auto and ex.tipo == "codigo"):
-            cambios["bloqueado"] = True      # hace falta una persona: no se reintenta solo
+            cambios["bloqueado"] = ex.tipo   # hace falta una persona: no se reintenta solo
         if ex.tipo == "freno":
             cambios["espera_hasta"] = time.time() + PAUSA_SI_FRENA
         _final(**cambios)

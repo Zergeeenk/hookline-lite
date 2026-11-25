@@ -270,6 +270,16 @@ def cookies_ytdlp():
         yield str(copia)
 
 
+def _sesion_guardada(red: str) -> str:
+    """El valor de la cookie de sesión de esa red en cookies.txt («» si no hay)."""
+    try:
+        from .buscador import SESION_DE, _red, cookies_guardadas
+        return next((c["value"] for c in cookies_guardadas() if _red(c["domain"]) == red
+                     and c["name"] == SESION_DE[red]), "")
+    except Exception:
+        return ""
+
+
 def _hay_sesion(link: str) -> bool:
     from .buscador import estado_sesion
     try:
@@ -285,8 +295,11 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> s
     ig = "instagram.com" in str(link)
     red = "Instagram" if ig else "TikTok" if "tiktok.com" in str(link) else ""
     if "no longer valid" in txt:
-        return (f"La sesión de {red or 'la cuenta para mirar'} venció (la cerraron o expiró). Iniciá sesión de nuevo en "
-                "el navegador, exportá las cookies y cargalas en Memes → «Cargar sesión de Instagram/TikTok».")
+        if ig:
+            return ("La sesión de Instagram venció (la cerraron o expiró). Si guardaste usuario y contraseña en Memes → "
+                    "«Sesión de Instagram», se vuelve a iniciar sola; si no, iniciá sesión ahí.")
+        return (f"La sesión de {red or 'la cuenta para mirar'} venció (la cerraron o expiró). Cargá las cookies de nuevo "
+                "en Memes → «Sesión de Instagram» → «Avanzado».")
     if "photo" in txt:
         return "Ese link es de fotos (no video): sacales captura y subilas."
     if "pinterest." in str(link) or "pin.it/" in str(link):
@@ -298,8 +311,11 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> s
         if _hay_sesion(link):
             return (f"{red} no dio ese video ni con la sesión cargada: puede ser de fotos, privado o borrado. Abrilo en "
                     "el navegador; si es un video público, subilo con «Subir video».")
-        return (f"{red} no da los videos sin sesión. Cargá la sesión de la cuenta «para mirar» (Memes → «Cargar sesión "
-                "de Instagram/TikTok») o subilo con el botón «Subir video».")
+        if ig:
+            return ("Instagram no da los videos sin sesión. Iniciá sesión con la cuenta «para mirar» en Memes → «Sesión "
+                    "de Instagram», o subilo con el botón «Subir video».")
+        return (f"{red} no da los videos sin sesión. Cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado», o "
+                "subilo con el botón «Subir video».")
     if "private" in txt:
         return "Ese video es privado: subilo con el botón «Subir video»."
     return "No se pudo bajar. Fijate que el link sea de un video público."
@@ -343,6 +359,8 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             "noplaylist": True, "quiet": True,
             "no_warnings": True, "noprogress": True, "logger": log_y, "ffmpeg_location": medios.ffmpeg(),
             "socket_timeout": 20, "retries": 2}
+    red = "tiktok" if "tiktok.com" in link else "instagram"
+    sesion_antes = _sesion_guardada(red)
     try:
         with cookies_ytdlp() as ck:
             if ck:
@@ -357,11 +375,12 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
                 video = _sumar_audio_aparte(yt_dlp, info, video, opts, log_y) or video
     except Exception as ex:
         log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
-        if any("no longer valid" in a.lower() for a in log_y.avisos):
+        # solo si la sesión que se usó sigue siendo la guardada: si mientras tanto cargaron o iniciaron otra, el
+        # error es de la vieja y la nueva no venció
+        if any("no longer valid" in a.lower() for a in log_y.avisos) and _sesion_guardada(red) == sesion_antes:
             try:
                 from .buscador import marcar_sesion
-                marcar_sesion("tiktok" if "tiktok.com" in link else "instagram", True,
-                              "Venció al bajar un video (la cerraron o expiró)")
+                marcar_sesion(red, True, "Venció al bajar un video (la cerraron o expiró)")
             except Exception:
                 pass
         raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None

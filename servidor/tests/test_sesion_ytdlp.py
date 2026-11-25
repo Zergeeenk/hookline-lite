@@ -49,10 +49,32 @@ def test_ytdlp_no_le_borra_la_sesion_a_ella_y_dice_que_vencio(ytdlp, tmp_path):
     assert buscador.estado_sesion()["instagram"]
     with pytest.raises(ValueError) as e:
         material.bajar_video("https://www.instagram.com/p/Df8qGyNuD65/?dmpr=x", tmp_path)
-    assert "venció" in str(e.value) and "Cargar sesión" in str(e.value)
+    assert "venció" in str(e.value) and "Sesión de Instagram" in str(e.value)
     assert _YDLQueBorra.usados[0] and not _YDLQueBorra.usados[0].endswith("navegador/cookies.txt")   # una copia
     assert not Path(_YDLQueBorra.usados[0]).exists()                       # y la copia se borra
     assert buscador.estado_sesion()["instagram"]                           # el archivo de ella, intacto
+
+
+class _YDLMientrasCarganOtra(_YDLQueBorra):
+    """Mientras baja con la sesión vieja, ella inicia sesión de nuevo (cookies nuevas); después yt-dlp falla con la vieja."""
+
+    def extract_info(self, link, download=False):
+        from hookline.servicios import buscador
+        buscador.importar_cookies("sessionid=222%3Anueva%3A33; csrftoken=tok2; ds_user_id=222")
+        return super().extract_info(link, download)
+
+
+def test_una_descarga_con_la_sesion_vieja_no_marca_vencida_la_nueva(ytdlp, tmp_path, monkeypatch):
+    from hookline.servicios import buscador, material
+    buscador.importar_cookies(HEADER)
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=_YDLMientrasCarganOtra))
+    with pytest.raises(ValueError):
+        material.bajar_video("https://www.instagram.com/reel/AAA111/", tmp_path)
+    assert not buscador.sesiones()["instagram"]["vencida"]                 # la nueva sigue sana
+    monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=_YDLQueBorra))
+    with pytest.raises(ValueError):
+        material.bajar_video("https://www.instagram.com/reel/AAA111/", tmp_path)
+    assert buscador.sesiones()["instagram"]["vencida"]                     # la misma que falló: sí venció
 
 
 def test_fichas_tampoco_le_borran_la_sesion(ytdlp):
@@ -83,7 +105,7 @@ def test_sin_cookies_no_pasa_cookiefile(ytdlp, tmp_path):
     with pytest.raises(ValueError) as e:
         material.bajar_video("https://www.instagram.com/reel/AAA/", tmp_path)
     assert _YDLQueBorra.usados == [None]
-    assert "Cargar sesión" in str(e.value)
+    assert "Sesión de Instagram" in str(e.value)
 
 
 def test_motivo_de_pinterest_no_pide_sesion():

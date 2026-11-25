@@ -466,6 +466,12 @@ def importar_cookies(texto: str) -> int:
             for r in redes:
                 d[r] = {"vencida": False, "motivo": "", "cargada_el": _hora("%d/%m %H:%M"), "visto": ""}
             guardar_ajuste("sesiones_redes", d)
+    if any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in nuevas):
+        try:                             # el error viejo del inicio de sesión con usuario y contraseña ya no aplica
+            from . import sesion_ig
+            sesion_ig.cookies_cargadas()
+        except Exception as ex:
+            log.info("no pude actualizar el estado del inicio de sesión de Instagram: %s", type(ex).__name__)
     if _abierto():                       # si el navegador del buscador ya está abierto en esta máquina, también
         try:
             sync_playwright = _playwright()
@@ -631,8 +637,10 @@ def _buscar(_d: dict) -> None:
                 except Exception:
                     continue
             pg.close()
-        aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá la sesión de nuevo en Memes → «Cargar "
-                  "sesión de Instagram/TikTok» (cookies exportadas con la cuenta iniciada)." if sin_sesion else "")
+        como = (["Instagram: iniciá sesión en Memes → «Sesión de Instagram» (si guardaste usuario y contraseña, se "
+                 "vuelve a iniciar sola)"] if "Instagram" in sin_sesion else []) + \
+               (["TikTok: cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado»"] if "TikTok" in sin_sesion else [])
+        aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión. " + "; ".join(como) + "." if sin_sesion else "")
         if problemas:
             aviso_ += " " + "; ".join(dict.fromkeys(problemas))[:300] + "."
         if not buenos:

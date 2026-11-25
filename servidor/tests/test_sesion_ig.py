@@ -37,10 +37,15 @@ CARTEL = ("<script>document.querySelector('[name=password]').addEventListener('i
 SPA_2FA = ("<p>Enter the 6-digit code we sent to your number ending in 34.</p>"
            '<form id="f"><input name="verificationCode" aria-label="Security Code"><button type="submit">Confirm'
            '</button></form><p id="e"></p><script>document.getElementById("f").onsubmit = async ev => {'
-           'ev.preventDefault(); const c = document.querySelector("[name=verificationCode]").value;'
+           'ev.preventDefault(); if (window.REEMPLAZAR) history.replaceState({paso: 1}, "", location.href);'
+           'const c = document.querySelector("[name=verificationCode]").value;'
            'const r = await fetch("/api/2fa", {method: "POST", body: "c=" + c}); const j = await r.json();'
            'if (j.ok) location.href = "/accounts/onetap/?next=%2F";'
            'else document.getElementById("e").textContent = "Please check the security code and try again."; };</script>')
+FUI_YO = ("<h2>Was this you?</h2><p>We noticed a login attempt from a new device.</p>"
+          '<form method="post" action="/challenge/fuiyo/"><button type="submit">This Was Me</button></form>')
+CAPTCHA = ("<h2>Help us confirm you're human</h2><iframe src='/recaptcha/anchor' title='reCAPTCHA' "
+           "style='width:300px;height:80px'></iframe>")
 APROBAR = ("<h2>Check your notifications on another device</h2><p>Approve this login to continue.</p><script>"
            "setInterval(async () => { const j = await (await fetch('/api/aprobado', {method: 'POST'})).json();"
            "if (j.ok) location.href = '/'; }, 500);</script>")
@@ -75,7 +80,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
         if ruta == "/accounts/login/":
             error = ("<p id='slfErrorAlert'>Sorry, your password was incorrect. Please double-check your password.</p>"
                      if "error=1" in qs else
-                     "<p>Please wait a few minutes before you try again.</p>" if "error=esperar" in qs else "")
+                     "<p>Please wait a few minutes before you try again.</p>" if "error=esperar" in qs else
+                     "<p>Sorry, there was a problem with your request.</p>" if "error=solicitud" in qs else "")
             return self._responder(_pagina(self._login_html() + error))
         if ruta == "/accounts/login/two_factor":
             error = "<p>This code isn't valid. Please check the code and try again.</p>" if "error=1" in qs else ""
@@ -85,7 +91,12 @@ class _IG(http.server.BaseHTTPRequestHandler):
                   'aria-label="Security Code"%s><button type="submit">Confirm</button></form>'
                 % (" disabled" if self.op.get("codigo_deshabilitado") else "")))
         if ruta == "/accounts/login/two_factor_spa":
-            return self._responder(_pagina(SPA_2FA))
+            return self._responder(_pagina(("<script>window.REEMPLAZAR = 1</script>" if self.op.get("replace") else "")
+                                           + SPA_2FA))
+        if ruta == "/challenge/fuiyo/":
+            return self._responder(_pagina(FUI_YO))
+        if ruta == "/challenge/captcha/":
+            return self._responder(_pagina(CAPTCHA))
         if ruta == "/accounts/login/aprobar":
             return self._responder(_pagina(APROBAR))
         if ruta == "/accounts/onetap/":
@@ -120,7 +131,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
                 return self._responder(ir="/accounts/login/?error=1")
             destinos = {"dosfa": "/accounts/login/two_factor?next=%2F", "reto": "/challenge/inicio/",
                         "spa": "/accounts/login/two_factor_spa?next=%2F", "aprobar": "/accounts/login/aprobar",
-                        "frenada": "/accounts/login/?error=esperar"}
+                        "frenada": "/accounts/login/?error=esperar", "problema": "/accounts/login/?error=solicitud",
+                        "fuiyo": "/challenge/fuiyo/", "captcha": "/challenge/captcha/"}
             if usuario in destinos:
                 return self._responder(ir=destinos[usuario])
             if usuario == "suspendida":            # Instagram deja entrar y manda a «suspendimos tu cuenta»
@@ -138,6 +150,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
             ok = bool(self.op.get("aprobado"))
             return self._responder(json.dumps({"ok": ok}).encode(), sesion="aprobar" if ok else "",
                                    tipo="application/json")
+        if self.path == "/challenge/fuiyo/":
+            return self._responder(ir="/", sesion="fuiyo")
         if self.path == "/challenge/enviar":
             return self._responder(ir="/challenge/codigo/")
         if self.path == "/challenge/codigo/":
@@ -231,7 +245,8 @@ def _terminar_logins() -> None:
 def test_login_directo_guarda_la_sesion(ig):
     from hookline.servicios import buscador
     ig.guardar_credenciales("@bien", "clave-buena")
-    ig._login({})
+    ig.iniciar()
+    _worker()
     p = ig.publico()
     assert p["estado"] == "listo" and "@bien" in p["mensaje"], p
     assert buscador.estado_sesion()["instagram"]
@@ -364,7 +379,8 @@ def test_si_instagram_pide_esperar_no_se_insiste_enseguida(ig):
 def test_cuenta_suspendida_no_queda_como_iniciada(ig):
     from hookline.servicios import buscador
     ig.guardar_credenciales("suspendida", "clave-buena")
-    ig._login({})
+    ig.iniciar()
+    _worker()
     p = ig.publico()
     assert p["estado"] == "error" and "suspendió" in p["mensaje"], p
     assert not buscador.estado_sesion()["instagram"]
@@ -376,7 +392,8 @@ def test_el_cartel_de_cookies_no_tapa_el_boton(ig):
     _IG.op["cartel"] = True                                       # aparece recién al escribir la contraseña
     ig.guardar_credenciales("bien", "clave-buena")
     t0 = time.time()
-    ig._login({})
+    ig.iniciar()
+    _worker()
     assert ig.publico()["estado"] == "listo", ig.publico()
     assert time.time() - t0 < 25
 
@@ -385,7 +402,8 @@ def test_el_cartel_de_cookies_no_tapa_el_boton(ig):
 def test_campo_de_usuario_escondido_antes_del_visible(ig):
     _IG.op["escondido"] = True
     ig.guardar_credenciales("bien", "clave-buena")
-    ig._login({})
+    ig.iniciar()
+    _worker()
     assert ig.publico()["estado"] == "listo", ig.publico()
 
 
@@ -401,7 +419,8 @@ def test_conserva_el_dispositivo_y_las_otras_redes(ig):
                          {"name": "sessionid", "value": "sesion-vencida", "domain": HOST, "path": "/"},
                          {"name": "sid_tt", "value": "de-tiktok", "domain": OTRA, "path": "/"}])
     ig.guardar_credenciales("bien", "clave-buena")
-    ig._login({})
+    ig.iniciar()
+    _worker()
     assert ig.publico()["estado"] == "listo", ig.publico()
     enviada = _IG.vistos["cookie_login"]                          # Instagram ve el mismo dispositivo, sin la sesión vieja
     assert "mid=dispositivo-viejo" in enviada and "sesion-vencida" not in enviada, enviada
@@ -470,9 +489,87 @@ def test_olvidar_la_cuenta_mientras_espera_el_codigo(ig):
 
 
 @con_chrome
+def test_cancelar_mientras_espera_la_aprobacion_desde_la_app(ig):
+    from hookline.servicios import buscador
+    ig.guardar_credenciales("aprobar", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    fin = time.time() + 60
+    while ig.publico()["mensaje"] != ig.M_APROBAR:
+        assert time.time() < fin, ig.publico()
+        time.sleep(0.3)
+    t0 = time.time()
+    ig.cancelar()
+    h.join(20)
+    assert not h.is_alive() and time.time() - t0 < 15        # corta enseguida, no a los 8 min
+    _IG.op["aprobado"] = True                                # la aprueban tarde: no se guarda nada
+    time.sleep(2)
+    assert ig.publico()["estado"] == "parado" and not buscador.estado_sesion()["instagram"]
+    assert ig.iniciar()["estado"] == "iniciando"
+
+
+@con_chrome
+def test_una_aprobacion_que_nadie_hace_frena_el_reintento_automatico(ig, monkeypatch):
+    monkeypatch.setattr(ig, "ESPERA_CODIGO", 4)
+    ig.guardar_credenciales("aprobar", "clave-buena")
+    ig.iniciar(auto=True)
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and p["mensaje"] == ig.M_SIN_APROBAR, p
+    assert ig.estado().get("bloqueado")
+    ig.estado(ultimo_auto=0)
+    assert not ig.reintentar_solo()
+
+
+@con_chrome
+def test_un_replace_state_mientras_valida_no_hace_pedir_otro_codigo(ig):
+    _IG.op.update(demora=6, replace=True)
+    ig.guardar_credenciales("spa", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    _esperar(ig, "pide_codigo")
+    ig.dar_codigo("123456")
+    vistos = _seguir(ig, h)
+    assert ig.publico()["estado"] == "listo" and "pide_codigo" not in vistos, (vistos, ig.publico())
+
+
+@con_chrome
+def test_fuiste_vos_se_contesta_fui_yo(ig):
+    ig.guardar_credenciales("fuiyo", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+@pytest.mark.parametrize("usuario,mensaje", [("captcha", "captcha"), ("problema", "no dejó iniciar sesión")])
+def test_captcha_y_problema_con_la_solicitud_se_explican_enseguida_y_frenan(ig, usuario, mensaje):
+    ig.guardar_credenciales(usuario, "clave-buena")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and mensaje in p["mensaje"], p
+    assert time.time() - t0 < 30                             # no espera los 45 s de «no contestó» ni los 8 min
+    assert float(ig.estado().get("espera_hasta") or 0) > time.time()
+
+
+@con_chrome
+def test_un_vencio_atrasado_no_pisa_la_sesion_recien_iniciada(ig):
+    from hookline.servicios import buscador
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo"
+    buscador.marcar_sesion("instagram", True, "Venció al bajar un video de Instagram")   # una descarga con las viejas
+    assert _ig_logins(pendientes=True) == 0
+
+
+@con_chrome
 def test_contrasena_incorrecta(ig):
     ig.guardar_credenciales("bien", "otra-clave")
-    ig._login({})
+    ig.iniciar()
+    _worker()
     p = ig.publico()
     assert p["estado"] == "error" and "contraseña no es correcta" in p["mensaje"], p
 
@@ -482,10 +579,15 @@ PANEL = """<!doctype html><html><body><div id="contenido"></div><script>
 let CP = {sesion_ig: {estado: "pide_codigo", mensaje: "Enter the 6-digit code we sent to your number ending in 12.",
           usuario: "para_mirar", tiene_credenciales: true}, sesiones: {}};
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+class SinSesion extends Error {}
 const icn = () => ""; window.TOASTS = []; const toast = m => window.TOASTS.push(m); const fallo = e => toast("fallo: " + e);
 const render = () => {}; const cargarCopias = () => {}; window.LLAMADAS = [];
+window.FALLAR = 0; window.VACIO = false; window.LENTO = 60;
 async function api(url, body) { window.LLAMADAS.push([url, body || null]);
-  await new Promise(r => setTimeout(r, 60));
+  await new Promise(r => setTimeout(r, body && body.op === "ig_codigo" ? window.LENTO : 60));
+  if (url === "/api/sesion_ig" && window.FALLAR > 0) { window.FALLAR--; throw new Error("502 Bad Gateway"); }
+  if (url === "/api/sesion_ig" && window.SIN_SESION) throw new SinSesion("Iniciá sesión para seguir");
+  if (url === "/api/sesion_ig" && window.VACIO) return {sesion_ig: {}, sesiones: {}};
   if (body && body.op === "ig_codigo") CP.sesion_ig = {...CP.sesion_ig, estado: "iniciando", mensaje: "Probando el código…"};
   if (body && body.op === "ig_cancelar") CP.sesion_ig = {...CP.sesion_ig, estado: "parado", mensaje: "Se canceló el inicio de sesión."};
   return {sesion_ig: CP.sesion_ig, sesiones: {}}; }
@@ -529,6 +631,59 @@ def test_el_codigo_no_se_borra_mientras_el_panel_consulta(panel):
 
 
 @con_chrome
+def test_el_panel_sigue_consultando_si_falla_una_consulta(panel):
+    pg = panel
+    pg.evaluate("CP.sesion_ig = {estado: 'iniciando', mensaje: 'Iniciando sesión en Instagram…', usuario: 'para_mirar',"
+                " tiene_credenciales: true}; window.FALLAR = 2")                 # un deploy: dos consultas fallan
+    pg.evaluate("cargarCookies()")
+    pg.wait_for_timeout(1500)
+    pg.evaluate("CP.sesion_ig = {...CP.sesion_ig, estado: 'pide_codigo', mensaje: 'Enter the code we sent.'}")
+    pg.wait_for_selector("#igCodigo", timeout=15000)                            # aparece igual
+
+
+@con_chrome
+def test_si_se_cerro_la_sesion_del_panel_deja_de_consultar(panel):
+    pg = panel
+    pg.evaluate("window.SIN_SESION = true; cargarCookies()")
+    pg.wait_for_timeout(6000)
+    n = pg.evaluate("window.LLAMADAS.filter(l => l[0] === '/api/sesion_ig').length")
+    assert n == 1, n                                                     # ya le pide entrar: no insiste
+
+
+@con_chrome
+def test_una_respuesta_sin_estado_no_borra_lo_que_escriben(panel):
+    pg = panel
+    pg.evaluate("cargarCookies()")
+    pg.wait_for_selector("#igCodigo")
+    pg.evaluate("window.VACIO = true")                                           # la API contestó {} un rato
+    pg.keyboard.type("1234", delay=700)
+    assert pg.input_value("#igCodigo") == "1234" and pg.evaluate("document.activeElement.id") == "igCodigo"
+
+
+@con_chrome
+def test_doble_enter_manda_el_codigo_una_sola_vez(panel):
+    pg = panel
+    pg.evaluate("window.LENTO = 600; cargarCookies()")
+    pg.wait_for_selector("#igCodigo")
+    pg.fill("#igCodigo", "123456")
+    pg.keyboard.press("Enter")
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(1200)
+    assert pg.evaluate("window.LLAMADAS.filter(l => l[1] && l[1].op === 'ig_codigo').length") == 1
+    assert not any("fallo" in t for t in pg.evaluate("window.TOASTS"))
+
+
+@con_chrome
+def test_se_puede_cancelar_mientras_inicia(panel):
+    pg = panel
+    pg.evaluate("CP.sesion_ig = {estado: 'iniciando', mensaje: 'Instagram pide aprobar el inicio de sesión desde la app.',"
+                " usuario: 'para_mirar', tiene_credenciales: true}; cargarCookies()")
+    pg.click("[data-igcancelar]")
+    pg.wait_for_function("document.querySelector('#igEstado').innerText.includes('canceló')")
+    assert pg.evaluate("window.LLAMADAS.some(l => l[1] && l[1].op === 'ig_cancelar')")
+
+
+@con_chrome
 def test_el_panel_no_manda_un_codigo_vacio_y_se_puede_cancelar(panel):
     pg = panel
     pg.evaluate("cargarCookies()")
@@ -557,8 +712,8 @@ def test_la_contrasena_queda_cifrada_y_no_sale_por_la_api(cliente_api):
     for url in ("/api/sesion_ig", "/api/copias", "/api/ajustes"):
         assert "secreta-123456" not in cliente_api.get(url).text, url
     p = cliente_api.get("/api/sesion_ig").json()["sesion_ig"]
-    assert p == {"estado": "iniciando", "mensaje": sesion_ig.M_EN_ESPERA, "usuario": "para_mirar",   # nadie lo tomó aún
-                 "tiene_credenciales": True, "auto": False}
+    assert p == {"estado": "iniciando", "mensaje": "Iniciando sesión en Instagram…", "usuario": "para_mirar",
+                 "tiene_credenciales": True, "auto": False}               # en cola, pero sin una búsqueda delante
     r = cliente_api.post("/api/copiar", json={"op": "ig_login", "usuario": "para_mirar"})   # ya está en marcha
     assert r.status_code == 400 and "Ya está iniciando" in r.json()["error"]
     r = cliente_api.post("/api/copiar", json={"op": "ig_codigo", "codigo": "123456"})       # no pidió código
@@ -679,6 +834,57 @@ def test_un_codigo_que_nadie_escribio_frena_el_reintento_automatico(ig, monkeypa
     assert not ig.estado().get("bloqueado")
 
 
+def test_un_trabajo_que_sobro_no_corre(monkeypatch):
+    from hookline import trabajos
+    from hookline.servicios import buscador
+    from hookline.servicios import sesion_ig as s
+
+    def no(*a, **k):
+        raise AssertionError("no tenía que abrir el navegador")
+    monkeypatch.setattr(buscador, "abrir", no)
+    s.guardar_credenciales("para_mirar", "clave-larga")
+    s.estado(estado="listo", mensaje="Sesión iniciada como @para_mirar (3 cookies).")
+    trabajos.encolar("ig_login", {"auto": False}, clave="ig_login:viejo")    # como los dejaba la versión anterior
+    _worker()
+    assert s.publico()["estado"] == "listo"
+
+
+def test_en_cola_sin_busqueda_delante_dice_que_espera_al_servidor():
+    from hookline.servicios import sesion_ig as s
+    s.guardar_credenciales("para_mirar", "clave-larga")
+    assert s.iniciar()["mensaje"] == "Iniciando sesión en Instagram…"   # recién encolado
+    s.guardar_ajuste(s.ESTADO, {**s.estado(), "desde": time.time() - 60})
+    assert s.publico()["mensaje"] == s.M_ESPERANDO                       # nadie lo toma (un deploy): lo dice
+
+
+def test_iniciar_mientras_se_corta_el_anterior():
+    from hookline import trabajos
+    from hookline.servicios import sesion_ig as s
+    s.guardar_credenciales("para_mirar", "clave-larga")
+    s.iniciar()
+    trabajos.tomar("w:1", ["ig_login"])                       # el worker lo está corriendo…
+    s.cancelar()                                               # …y lo cancelan: todavía no lo soltó
+    with pytest.raises(ValueError, match="cortando el intento anterior"):
+        s.iniciar()
+
+
+def test_cargar_cookies_a_mano_limpia_el_error_del_login(monkeypatch):
+    from hookline.servicios import buscador
+    from hookline.servicios import sesion_ig as s
+    monkeypatch.setattr(buscador, "_abierto", lambda: False)
+    s.guardar_credenciales("para_mirar", "clave-larga")
+    s.estado(estado="error", mensaje=s.M_SIN_CODIGO, bloqueado="codigo")
+    buscador.importar_cookies("sessionid=1%3Aa%3A2; csrftoken=t")
+    p = s.publico()
+    assert p["estado"] == "parado" and not p["mensaje"] and not s.estado().get("bloqueado"), p
+    s.estado(estado="error", mensaje=s.M_CLAVE, bloqueado="definitivo")      # la contraseña guardada sigue mal
+    buscador.importar_cookies("sessionid=1%3Ab%3A2; csrftoken=t")
+    assert s.publico()["estado"] == "parado" and s.estado().get("bloqueado") == "definitivo"
+    s.estado(estado="error", mensaje=s.M_SIN_CODIGO, bloqueado="codigo")
+    buscador.importar_cookies("sid_tt=x; sessionid=tt; ttwid=1")              # de TikTok: no toca lo de Instagram
+    assert s.publico()["estado"] == "error"
+
+
 def test_codigo_solo_numeros():
     from hookline.servicios import sesion_ig
     sesion_ig.guardar_credenciales("x", "clave-larga")
@@ -708,6 +914,10 @@ def test_errores_de_instagram_en_criollo():
              "Hubo un problema al iniciar sesión en Instagram.": "no dejó iniciar sesión",
              "This code isn't valid. Please check the code and try again.": "código no es correcto",
              "Please check the security code and try again.": "código no es correcto",
+             "Sorry, there was a problem with your request.": "no dejó iniciar sesión",
+             "We couldn't connect to Instagram. Make sure you're connected to the internet.": "no dejó iniciar sesión",
+             "No pudimos conectarnos a Instagram.": "no dejó iniciar sesión",
+             "Se produjo un error con tu solicitud.": "no dejó iniciar sesión",
              "Your account has been disabled for violating our terms.": "suspendió esa cuenta",
              "We suspended your account": "suspendió esa cuenta",
              "Enter the 6-digit code we sent to your number ending in 12.": None}
