@@ -48,6 +48,10 @@ ERRORES = [
      "El código no es correcto. Iniciá sesión de nuevo y escribí el último código que te llegó."),
     (re.compile(r"your account has been (disabled|suspended)|tu cuenta (fue|ha sido) (desactivada|suspendida)", re.I),
      "Instagram suspendió esa cuenta. Usá otra cuenta «para mirar»."),
+    (re.compile(r"(there was a|we had a) problem logging you in|problem logging you into instagram|"
+                r"hubo un problema al iniciar (tu )?sesión|try again soon|inténtalo de nuevo (más tarde|pronto)", re.I),
+     "Instagram no dejó iniciar sesión desde el servidor en este momento. Probá de nuevo en un rato; si sigue, "
+     "cargá la sesión con cookies (en «Avanzado»)."),
 ]
 
 

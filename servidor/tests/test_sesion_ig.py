@@ -241,3 +241,21 @@ def test_un_inicio_de_sesion_cortado_se_puede_reintentar():
     sesion_ig.guardar_ajuste(sesion_ig.ESTADO, {**sesion_ig.estado(), "cuando": time.time() - 3600})
     assert sesion_ig.publico()["estado"] == "error"
     assert sesion_ig.iniciar()["estado"] == "iniciando"
+
+
+def test_errores_de_instagram_en_criollo():
+    from hookline.servicios import sesion_ig as s
+    casos = {"Sorry, your password was incorrect. Please double-check your password.": "contraseña no es correcta",
+             "Tu contraseña no es correcta. Compruébala.": "contraseña no es correcta",
+             "The username you entered doesn't belong to an account.": "usuario no existe",
+             "Please wait a few minutes before you try again.": "esperar unos minutos",
+             "There was a problem logging you into Instagram. Please try again soon.": "no dejó iniciar sesión",
+             "Hubo un problema al iniciar sesión en Instagram.": "no dejó iniciar sesión",
+             "This code isn't valid. Please check the code and try again.": "código no es correcto",
+             "Your account has been disabled for violating our terms.": "suspendió esa cuenta",
+             "Enter the 6-digit code we sent to your number ending in 12.": None}
+    for texto, espera in casos.items():
+        r = s._error(texto)
+        assert (r is None) if espera is None else (espera in r), (texto, r)
+    assert s._pista("Hola. Enter the 6-digit code we sent to f***@gmail.com. Gracias") == \
+        "Enter the 6-digit code we sent to f***@gmail.com."
