@@ -52,6 +52,7 @@ def _opcional(nombre: str):
 
 
 svc_material, svc_fabrica, svc_buscador, svc_repartir = (_opcional(n) for n in ("material", "fabrica", "buscador", "repartir"))
+svc_sesion_ig = _opcional("sesion_ig")
 
 
 def _mod(m, nombre):
@@ -486,7 +487,27 @@ def copias(q: Quien = requerir()):
     return {"items": f.listar(), "opciones": f.opciones(), "links": f.links(),
             "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."},
             "fuentes_busqueda": svc_buscador.fuentes() if svc_buscador else [],
-            "sesiones": svc_buscador.sesiones() if svc_buscador else {}, "emojis_v": f.pack_emojis()["version"]}
+            "sesiones": svc_buscador.sesiones() if svc_buscador else {}, "emojis_v": f.pack_emojis()["version"],
+            "sesion_ig": _sesion_ig_publico()}
+
+
+def _sesion_ig_publico() -> dict:
+    """Que un problema con el inicio de sesión de Instagram (por ejemplo, otra HOOKLINE_CLAVE_SECRETA) no tire toda la
+    página de Memes."""
+    if not svc_sesion_ig:
+        return {}
+    try:
+        return svc_sesion_ig.publico()
+    except Exception as ex:
+        log.warning("estado del inicio de sesión de Instagram: %s", type(ex).__name__)
+        return {}
+
+
+@app.get("/api/sesion_ig")
+def sesion_ig_estado(q: Quien = requerir()):
+    """El inicio de sesión de Instagram con usuario y contraseña (el panel lo consulta mientras corre)."""
+    _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+    return {"sesion_ig": _sesion_ig_publico(), "sesiones": svc_buscador.sesiones() if svc_buscador else {}}
 
 
 @app.get("/api/copia_capa")
@@ -580,6 +601,18 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
     if op == "borrar_sticker":
         f.borrar_sticker(str(d.get("archivo") or ""))
         return {"ok": True}
+    if op == "ig_login":                 # usuario y contraseña de la cuenta «para mirar» (o los ya guardados)
+        s = _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+        s.preparar(d.get("usuario"), d.get("clave"))
+        return {"ok": True, "sesion_ig": s.iniciar()}
+    if op == "ig_codigo":
+        return {"ok": True, "sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").dar_codigo(d.get("codigo"))}
+    if op == "ig_cancelar":
+        return {"ok": True, "sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").cancelar()}
+    if op == "ig_olvidar":
+        s = _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+        s.olvidar()
+        return {"ok": True, "sesion_ig": s.publico()}
     if op == "importar_cookies":
         b = _mod(svc_buscador, "buscador")
         n = b.importar_cookies(str(d.get("texto") or "")[:200_000])

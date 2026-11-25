@@ -292,6 +292,7 @@ def _chrome() -> str:
 
 # Chrome sin ventana se presenta como «HeadlessChrome» y Instagram/TikTok lo tratan como robot (piden login o no muestran
 # nada): se presenta como un Chrome común de escritorio.
+ARGS_EXTRA: list[str] = []          # argumentos de Chrome que suman los tests (ej. --host-resolver-rules)
 AGENTE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
           "Chrome/142.0.0.0 Safari/537.36")
 
@@ -324,7 +325,7 @@ def abrir() -> None:
                                  "--no-first-run", "--no-default-browser-check", "--headless=new", "--no-sandbox",
                                  "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--mute-audio",
                                  f"--user-agent={AGENTE}", "--lang=es-AR",
-                                 "--disable-blink-features=AutomationControlled", "about:blank"],
+                                 "--disable-blink-features=AutomationControlled", *ARGS_EXTRA, "about:blank"],
                                 stdout=salida, stderr=salida, start_new_session=True)
     for _ in range(60):
         if _abierto():
@@ -465,6 +466,12 @@ def importar_cookies(texto: str) -> int:
             for r in redes:
                 d[r] = {"vencida": False, "motivo": "", "cargada_el": _hora("%d/%m %H:%M"), "visto": ""}
             guardar_ajuste("sesiones_redes", d)
+    if any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in nuevas):
+        try:                             # el error viejo del inicio de sesión con usuario y contraseña ya no aplica
+            from . import sesion_ig
+            sesion_ig.cookies_cargadas()
+        except Exception as ex:
+            log.info("no pude actualizar el estado del inicio de sesión de Instagram: %s", type(ex).__name__)
     if _abierto():                       # si el navegador del buscador ya está abierto en esta máquina, también
         try:
             sync_playwright = _playwright()
@@ -489,11 +496,17 @@ def marcar_sesion(red: str, vencida: bool, motivo: str = "") -> None:
     with candado("sesiones_redes"):
         d = dict(ajuste("sesiones_redes", {}) or {})
         r = dict(d.get(red) or {})
-        if bool(r.get("vencida")) == bool(vencida) and (not vencida or r.get("motivo") == motivo):
-            return
-        r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
-        d[red] = r
-        guardar_ajuste("sesiones_redes", d)
+        if not (bool(r.get("vencida")) == bool(vencida) and (not vencida or r.get("motivo") == motivo)):
+            r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
+            d[red] = r
+            guardar_ajuste("sesiones_redes", d)
+    if red == "instagram" and vencida:   # con usuario y contraseña guardados, se vuelve a iniciar sola (también si ya
+        # estaba marcada así: el tope de una vez cada 6 h y lo que necesita a una persona los pone reintentar_solo)
+        try:
+            from . import sesion_ig
+            sesion_ig.reintentar_solo()
+        except Exception as ex:
+            log.info("no pude reintentar la sesión de Instagram: %s", ex)
 
 
 def sesiones() -> dict:
@@ -624,8 +637,10 @@ def _buscar(_d: dict) -> None:
                 except Exception:
                     continue
             pg.close()
-        aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión: cargá la sesión de nuevo en Memes → «Cargar "
-                  "sesión de Instagram/TikTok» (cookies exportadas con la cuenta iniciada)." if sin_sesion else "")
+        como = (["Instagram: iniciá sesión en Memes → «Sesión de Instagram» (si guardaste usuario y contraseña, se "
+                 "vuelve a iniciar sola)"] if "Instagram" in sin_sesion else []) + \
+               (["TikTok: cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado»"] if "TikTok" in sin_sesion else [])
+        aviso_ = (f" {' y '.join(sorted(sin_sesion))} pide iniciar sesión. " + "; ".join(como) + "." if sin_sesion else "")
         if problemas:
             aviso_ += " " + "; ".join(dict.fromkeys(problemas))[:300] + "."
         if not buenos:

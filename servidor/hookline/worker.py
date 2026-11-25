@@ -23,7 +23,8 @@ from .trabajos import encolar, manejador
 log = logging.getLogger("hookline.worker")
 
 GRUPOS = {"publicar": ("publicar",), "render": ("render", "preparar_copia"),
-          "descargas": ("descargar_ejemplo", "bajar_material", "fichas", "pyro_material"), "buscador": ("buscar",)}
+          "descargas": ("descargar_ejemplo", "bajar_material", "fichas", "pyro_material"),
+          "buscador": ("buscar", "ig_login")}     # comparten el navegador del buscador: de a uno
 PERIODO_RAPIDO = 4       # recoger resultados de Claude Code, avanzar encargos, escanear la bandeja
 PERIODO_COLA = 30
 
@@ -32,7 +33,7 @@ def _importar_manejadores() -> None:
     """Registra todos los @manejador (los módulos de servicios se importan acá)."""
     from .ia import tareas  # noqa: F401
     from .servicios import comentarios, cuentas, jueces, noticias, piezas  # noqa: F401
-    for mod in ("material", "fabrica", "buscador", "repartir", "pyro"):
+    for mod in ("material", "fabrica", "buscador", "sesion_ig", "repartir", "pyro"):
         try:
             __import__(f"hookline.servicios.{mod}")
         except ImportError as ex:

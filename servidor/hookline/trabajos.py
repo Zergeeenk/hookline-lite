@@ -24,7 +24,8 @@ log = logging.getLogger("hookline.trabajos")
 
 MANEJADORES: dict[str, Callable[[dict], None]] = {}
 # cuánto tiempo un worker "tiene" un trabajo sin dar señales. Los trabajos largos renuevan la toma con latido().
-DURACION_TOMA = {"publicar": timedelta(minutes=20), "render": timedelta(minutes=45), "ia": timedelta(minutes=45)}
+DURACION_TOMA = {"publicar": timedelta(minutes=20), "render": timedelta(minutes=45), "ia": timedelta(minutes=45),
+                 "ig_login": timedelta(minutes=3)}   # late seguido: si el worker se muere, el panel lo sabe enseguida
 _actual: contextvars.ContextVar = contextvars.ContextVar("trabajo_actual", default=None)
 
 
