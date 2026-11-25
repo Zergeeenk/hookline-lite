@@ -52,6 +52,7 @@ def _opcional(nombre: str):
 
 
 svc_material, svc_fabrica, svc_buscador, svc_repartir = (_opcional(n) for n in ("material", "fabrica", "buscador", "repartir"))
+svc_sesion_ig = _opcional("sesion_ig")
 
 
 def _mod(m, nombre):
@@ -486,7 +487,15 @@ def copias(q: Quien = requerir()):
     return {"items": f.listar(), "opciones": f.opciones(), "links": f.links(),
             "busqueda": svc_buscador.estado() if svc_buscador else {"estado": "parado", "mensaje": "Buscador no disponible."},
             "fuentes_busqueda": svc_buscador.fuentes() if svc_buscador else [],
-            "sesiones": svc_buscador.sesiones() if svc_buscador else {}, "emojis_v": f.pack_emojis()["version"]}
+            "sesiones": svc_buscador.sesiones() if svc_buscador else {}, "emojis_v": f.pack_emojis()["version"],
+            "sesion_ig": svc_sesion_ig.publico() if svc_sesion_ig else {}}
+
+
+@app.get("/api/sesion_ig")
+def sesion_ig_estado(q: Quien = requerir()):
+    """El inicio de sesión de Instagram con usuario y contraseña (el panel lo consulta mientras corre)."""
+    return {"sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").publico(),
+            "sesiones": svc_buscador.sesiones() if svc_buscador else {}}
 
 
 @app.get("/api/copia_capa")
@@ -580,6 +589,17 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
     if op == "borrar_sticker":
         f.borrar_sticker(str(d.get("archivo") or ""))
         return {"ok": True}
+    if op == "ig_login":                 # usuario y contraseña de la cuenta «para mirar» (o los ya guardados)
+        s = _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+        if d.get("clave"):
+            s.guardar_credenciales(str(d.get("usuario") or ""), str(d.get("clave") or ""))
+        return {"ok": True, "sesion_ig": s.iniciar()}
+    if op == "ig_codigo":
+        return {"ok": True, "sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").dar_codigo(d.get("codigo"))}
+    if op == "ig_olvidar":
+        s = _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+        s.olvidar()
+        return {"ok": True, "sesion_ig": s.publico()}
     if op == "importar_cookies":
         b = _mod(svc_buscador, "buscador")
         n = b.importar_cookies(str(d.get("texto") or "")[:200_000])

@@ -292,6 +292,7 @@ def _chrome() -> str:
 
 # Chrome sin ventana se presenta como «HeadlessChrome» y Instagram/TikTok lo tratan como robot (piden login o no muestran
 # nada): se presenta como un Chrome común de escritorio.
+ARGS_EXTRA: list[str] = []          # argumentos de Chrome que suman los tests (ej. --host-resolver-rules)
 AGENTE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
           "Chrome/142.0.0.0 Safari/537.36")
 
@@ -324,7 +325,7 @@ def abrir() -> None:
                                  "--no-first-run", "--no-default-browser-check", "--headless=new", "--no-sandbox",
                                  "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--mute-audio",
                                  f"--user-agent={AGENTE}", "--lang=es-AR",
-                                 "--disable-blink-features=AutomationControlled", "about:blank"],
+                                 "--disable-blink-features=AutomationControlled", *ARGS_EXTRA, "about:blank"],
                                 stdout=salida, stderr=salida, start_new_session=True)
     for _ in range(60):
         if _abierto():
@@ -494,6 +495,12 @@ def marcar_sesion(red: str, vencida: bool, motivo: str = "") -> None:
         r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
         d[red] = r
         guardar_ajuste("sesiones_redes", d)
+    if red == "instagram" and vencida:   # con usuario y contraseña guardados, se vuelve a iniciar sola
+        try:
+            from . import sesion_ig
+            sesion_ig.reintentar_solo()
+        except Exception as ex:
+            log.info("no pude reintentar la sesión de Instagram: %s", ex)
 
 
 def sesiones() -> dict:

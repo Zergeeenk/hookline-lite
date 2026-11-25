@@ -1374,7 +1374,8 @@ const CP_PRESETS = {
 };
 const CP_CAMPOS = ["ubicacion_auto", "texto", "texto_x", "texto_y", "texto_tam", "fuente", "estilo", "color", "corte", "audio", "audio_desde", "pegar", "chat", "noti", "stickers"];
 function cargarCopias(forzar) {
-  const ocupada = CP && (CP.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((CP.busqueda || {}).estado));
+  const ocupada = CP && (CP.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((CP.busqueda || {}).estado)
+    || ["iniciando", "pide_codigo"].includes((CP.sesion_ig || {}).estado));
   if (!forzar && CP && Date.now() - cpTs < (ocupada ? 2500 : 20000)) return;
   cpTs = Date.now();
   api("/api/copias").then(d => {
@@ -1383,7 +1384,8 @@ function cargarCopias(forzar) {
     const ae = document.activeElement, editando = ae && ae.closest && ae.closest("#contenido") && /INPUT|TEXTAREA|SELECT/.test(ae.tagName);
     const sonando = [...$$("#contenido .rp video")].some(v => !v.paused && !v.muted);
     if ((pagina === "copiar" || pagina === "inspiracion") && JSON.stringify(d) !== antes && !editando && !sonando) render();
-    if (d.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((d.busqueda || {}).estado)) setTimeout(() => { if (pagina === "copiar") cargarCopias(true); }, 2500);
+    if (d.items.some(c => CP_OCUPADA.includes(c.estado) || cpJuez(c) === "mirando") || ["buscando", "filtrando"].includes((d.busqueda || {}).estado)
+        || ["iniciando", "pide_codigo"].includes((d.sesion_ig || {}).estado)) setTimeout(() => { if (pagina === "copiar" || pagina === "inspiracion") cargarCopias(true); }, 2500);
   }).catch(() => {});
 }
 const cpCopia = () => CP && CP.items.find(x => x.id === cpSel);
@@ -1730,7 +1732,11 @@ function sesionesHtml(se) {
       : ["", "key", `${n}: sin sesión${k === "instagram" ? " (los /p/ no bajan y el buscador ve poco)" : ""}`];
     return x.vencida ? `<button type="button" class="chip ${cl}" data-sesion="${k}" data-incookies title="Cargar la sesión de nuevo" style="cursor:pointer;border:0">${icn(ic, "sm")}${esc(txt)}</button>`
       : `<span class="chip ${cl}" data-sesion="${k}">${icn(ic, "sm")}${esc(txt)}</span>`; };
-  return `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:10px">${red("instagram", "Instagram")}${red("tiktok", "TikTok")}</div>`;
+  const si = (CP && CP.sesion_ig) || {};
+  const login = si.estado === "pide_codigo" ? `<button type="button" class="chip warn" data-incookies style="cursor:pointer;border:0">${icn("alert", "sm")}Instagram pide un código para iniciar sesión: tocá acá</button>`
+    : si.estado === "iniciando" ? `<span class="chip info anim">${icn("loader", "sm")}Iniciando sesión en Instagram…</span>`
+    : si.estado === "error" && si.tiene_credenciales ? `<button type="button" class="chip err" data-incookies style="cursor:pointer;border:0">${icn("alert", "sm")}${esc(si.mensaje || "No se pudo iniciar sesión")}</button>` : "";
+  return `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:10px">${red("instagram", "Instagram")}${red("tiktok", "TikTok")}${login}</div>`;
 }
 function pInspiracion() {
   cargarCopias();
@@ -1746,7 +1752,7 @@ function pInspiracion() {
     ${bu.mensaje ? `<div class="fila" style="gap:8px"><span class="chip ${bu.estado === "error" ? "err" : busy ? "info anim" : "ok"}">${icn(bu.estado === "error" ? "alert" : busy ? "loader" : "check", "sm")}${bu.estado === "error" ? "Ojo" : busy ? "Buscando" : "Listo"}</span><span class="muted" style="font-size:12.5px">${esc(bu.mensaje)}</span></div>` : ""}
     ${sesionesHtml(CP.sesiones)}
     <div class="cp-hero-in"><textarea class="in" id="cpLink" rows="2" placeholder="Pegá links de TikTok, Instagram o Pinterest (uno por renglón)" autocomplete="off"></textarea>
-      <div class="cp-hero-bt"><button class="btn prim" data-inbuscar ${busy ? "disabled" : ""}>${icn(busy ? "loader" : "search")}${busy ? "Buscando…" : "Buscar memes"}</button><button class="btn" id="cpGuardarLinks">${icn("download")}Guardar</button><button class="btn sm fant" data-incookies>${icn("key")}Cargar sesión de Instagram/TikTok</button>${libres ? [1, 10, 30].filter(n => n < libres).map(n => `<button class="btn sm" data-cphacer="${n}">Hacer ${n}</button>`).join("") : ""}</div></div></div>`;
+      <div class="cp-hero-bt"><button class="btn prim" data-inbuscar ${busy ? "disabled" : ""}>${icn(busy ? "loader" : "search")}${busy ? "Buscando…" : "Buscar memes"}</button><button class="btn" id="cpGuardarLinks">${icn("download")}Guardar</button><button class="btn sm fant" data-incookies>${icn("key")}Sesión de Instagram</button>${libres ? [1, 10, 30].filter(n => n < libres).map(n => `<button class="btn sm" data-cphacer="${n}">Hacer ${n}</button>`).join("") : ""}</div></div></div>`;
   const filtros = `<div class="fila" style="gap:6px;flex-wrap:wrap;margin-top:14px">${chip("libres", `Sin usar (${libres})`, inFiltro === "libres", "data-infiltro")}${chip("hechos", `Ya hechos (${ls.length - libres})`, inFiltro === "hechos", "data-infiltro")}${chip("todos", "Todos", inFiltro === "todos", "data-infiltro")}${cats.length ? `<span style="width:10px"></span>${chip("", "Todas", !inCat, "data-incat")}${cats.map(k => chip(k, IN_CAT[k] || k, inCat === k, "data-incat")).join("")}` : ""}</div>`;
   const fb = CP.fuentes_busqueda || [];
   const dondeBusca = `<div class="card pad" style="margin-top:14px"><b>${icn("search")} Dónde busca</b><small class="muted" style="display:block;margin-top:4px">Una por renglón: <code>ig @cuenta</code>, <code>tt @cuenta</code>, <code>ig: pov soltera</code>, <code>ig #hashtag</code>, <code>tt: frase</code> o <code>pin: frase</code> (Pinterest, no necesita sesión). Las cuentas que suben este tipo de memes son lo que mejor funciona. Las cuentas de los memes que guardás se suman solas.</small>
@@ -2309,23 +2315,72 @@ async function moverMultis(main, esp) {   // las multicuentas siguen a su main
   for (const h of (S.todas || S.cuentas).filter(x => x.main === main && espDe(x) !== esp)) await api("/api/cuenta", { op: "guardar", id: h.id, espacio: esp });
 }
 
-// sesión del buscador: cookies.txt (formato Netscape) de la cuenta "para mirar"
+// sesión de Instagram: usuario y contraseña de la cuenta "para mirar" (o, avanzado, cookies pegadas)
 function cargarCookies() {
   const f = document.createElement("div"); f.className = "dlg-fondo";
-  f.innerHTML = `<div class="dlg ancho" role="dialog" aria-modal="true"><div class="dlg-cab"><span class="dlg-ic">${icn("key")}</span><h2>Cargar sesión de Instagram/TikTok</h2></div>
-    <div class="dlg-tx">El buscador y las descargas miran Instagram y TikTok con una cuenta "para mirar" (no la de las modelos). En tu navegador, con esa cuenta iniciada, exportá las cookies de instagram.com (y de tiktok.com, aparte) con una extensión como <b>Get cookies.txt</b> o <b>Cookie-Editor</b> y pegá acá el texto entero. Sirve cookies.txt, JSON o la línea «nombre=valor; …».</div>
-    <div class="dlg-tx" style="color:var(--warn)">${icn("alert", "sm")} Ese texto es la sesión abierta de la cuenta: pegalo solo acá. No lo mandes por chat ni le saques captura (con eso cualquiera entra a la cuenta).</div>
-    <textarea class="in" id="ckTexto" rows="9" placeholder="# Netscape HTTP Cookie File   ·   o   [{&quot;name&quot;: ...}]   ·   o   sessionid=...; csrftoken=..." style="font-family:monospace;font-size:12px" autocomplete="off" spellcheck="false"></textarea>
-    <div class="dlg-pie"><button class="btn" data-x>Cancelar</button><button class="btn prim" data-ok>${icn("check")}Guardar</button></div></div>`;
-  document.body.appendChild(f); f.querySelector("#ckTexto").focus();
+  const si = (CP && CP.sesion_ig) || {};
+  f.innerHTML = `<div class="dlg ancho" role="dialog" aria-modal="true"><div class="dlg-cab"><span class="dlg-ic">${icn("key")}</span><h2>Sesión de Instagram</h2></div>
+    <div class="dlg-tx">El buscador y las descargas miran Instagram con una cuenta <b>«para mirar»</b>: una cuenta secundaria, <b>no la de las modelos</b>. Poné su usuario y contraseña y Hookline inicia sesión solo. Si Instagram manda un código (por mail o SMS), te lo pide acá.</div>
+    <label class="campo"><span>Usuario (o mail) de la cuenta para mirar</span><input class="in" id="igUsuario" autocomplete="off" spellcheck="false" value="${esc(si.usuario || "")}" placeholder="cuenta_para_mirar"></label>
+    <label class="campo"><span>Contraseña</span><input class="in" id="igClave" type="password" autocomplete="new-password" placeholder="${si.tiene_credenciales ? "Guardada: dejala vacía para usar la misma" : ""}"></label>
+    <div id="igEstado" style="margin-top:8px"></div>
+    <details style="margin-top:14px"><summary class="muted" style="cursor:pointer">Avanzado: pegar cookies (Instagram o TikTok)</summary>
+      <div class="dlg-tx" style="margin-top:8px">En tu navegador, con la cuenta iniciada, exportá las cookies con una extensión (<b>Cookie-Editor</b> → Export) y pegalas acá. ${icn("alert", "sm")} No las mandes por chat: con eso cualquiera entra a la cuenta.</div>
+      <textarea class="in" id="ckTexto" rows="6" placeholder="# Netscape HTTP Cookie File   ·   o   [{&quot;name&quot;: ...}]   ·   o   sessionid=...; csrftoken=..." style="font-family:monospace;font-size:12px" autocomplete="off" spellcheck="false"></textarea>
+      <div style="margin-top:8px"><button class="btn" data-ok>${icn("check")}Guardar cookies</button></div>
+    </details>
+    <div class="dlg-pie">${si.tiene_credenciales ? `<button class="btn fant" data-olvidar>Olvidar la cuenta</button>` : ""}<span style="flex:1"></span><button class="btn" data-x>Cerrar</button><button class="btn prim" data-iglogin>${icn("key")}Iniciar sesión</button></div></div>`;
+  document.body.appendChild(f);
+  let reloj = null, ultimo = "";
+  const pintar = e => {
+    const box = f.querySelector("#igEstado"); if (!box) return;
+    const est = (e && e.estado) || "parado", msg = esc((e && e.mensaje) || "");
+    if (est === "iniciando") box.innerHTML = `<span class="chip info anim">${icn("loader", "sm")}${msg || "Iniciando sesión en Instagram…"}</span><small class="muted" style="display:block;margin-top:4px">Puede tardar un minuto. Si está corriendo una búsqueda, espera a que termine.</small>`;
+    else if (est === "pide_codigo") box.innerHTML = `<div class="card pad" style="border:1px solid var(--warn)"><b>${icn("alert", "sm")} Instagram pide un código</b><div class="muted" style="margin:4px 0 8px">${msg || "Mirá el mail o los SMS de la cuenta para mirar."}</div><div class="fila"><input class="in" id="igCodigo" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" style="max-width:160px"><button class="btn prim" data-igcodigo>Enviar código</button></div></div>`;
+    else if (est === "listo") box.innerHTML = `<span class="chip ok">${icn("check", "sm")}${msg || "Sesión iniciada"}</span>`;
+    else if (est === "error") box.innerHTML = `<span class="chip err">${icn("alert", "sm")}${msg || "No se pudo iniciar sesión"}</span>`;
+    else box.innerHTML = "";
+    if (est === "pide_codigo" && ultimo !== "pide_codigo") { const c = box.querySelector("#igCodigo"); if (c) c.focus(); }
+    if (est === "listo" && ultimo && ultimo !== "listo") { toast("Sesión de Instagram iniciada"); cargarCopias(true); }
+    ultimo = est;
+  };
+  const mirar = async () => {
+    try { const r = await api("/api/sesion_ig"); if (CP) { CP.sesion_ig = r.sesion_ig; CP.sesiones = r.sesiones; } pintar(r.sesion_ig);
+      clearTimeout(reloj); if (["iniciando", "pide_codigo"].includes(r.sesion_ig.estado) && document.body.contains(f)) reloj = setTimeout(mirar, 2000);
+    } catch (e) { clearTimeout(reloj); }
+  };
+  if (["iniciando", "pide_codigo"].includes(si.estado)) mirar(); else pintar(si.estado === "error" ? si : null);
+  (si.tiene_credenciales ? f.querySelector("#igClave") : f.querySelector("#igUsuario")).focus();
+  const cerrar = () => { clearTimeout(reloj); f.remove(); render(); };
   f.addEventListener("click", async ev => {
-    if (ev.target === f || ev.target.closest("[data-x]")) return f.remove();
+    if (ev.target === f || ev.target.closest("[data-x]")) return cerrar();
+    if (ev.target.closest("[data-iglogin]")) {
+      const usuario = f.querySelector("#igUsuario").value.trim(), clave = f.querySelector("#igClave").value;
+      if (!usuario) return toast("Escribí el usuario de la cuenta para mirar", true);
+      if (!clave && !si.tiene_credenciales) return toast("Escribí la contraseña", true);
+      try { const r = await api("/api/copiar", { op: "ig_login", usuario, clave }); f.querySelector("#igClave").value = ""; ultimo = "iniciando"; pintar(r.sesion_ig); mirar(); } catch (e) { fallo(e); }
+      return;
+    }
+    if (ev.target.closest("[data-igcodigo]")) {
+      const codigo = (f.querySelector("#igCodigo") || {}).value || "";
+      try { const r = await api("/api/copiar", { op: "ig_codigo", codigo }); pintar(r.sesion_ig); mirar(); } catch (e) { fallo(e); }
+      return;
+    }
+    if (ev.target.closest("[data-olvidar]")) {
+      if (!confirm("¿Olvidar el usuario y la contraseña guardados? La sesión actual sigue hasta que venza.")) return;
+      try { await api("/api/copiar", { op: "ig_olvidar" }); toast("Listo: se borró la cuenta guardada"); cerrar(); } catch (e) { fallo(e); }
+      return;
+    }
     if (ev.target.closest("[data-ok]")) {
-      const texto = f.querySelector("#ckTexto").value.trim(); if (!texto) return toast("Pegá el texto de cookies.txt", true);
-      try { const r = await api("/api/copiar", { op: "importar_cookies", texto }); f.remove(); toast(`Sesión guardada (${r.n} cookies)${r.redes && r.redes.length ? " de " + r.redes.join(" y ") : ""}`); } catch (e) { fallo(e); }
+      const texto = f.querySelector("#ckTexto").value.trim(); if (!texto) return toast("Pegá el texto de las cookies", true);
+      try { const r = await api("/api/copiar", { op: "importar_cookies", texto }); toast(`Sesión guardada (${r.n} cookies)${r.redes && r.redes.length ? " de " + r.redes.join(" y ") : ""}`); cerrar(); cargarCopias(true); } catch (e) { fallo(e); }
     }
   });
-  f.addEventListener("keydown", ev => { if (ev.key === "Escape") f.remove(); });
+  f.addEventListener("keydown", ev => {
+    if (ev.key === "Escape") cerrar();
+    if (ev.key === "Enter" && ev.target.id === "igCodigo") f.querySelector("[data-igcodigo]").click();
+    if (ev.key === "Enter" && (ev.target.id === "igClave" || ev.target.id === "igUsuario")) f.querySelector("[data-iglogin]").click();
+  });
 }
 
 // ----- Fuentes -----
