@@ -490,12 +490,12 @@ def marcar_sesion(red: str, vencida: bool, motivo: str = "") -> None:
     with candado("sesiones_redes"):
         d = dict(ajuste("sesiones_redes", {}) or {})
         r = dict(d.get(red) or {})
-        if bool(r.get("vencida")) == bool(vencida) and (not vencida or r.get("motivo") == motivo):
-            return
-        r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
-        d[red] = r
-        guardar_ajuste("sesiones_redes", d)
-    if red == "instagram" and vencida:   # con usuario y contraseña guardados, se vuelve a iniciar sola
+        if not (bool(r.get("vencida")) == bool(vencida) and (not vencida or r.get("motivo") == motivo)):
+            r.update(vencida=bool(vencida), motivo=str(motivo or "")[:200], visto=_hora("%d/%m %H:%M"))
+            d[red] = r
+            guardar_ajuste("sesiones_redes", d)
+    if red == "instagram" and vencida:   # con usuario y contraseña guardados, se vuelve a iniciar sola (también si ya
+        # estaba marcada así: el tope de una vez cada 6 h y lo que necesita a una persona los pone reintentar_solo)
         try:
             from . import sesion_ig
             sesion_ig.reintentar_solo()
