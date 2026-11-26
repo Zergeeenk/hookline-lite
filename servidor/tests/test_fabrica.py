@@ -152,17 +152,19 @@ def test_sin_reponer_no_toca_otros_links(tmp_path, modelo_con_multi):
     assert "otro link" not in next(x for x in fabrica.listar() if x["id"] == cid)["error"]
 
 
-@pytest.mark.parametrize("motivo,repone", [
-    ("No se pudo bajar. Fijate que el link sea de un video público.", True),
-    ("Ese video es privado: subilo con el botón «Subir video».", True),
-    ("Instagram no da los videos sin sesión. Iniciá sesión con la cuenta «para mirar».", False),
+@pytest.mark.parametrize("del_link,motivo,repone", [
+    (True, "Ese video es privado: subilo con el botón «Subir video».", True),
+    (True, "Instagram dice que ese post no existe: lo borraron o el link está mal copiado.", True),
+    (False, "El servidor se quedó sin espacio para guardar el video: avisale a quien lo administra.", False),
+    (False, "Instagram frenó la cuenta «para mirar» por muchos pedidos y sin sesión tampoco dio el video.", False),
+    (False, "No se pudo bajar. Fijate que el link sea de un video público.", False),
 ])
-def test_link_que_no_baja_se_repone_salvo_la_sesion(monkeypatch, motivo, repone):
+def test_link_que_no_baja_se_repone_solo_si_es_ese_link(monkeypatch, del_link, motivo, repone):
     from hookline.db import sesion
     from hookline.modelos import LinkBanco
     from hookline.servicios import fabrica, material
     def falla(*a, **k):
-        raise ValueError(motivo)
+        raise (material.LinkInservible if del_link else ValueError)(motivo)
     monkeypatch.setattr(material, "bajar_video", falla)
     roto, libre = "https://www.instagram.com/reel/ROTO1/", "https://www.instagram.com/reel/LIBRE1/"
     fabrica.guardar_links(f"{roto}\n{libre}")
@@ -175,6 +177,36 @@ def test_link_que_no_baja_se_repone_salvo_la_sesion(monkeypatch, motivo, repone)
     with sesion() as s:
         assert bool(s.get(LinkBanco, libre).copia_id) is repone
     assert ("otro link" in c["error"]) is repone
+
+
+@pytest.mark.parametrize("error,link,del_link", [
+    ("Private video. Login required", "https://www.youtube.com/watch?v=x", True),
+    ("This post is a photo", "https://www.instagram.com/p/AAA/", True),
+    ("[Pinterest] 123: No video formats found", "https://www.pinterest.com/pin/123/", True),
+    ("[Errno 28] No space left on device", "https://www.instagram.com/reel/AAA/", False),
+    ("Unable to download webpage: timed out", "https://www.instagram.com/reel/AAA/", False),
+    ("There is no video in this post", "https://www.instagram.com/reel/AAA/", False),   # suele ser la sesión
+])
+def test_motivo_dice_si_el_problema_es_el_link(error, link, del_link):
+    from hookline.servicios import material
+    m = material.motivo_ytdlp(Exception(error), link)
+    assert isinstance(m, str) and isinstance(m, material._DelLink) is del_link
+
+
+def test_reponer_reserva_el_link_con_bloqueo(monkeypatch):
+    """La reserva del link pide bloqueo de fila salteando los tomados (Postgres): dos descartes a la vez, links distintos."""
+    from sqlalchemy.sql.selectable import Select
+    from hookline.servicios import fabrica
+    pedidos = []
+    original = Select.with_for_update
+    def espiar(self, **k):
+        pedidos.append(k)
+        return original(self, **k)
+    monkeypatch.setattr(Select, "with_for_update", espiar)
+    fabrica.guardar_links("https://www.instagram.com/reel/LIBRE9/")
+    monkeypatch.setattr(fabrica, "desde_links", lambda *a, **k: ["abcd1234"])
+    assert fabrica._reponer({"reponer": 1}) == "abcd1234"
+    assert pedidos == [{"skip_locked": True}]
 
 
 def test_marca_de_agua_no_se_arma_sola(tmp_path, modelo_con_multi):

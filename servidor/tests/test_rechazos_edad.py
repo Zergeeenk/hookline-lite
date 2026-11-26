@@ -149,6 +149,31 @@ def test_copiar_video_rechazo_al_leer_queda_descartado_con_su_motivo():
     assert c["error"].startswith("Descartado: Claude no aceptó este ejemplo") and "mayor de edad" in c["error"]
 
 
+def test_copiar_video_rechazo_hace_lo_mismo_que_descartar_menor():
+    """Igual que «descartar: menor»: link votado malo, la cuenta deja de ser fuente y, en «Hacer N», va otro link."""
+    from hookline.db import sesion
+    from hookline.ia import tareas
+    from hookline.modelos import FuenteBusqueda, LinkBanco
+    from hookline.servicios import buscador, fabrica
+    usado, libre = "https://www.instagram.com/reel/RECH01/", "https://www.instagram.com/reel/LIBRE2/"
+    cid = fabrica._nueva(link=usado, estado="leyendo", cuenta="", reponer=fabrica.REPONER)
+    fabrica.guardar_links(usado, {usado: cid})
+    fabrica.guardar_links(libre)
+    with sesion() as s:
+        s.get(LinkBanco, usado).datos = {"ficha": "ok", "usuario": "cuenta.rara"}
+        s.get(LinkBanco, libre).datos = {"ficha": "ok"}
+    buscador.sumar_fuentes(["ig @cuenta.rara"])
+    t = tareas.crear("lectura", {"duracion": 4}, referencia=cid)
+    tareas.fallar(t, RECHAZO)
+    c = fabrica._datos(cid)
+    assert c["error"].startswith("Descartado: Claude no aceptó este ejemplo")
+    assert "@cuenta.rara" in c["error"] and "otro link" in c["error"]
+    with sesion() as s:
+        assert (s.get(LinkBanco, usado).voto, s.get(LinkBanco, usado).motivo) == ("malo", "Parece menor")
+        assert not any(f.activa for f in s.scalars(select(FuenteBusqueda)))
+        assert s.get(LinkBanco, libre).copia_id not in ("", "reponiendo")
+
+
 def test_copiar_video_otra_falla_sigue_como_antes():
     from hookline.ia import tareas
     from hookline.servicios import fabrica
