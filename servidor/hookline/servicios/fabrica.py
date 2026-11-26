@@ -28,13 +28,13 @@ import time
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .. import almacen, chat_img, fuentes, medios
 from ..comun import actividad, candado
 from ..db import ahora, sesion
 from ..ia import tareas
-from ..modelos import Copia, LinkBanco
+from ..modelos import Copia, FuenteBusqueda, LinkBanco
 from ..trabajos import encolar, manejador
 from . import material
 
@@ -53,6 +53,8 @@ STICKER_LADO = 512        # se guardan a 512 px como mucho (un emoji no necesita
 IG_ARRIBA, IG_ABAJO = 0.11, 0.81     # lo que tapa Instagram en un reel: usuario arriba, texto y botones abajo
 ESCALA_TEXTO = 1.2                   # la letra un 20 % más grande que la del ejemplo
 NOTA_MIN, REINTENTOS = 3, 2          # juez: nota 1-5; menos de 3 se rehace (hasta 2 veces)
+REPONER = 3          # «Hacer N»: un ejemplo que no sirve (descartado o que no baja) se reemplaza solo, hasta 3 veces
+                     # seguidas por lugar: así el lote no se frena, pero tampoco se gasta el banco entero de golpe
 ACTIVOS = ("bajando", "leyendo", "armando")
 _lock = threading.RLock()
 
@@ -807,16 +809,61 @@ def hacer_guardados(n, cuenta: str = "") -> list[str]:
         libres = s.scalars(select(LinkBanco.link).where(LinkBanco.copia_id == "").order_by(LinkBanco.agregado)).all()
     if not libres:
         raise ValueError("No quedan links sin usar. Pegá más arriba.")
-    return desde_links("\n".join(libres[:max(1, int(n or 1))]), cuenta)
+    return desde_links("\n".join(libres[:max(1, int(n or 1))]), cuenta, reponer=REPONER)
 
 
-def desde_links(texto, cuenta: str = "") -> list[str]:
+def _reponer(c: dict) -> str:
+    """La copia venía de «Hacer N» y su ejemplo no sirvió: arranca otra con el próximo link sin usar (el más viejo).
+    Devuelve el id de la nueva, o "" si no corresponde o no quedan links."""
+    quedan = int(c.get("reponer") or 0)
+    if quedan <= 0:
+        return ""
+    with sesion() as s:   # se reserva el link en la misma sesión: dos descartes a la vez no toman el mismo
+        x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == "").order_by(LinkBanco.agregado).limit(1)).first()
+        if not x:
+            return ""
+        x.copia_id, link = "reponiendo", x.link
+    try:
+        return desde_links(link, c.get("cuenta") or "", reponer=quedan - 1)[0]
+    except Exception:
+        with sesion() as s:   # no quedó armada: el link vuelve a estar libre
+            x = s.get(LinkBanco, link)
+            if x and x.copia_id == "reponiendo":
+                x.copia_id = ""
+        log.exception("No se pudo reponer el ejemplo")
+        return ""
+
+
+def _cuenta_del_link(l: LinkBanco) -> tuple[str, str]:
+    """(red, usuario) de quien subió el video del banco, si se sabe."""
+    red = "tt" if "tiktok.com" in l.link else "ig" if "instagram.com" in l.link else ""
+    m = re.search(r"tiktok\.com/@([\w.]{2,40})", l.link)
+    usuario = m.group(1) if m else str((l.datos or {}).get("usuario") or l.autor or "")
+    return (red, usuario) if red and re.fullmatch(r"[\w.]{2,40}", usuario) else ("", "")
+
+
+def _sacar_de_fuentes(s, l: LinkBanco) -> str:
+    """Si en el ejemplo sale alguien que puede ser menor, la cuenta que lo subió deja de ser fuente del buscador (se
+    apaga; si todavía no era fuente, entra apagada para que el buscador no la sume después). Devuelve "@cuenta" o ""."""
+    red, usuario = _cuenta_del_link(l)
+    if not usuario:
+        return ""
+    f = s.scalars(select(FuenteBusqueda).where(FuenteBusqueda.red == red,
+                                               func.lower(FuenteBusqueda.consulta) == f"@{usuario}".lower())).first()
+    if f:
+        f.activa = False
+    else:
+        s.add(FuenteBusqueda(red=red, consulta=f"@{usuario}", activa=False))
+    return f"@{usuario}"
+
+
+def desde_links(texto, cuenta: str = "", reponer: int = 0) -> list[str]:
     links_ = _sacar_links(texto)
     if len(links_) > 150:
         raise ValueError("Son muchos: pegá hasta 150 links por vez.")
     ids = []
     for i, link in enumerate(links_):
-        cid = _nueva(link=link, cuenta=cuenta, lote_orden=i)
+        cid = _nueva(link=link, cuenta=cuenta, lote_orden=i, **({"reponer": int(reponer)} if reponer else {}))
         ids.append(cid)
         encolar("descargar_ejemplo", {"copia": cid, "link": link}, clave=f"descargar_ejemplo:{cid}", max_intentos=2)
     guardar_links(texto, dict(zip(links_, ids)))
@@ -835,10 +882,15 @@ def _descargar(datos: dict) -> None:
     try:
         video, _ = material.bajar_video(datos["link"], _dir(cid), "ejemplo")
     except ValueError as ex:
+        motivo = str(ex)
         try:
-            _datos(cid, estado="error", error=str(ex))
+            c = _datos(cid, estado="error", error=motivo)
         except ValueError:
             shutil.rmtree(_dir(cid), ignore_errors=True)
+            return
+        # Si falla la sesión, fallan todos los links: reponer solo gastaría el banco. Si es ese link, va otro.
+        if "sesión" not in motivo.lower() and _reponer(c):
+            _datos(cid, error=motivo + " Ya arranqué otro link guardado en su lugar.")
         return
     try:
         _datos(cid, ejemplo=video.name)
@@ -1051,9 +1103,20 @@ def _leido(t, l: dict) -> None:
         c = _datos(cid)
     except ValueError:
         return
-    if l.get("descartar"):   # en el ejemplo sale alguien que puede ser menor: no se usa
-        _datos(cid, estado="error", leido=True, error="Descartado: en el ejemplo sale alguien que puede ser menor de edad.")
+    if l.get("descartar"):   # en el ejemplo sale alguien que puede ser menor: no se usa, y su cuenta tampoco
+        fuente_fuera = ""
+        with sesion() as s:
+            x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == cid).limit(1)).first()
+            if x:
+                x.voto, x.motivo = "malo", "Parece menor"
+                fuente_fuera = _sacar_de_fuentes(s, x)
+        error = "Descartado: en el ejemplo sale alguien que puede ser menor de edad."
+        if fuente_fuera:
+            error += f" El buscador deja de usar {fuente_fuera}."
+        _datos(cid, estado="error", leido=True, error=error)
         actividad("aviso", "Ejemplo descartado: alguien puede ser menor de edad", copia=cid)
+        if _reponer(c):
+            _datos(cid, error=error + " Ya arranqué otro link guardado en su lugar.")
         return
     if not fuentes.claude_elige():          # Claude elige la letra solo si está prendido en Fuentes
         l = {k: v for k, v in l.items() if k != "fuente"}

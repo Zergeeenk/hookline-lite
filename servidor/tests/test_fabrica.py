@@ -91,6 +91,92 @@ def test_menor_se_descarta(tmp_path, modelo_con_multi):
     assert c["estado"] == "error" and "menor" in c["error"] and not c.get("resultado")
 
 
+def _links_del_banco(cid, usuario="cuenta.dudosa"):
+    """La copia cid como si viniera de «Hacer N» (con su link en el banco) y otro link guardado sin usar."""
+    from hookline.db import sesion
+    from hookline.modelos import LinkBanco
+    from hookline.servicios import fabrica
+    usado, libre = "https://www.instagram.com/reel/AAA111/", "https://www.instagram.com/reel/BBB222/"
+    fabrica.guardar_links(usado, {usado: cid})
+    fabrica.guardar_links(libre)
+    with sesion() as s:
+        x = s.get(LinkBanco, usado)
+        x.datos = {**(x.datos or {}), "usuario": usuario, "ficha": "ok"}
+        s.get(LinkBanco, libre).datos = {"ficha": "ok"}
+    fabrica._datos(cid, reponer=fabrica.REPONER)
+    return usado, libre
+
+
+def test_menor_descarta_el_link_apaga_la_cuenta_y_repone(tmp_path, modelo_con_multi):
+    from hookline.db import sesion
+    from hookline.modelos import FuenteBusqueda, LinkBanco
+    from hookline.servicios import buscador, fabrica
+    cid = fabrica.desde_archivo("ejemplo.mp4", _ejemplo(tmp_path).read_bytes(), modelo_con_multi)
+    _vaciar_cola()
+    usado, libre = _links_del_banco(cid)
+    buscador.sumar_fuentes(["ig @Cuenta.Dudosa"])
+    _responder("lectura", {"descartar": "menor"})
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["estado"] == "error" and "menor" in c["error"] and not c.get("resultado")
+    assert "@cuenta.dudosa" in c["error"] and "otro link" in c["error"]
+    with sesion() as s:
+        assert (s.get(LinkBanco, usado).voto, s.get(LinkBanco, usado).motivo) == ("malo", "Parece menor")
+        assert s.get(LinkBanco, usado).copia_id == cid                       # no vuelve a quedar «sin usar»
+        assert not any(f.activa for f in s.query(FuenteBusqueda).all())     # la cuenta ya no es fuente
+        nueva = s.get(LinkBanco, libre).copia_id
+    n = next(x for x in fabrica.listar() if x["id"] == nueva)
+    assert n["link"] == libre and n["cuenta"] == modelo_con_multi and n["reponer"] == fabrica.REPONER - 1
+
+
+def test_menor_de_cuenta_que_no_era_fuente_entra_apagada(tmp_path, modelo_con_multi):
+    from hookline.servicios import buscador, fabrica
+    cid = fabrica.desde_archivo("ejemplo.mp4", _ejemplo(tmp_path).read_bytes(), modelo_con_multi)
+    _vaciar_cola()
+    _links_del_banco(cid, usuario="otra.cuenta")
+    _responder("lectura", {"descartar": "menor"})
+    assert [(f["texto"], f["activa"]) for f in buscador.fuentes()] == [("ig @otra.cuenta", False)]
+    assert buscador.sumar_fuentes(["ig @otra.cuenta"]) == 0            # el buscador no la vuelve a sumar
+
+
+def test_sin_reponer_no_toca_otros_links(tmp_path, modelo_con_multi):
+    from hookline.db import sesion
+    from hookline.modelos import LinkBanco
+    from hookline.servicios import fabrica
+    cid = fabrica.desde_archivo("ejemplo.mp4", _ejemplo(tmp_path).read_bytes(), modelo_con_multi)
+    _vaciar_cola()
+    _, libre = _links_del_banco(cid)
+    fabrica._datos(cid, reponer=0)                                       # el último intento de ese lugar
+    _responder("lectura", {"descartar": "menor"})
+    with sesion() as s:
+        assert s.get(LinkBanco, libre).copia_id == ""
+    assert "otro link" not in next(x for x in fabrica.listar() if x["id"] == cid)["error"]
+
+
+@pytest.mark.parametrize("motivo,repone", [
+    ("No se pudo bajar. Fijate que el link sea de un video público.", True),
+    ("Ese video es privado: subilo con el botón «Subir video».", True),
+    ("Instagram no da los videos sin sesión. Iniciá sesión con la cuenta «para mirar».", False),
+])
+def test_link_que_no_baja_se_repone_salvo_la_sesion(monkeypatch, motivo, repone):
+    from hookline.db import sesion
+    from hookline.modelos import LinkBanco
+    from hookline.servicios import fabrica, material
+    def falla(*a, **k):
+        raise ValueError(motivo)
+    monkeypatch.setattr(material, "bajar_video", falla)
+    roto, libre = "https://www.instagram.com/reel/ROTO1/", "https://www.instagram.com/reel/LIBRE1/"
+    fabrica.guardar_links(f"{roto}\n{libre}")
+    with sesion() as s:   # el roto es el más viejo: «Hacer 1» lo toma primero
+        s.get(LinkBanco, libre).agregado = s.get(LinkBanco, roto).agregado.replace(year=2099)
+    [cid] = fabrica.hacer_guardados(1, "")
+    fabrica._descargar({"copia": cid, "link": roto})
+    c = next(x for x in fabrica.listar() if x["id"] == cid)
+    assert c["estado"] == "error" and c["error"].startswith(motivo)
+    with sesion() as s:
+        assert bool(s.get(LinkBanco, libre).copia_id) is repone
+    assert ("otro link" in c["error"]) is repone
+
+
 def test_marca_de_agua_no_se_arma_sola(tmp_path, modelo_con_multi):
     from hookline.servicios import fabrica
     cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "hola", "modelo": 1, "marca_agua": True})
