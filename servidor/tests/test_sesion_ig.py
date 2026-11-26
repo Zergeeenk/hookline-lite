@@ -885,6 +885,21 @@ def test_el_captcha_en_el_confirma_que_sos_vos_se_dice_enseguida(ig, monkeypatch
 
 
 @con_chrome
+def test_el_captcha_se_dice_tambien_si_se_acaba_el_tiempo(ig, monkeypatch):
+    """Si se acaba el tiempo máximo antes de llevar SIN_RESPUESTA trabado (con Instagram lento puede pasar), el chequeo
+    del final también ve el captcha (antes: «Instagram no terminó el inicio de sesión»)."""
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 45)
+    monkeypatch.setattr(ig, "TIEMPO_MAX", 25)
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("robot", "clave-buena")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_CAPTCHA, ig.publico()
+    assert time.time() - t0 < 60
+
+
+@con_chrome
 def test_si_toco_usar_otro_perfil_y_sale_el_captcha_dice_captcha(ig):
     _IG.op.update(elegir_siempre=True, solo_captcha=True)
     ig.guardar_credenciales("bien", "clave-buena")

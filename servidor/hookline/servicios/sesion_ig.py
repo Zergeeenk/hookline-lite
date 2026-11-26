@@ -1069,8 +1069,6 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             raise ErrorLogin(M_CAPTCHA, "freno")     # trabado un rato con un captcha en un marco, en cualquier página
         if (not codigos and "/accounts/login" in pg.url and _visible(pg, CLAVE)
                 and time.time() - enviado > SIN_RESPUESTA):
-            if _captcha_en_marcos(pg):
-                raise ErrorLogin(M_CAPTCHA, "freno")
             if not _respuesta.get("pedidos"):
                 raise ErrorLogin(M_NO_SE_MANDO)      # ni siquiera salió el pedido: el botón no respondió
             dijo = ", ".join(f"{k}={v}" for k, v in _respuesta.items() if k in ("http", "status", "message"))
