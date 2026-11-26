@@ -472,18 +472,54 @@ def _a_la_vista(pg, marco) -> bool:
         return False
 
 
+def _es_captcha(marco) -> bool:
+    u = urllib.parse.urlsplit(marco.url or "")
+    return bool(RUTA_CAPTCHA.search((u.hostname or "") + u.path))
+
+
+def _invisible(marco) -> bool:
+    """Un captcha invisible: solo vigila, no pide nada (el sello de «protegido por reCAPTCHA»)."""
+    return "size=invisible" in urllib.parse.urlsplit(marco.url or "").query.lower()
+
+
+def _captchas_adentro(marco) -> list:
+    """Los marcos de captcha que hay adentro de `marco`, a cualquier profundidad (sin contarlo a él)."""
+    out = []
+    for h in marco.child_frames:
+        if _es_captcha(h):
+            out.append(h)
+        out.extend(_captchas_adentro(h))
+    return out
+
+
 def _captcha_en_marcos(pg) -> bool:
-    """Un captcha que el texto de la página no muestra: un marco de captcha a la vista, también adentro de otro marco
-    (el de Meta envuelve al de Google). Los invisibles no cuentan. Se mira cuando el inicio de sesión ya se trabó: elige
-    el mensaje, no corta un intento que venía bien."""
+    """Un captcha que el texto de la página no muestra: un marco de captcha a la vista, también adentro de otro marco.
+    Decide el de más adentro: el de Meta envuelve al de Google, y si el de Google es invisible (solo vigila) no hay nada
+    para tocar. Se mira cuando el inicio de sesión ya lleva un rato trabado: elige el mensaje, no corta un intento que
+    venía bien."""
     for f in _marcos(pg):
         try:
-            u = urllib.parse.urlsplit(f.url or "")
-            if (RUTA_CAPTCHA.search((u.hostname or "") + u.path) and "size=invisible" not in u.query.lower()
-                    and _a_la_vista(pg, f)):
+            if _es_captcha(f) and not _invisible(f) and not _captchas_adentro(f) and _a_la_vista(pg, f):
                 return True
         except Exception:
             continue
+    return False
+
+
+def _marco_captcha(pg) -> bool:
+    """Un iframe de captcha a la vista en la página (MARCO_CAPTCHA). Si es un envoltorio (el de Meta) y adentro solo hay
+    captchas invisibles, no cuenta."""
+    try:
+        for el in pg.query_selector_all(MARCO_CAPTCHA):
+            if not el.is_visible():
+                continue
+            f = el.content_frame()
+            adentro = _captchas_adentro(f) if f else []
+            if adentro and all(_invisible(h) for h in adentro):
+                continue
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -926,11 +962,11 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             n = _verificar(pg, ctx)
             if n is not None:
                 return n
+        texto = _texto(pg)
+        if CAPTCHA.search(texto) or _marco_captcha(pg) or _captcha_en_marcos(pg):
+            raise ErrorLogin(M_CAPTCHA, "freno")     # antes que «otra cuenta guardada»: pudo tocar «Usar otro perfil»
         if otra or pg.get_by_text(OTRA_CUENTA).count():
             raise ErrorLogin(M_OTRA_GUARDADA)
-        texto = _texto(pg)
-        if CAPTCHA.search(texto) or _visible(pg, MARCO_CAPTCHA) or _captcha_en_marcos(pg):
-            raise ErrorLogin(M_CAPTCHA, "freno")
         err = _error(texto)
         raise ErrorLogin("No apareció el formulario de Instagram" + (f": {err}" if err else
                          f" (la página dice: «{texto[:100]}»). Probá de nuevo en un rato."), _tipo(err) if err else "pasajero")
@@ -974,7 +1010,7 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
         else:
             sesion_desde = 0.0
         texto = _texto(pg)
-        if CAPTCHA.search(texto) or _visible(pg, MARCO_CAPTCHA):
+        if CAPTCHA.search(texto) or _marco_captcha(pg):
             raise ErrorLogin(M_CAPTCHA, "freno")
         err = _error(texto)
         campo = _visible(pg, CAMPO_CODIGO)
@@ -1029,6 +1065,8 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             aprobar = time.time() + ESPERA_CODIGO
             _avance(estado="iniciando", mensaje=M_APROBAR)
             continue
+        if not aprobar and time.time() - enviado > SIN_RESPUESTA and _captcha_en_marcos(pg):
+            raise ErrorLogin(M_CAPTCHA, "freno")     # trabado un rato con un captcha en un marco, en cualquier página
         if (not codigos and "/accounts/login" in pg.url and _visible(pg, CLAVE)
                 and time.time() - enviado > SIN_RESPUESTA):
             if _captcha_en_marcos(pg):
