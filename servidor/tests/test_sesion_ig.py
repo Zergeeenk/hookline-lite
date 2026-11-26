@@ -81,6 +81,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         ruta, _, qs = self.path.partition("?")
         recordada = "recordado=" in (self.headers.get("Cookie") or "") or self.op.get("elegir_siempre")
+        if ruta == "/accounts/login/" and self.op.get("tarjeta_y_form") and "error=" not in qs:
+            return self._responder(_pagina(ELEGIR % "javascript:void(0)" + self._login_html()))
         if ruta == "/accounts/login/" and recordada and "otro=1" not in qs and "error=" not in qs:
             otro = "javascript:void(0)" if self.op.get("otro_roto") else "/accounts/login/?otro=1"
             return self._responder(_pagina(ELEGIR % otro))
@@ -208,6 +210,13 @@ def _worker():
     from hookline import trabajos
     t = trabajos.tomar("prueba:1", ["ig_login"])
     assert t is not None and t.tipo == "ig_login", "no había un ig_login en la cola"
+    trabajos.correr(t)
+
+
+def _worker_borrar():
+    from hookline import trabajos
+    t = trabajos.tomar("prueba:1", ["ig_borrar"])
+    assert t is not None and t.tipo == "ig_borrar", "no había un ig_borrar en la cola"
     trabajos.correr(t)
 
 
@@ -502,11 +511,63 @@ def test_cargar_sesion_saca_del_navegador_la_sesion_de_instagram_que_ya_no_esta(
     with sync_playwright() as p:
         _, ctx = buscador._contexto(p)
         ctx.add_cookies([{"name": "sessionid", "value": "de-otra-persona", "domain": ".instagram.com", "path": "/"},
-                         {"name": "mid", "value": "m", "domain": ".instagram.com", "path": "/"}])
+                         {"name": "mid", "value": "m", "domain": ".instagram.com", "path": "/"},
+                         {"name": "recordado", "value": "flwrencia", "domain": HOST, "path": "/"}])
+        pg = ctx.new_page()
+        pg.goto(ig.URL_LOGIN)
+        pg.evaluate("localStorage.setItem('recordado', 'flwrencia')")
         buscador._cargar_sesion(ctx)
         hay = {(c["name"], c["value"], c["domain"]) for c in ctx.cookies()}
-    assert not any(n == "sessionid" and "instagram" in d for n, _, d in hay), hay
+        pg.goto(ig.URL_LOGIN)
+        guardado = pg.evaluate("localStorage.getItem('recordado')")
+        pg.close()
+    assert not any("instagram" in d for n, _, d in hay), hay               # ni la sesión ni el dispositivo
     assert any(n == "sessionid" and "tiktok" in d for n, _, d in hay), hay
+    assert guardado is None
+
+
+@con_chrome
+def test_borrar_la_sesion_guardada_limpia_tambien_el_navegador(ig, monkeypatch):
+    from playwright.sync_api import sync_playwright
+
+    from hookline.servicios import buscador
+    buscador.importar_cookies("sessionid=flor%3Avieja; mid=de-flor; csrftoken=t")
+    buscador.abrir()
+    with sync_playwright() as p:
+        _, ctx = buscador._contexto(p)
+        ctx.add_cookies([{"name": "sessionid", "value": "flor-vieja", "domain": HOST, "path": "/"},
+                         {"name": "mid", "value": "de-flor", "domain": HOST, "path": "/"},
+                         {"name": "recordado", "value": "flwrencia", "domain": HOST, "path": "/"},
+                         {"name": "sid_tt", "value": "de-tiktok", "domain": OTRA, "path": "/"}])
+        pg = ctx.new_page()
+        pg.goto(ig.URL_LOGIN)
+        pg.evaluate("localStorage.setItem('recordado', 'flwrencia')")
+        pg.close()
+    ig.borrar_sesion()
+    assert not buscador.estado_sesion()["instagram"]
+    _worker_borrar()                                              # el worker lo toma (la API no ve el navegador)
+    with sync_playwright() as p:
+        _, ctx = buscador._contexto(p)
+        hay = {(c["name"], c["value"], c["domain"]) for c in ctx.cookies()}
+        pg = ctx.new_page()
+        pg.goto(ig.URL_LOGIN)
+        guardado = pg.evaluate("localStorage.getItem('recordado')")
+        pg.close()
+    assert not any("instagram" in d for _, _, d in hay), hay
+    assert ("sid_tt", "de-tiktok", OTRA) in hay
+    assert guardado is None
+
+
+@con_chrome
+def test_tarjeta_y_formulario_a_la_vez_aprieta_entrar_y_nunca_continuar(ig):
+    from hookline.servicios import buscador
+    _IG.op["tarjeta_y_form"] = True
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+    assert not _IG.vistos.get("continuar")
+    assert any(c["name"] == "sessionid" and c["value"].startswith("bien") for c in buscador.cookies_guardadas())
 
 
 @con_chrome
@@ -837,6 +898,46 @@ def test_borrar_la_sesion_guardada(cliente_api, monkeypatch):
     assert not r.json()["sesiones"]["instagram"]["cargada"] and r.json()["sesiones"]["tiktok"]["cargada"]
     assert s.estado()["dispositivo_de"] == ""                      # el próximo inicio arranca con el navegador limpio
     assert not any(c["value"] == "de-flor" for c in buscador.cookies_guardadas())
+
+
+def test_borrar_no_limpia_si_mientras_esperaba_entro_bien_una_cuenta(monkeypatch):
+    from hookline.servicios import buscador
+    from hookline.servicios import sesion_ig as s
+
+    def no(*a, **k):
+        raise AssertionError("no tenía que tocar el navegador")
+    monkeypatch.setattr(buscador, "_abierto", lambda: False)
+    monkeypatch.setattr(buscador, "abrir", no)
+    s.borrar_sesion()
+    s.estado(dispositivo_de="bien")                                # entró bien @bien antes de que corriera
+    _worker_borrar()
+
+
+def test_cookies_pegadas_durante_un_login_cambian_el_dispositivo(monkeypatch):
+    from hookline.servicios import buscador
+    from hookline.servicios import sesion_ig as s
+    monkeypatch.setattr(buscador, "_abierto", lambda: False)
+    s.estado(estado="pide_codigo", mensaje="m", dispositivo_de="bien")
+    buscador.importar_cookies("sessionid=flor%3Ax; mid=de-flor")         # alguien pega las suyas en el medio
+    assert s.estado()["dispositivo_de"] == "" and s.estado()["estado"] == "pide_codigo"
+    s.estado(dispositivo_de="bien")
+    buscador.importar_cookies("sessionid=bien%3Ax; mid=m", de_login=True)  # las del propio login: no
+    assert s.estado()["dispositivo_de"] == "bien"
+
+
+def test_usar_otro_perfil_y_continuar_en_todas_sus_formas():
+    from hookline.servicios import sesion_ig as s
+    for t in ("Use another profile", " Use another profile ", "Use\u00a0another profile", "Use another\nprofile",
+              "Log into another account", "Log in to another account", "Switch accounts", "Not you?",
+              "Usar otro perfil", "Usar otra cuenta de Instagram", "Cambiar de cuenta", "¿No eres tú?",
+              "Iniciar sesión con otro perfil"):
+        assert s.OTRA_CUENTA.search(t), repr(t)
+    for t in ("Continue", "Continuar", "Create new account", "Log in", "Use another profile now"):
+        assert not s.OTRA_CUENTA.search(t), repr(t)
+    for t in ("Continue", "Continuar como flwrencia", "Continue as flwrencia"):
+        assert s.CONTINUAR.search(t), repr(t)
+    for t in ("Log in", "Iniciar sesión", "Entrar"):
+        assert not s.CONTINUAR.search(t), repr(t)
 
 
 def test_corregir_el_usuario_con_la_clave_guardada(cliente_api):

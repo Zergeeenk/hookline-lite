@@ -447,7 +447,7 @@ def cookies_guardadas() -> list[dict]:
         return []
 
 
-def importar_cookies(texto: str) -> int:
+def importar_cookies(texto: str, de_login: bool = False) -> int:
     """Guarda la sesión de la cuenta "para mirar" en datos/navegador/cookies.txt (lo leen el buscador, que corre en el
     worker, y las descargas con yt-dlp). No necesita abrir un navegador: la API y el worker son procesos distintos."""
     nuevas = leer_cookies(texto)
@@ -466,7 +466,7 @@ def importar_cookies(texto: str) -> int:
             for r in redes:
                 d[r] = {"vencida": False, "motivo": "", "cargada_el": _hora("%d/%m %H:%M"), "visto": ""}
             guardar_ajuste("sesiones_redes", d)
-    if any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in nuevas):
+    if not de_login and any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in nuevas):
         try:                             # el error viejo del inicio de sesión con usuario y contraseña ya no aplica
             from . import sesion_ig
             sesion_ig.cookies_cargadas()
@@ -532,14 +532,16 @@ def _sesion_viva(ctx, red: str) -> bool:
 
 
 def _cargar_sesion(ctx) -> None:
-    """Pasa cookies.txt al navegador. Para Instagram manda cookies.txt: si ahí no hay sesión (la borraron), el
-    navegador tampoco se queda con una vieja."""
+    """Pasa cookies.txt al navegador. Para Instagram manda cookies.txt: si ahí no hay sesión (la borraron o nunca
+    hubo), el navegador no se queda con nada de Instagram (ni una sesión vieja ni el «dispositivo» y la cuenta
+    recordada de quien haya sido)."""
     cs = cookies_guardadas()
     if not any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in cs):
         try:
-            ctx.clear_cookies(name=re.compile(r"^(sessionid|ds_user_id|rur|shbid|shbts)$"), domain=re.compile("instagram"))
+            from . import sesion_ig
+            sesion_ig.limpiar_instagram(ctx)
         except Exception as ex:
-            log.info("no pude sacar la sesión de Instagram del navegador: %s", type(ex).__name__)
+            log.info("no pude sacar Instagram del navegador: %s", type(ex).__name__)
     if cs:
         ctx.add_cookies(cs)
 

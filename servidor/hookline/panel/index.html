@@ -2400,7 +2400,7 @@ function cargarCookies() {
     }
     if (ev.target.closest("[data-igborrar]")) {
       if (!confirm("¿Borrar la sesión de Instagram guardada en el servidor? El buscador y las descargas quedan sin sesión hasta que inicies sesión de nuevo.")) return;
-      await mandar({ op: "ig_borrar_sesion" }, r => { if (CP) CP.sesiones = r.sesiones; toast("Listo: se borró la sesión guardada"); });
+      await mandar({ op: "ig_borrar_sesion" }, r => { if (CP) CP.sesiones = r.sesiones; toast("Listo: se borró la sesión guardada. El navegador del servidor la suelta apenas termine lo que está haciendo."); });
       return;
     }
     if (ev.target.closest("[data-olvidar]")) {

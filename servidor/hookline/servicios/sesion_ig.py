@@ -54,9 +54,14 @@ BOTON_COOKIES = re.compile(r"^(allow all cookies|allow essential and optional co
                            r"permitir todas las cookies|permitir cookies esenciales y opcionales|aceptar todas"
                            r"( las cookies)?|aceptar)$", re.I)
 # «Continuar como <cuenta guardada>»: nunca se toca «Continuar» (entraría a esa cuenta); siempre «Usar otro perfil»
-OTRA_CUENTA = re.compile(r"^(use another (profile|account)|switch accounts?|log ?in (to|with) another account|"
-                         r"not you\??|usar otro perfil|usar otra cuenta|cambiar de cuenta|"
-                         r"iniciar sesi[oó]n (en|con) otra cuenta|¿no (eres|sos) (t[uú]|vos)\??)$", re.I)
+_E = r"[\s\u00a0\u200b]"                      # espacio, NBSP o espacio de ancho cero
+OTRA_CUENTA = re.compile(
+    rf"^{_E}*(use{_E}+another{_E}+(profile|account)|switch{_E}+accounts?|"
+    rf"log{_E}*in(to)?{_E}+((to|with){_E}+)?another{_E}+(account|profile)|not{_E}+you{_E}*\??|"
+    rf"usar{_E}+otr[oa]{_E}+(perfil|cuenta)({_E}+de{_E}+instagram)?|cambiar{_E}+de{_E}+(cuenta|perfil)|"
+    rf"iniciar{_E}+sesi[oó]n{_E}+(en|con){_E}+otr[oa]{_E}+(cuenta|perfil)|¿no{_E}+(eres|sos){_E}+(t[uú]|vos)\??)"
+    rf"{_E}*$", re.I)
+CONTINUAR = re.compile(r"^\W*(continu(e|ar)|seguir)\b", re.I)   # el botón de la cuenta guardada: nunca
 BOTON_FUI_YO = re.compile(r"^(this was me|it was me|yes, it was me|fui yo|s[ií], fui yo|era yo)$", re.I)
 CAPTCHA = re.compile(r"captcha|i.?m not a robot|no soy un robot|confirm (that )?you.?re (a )?human|"
                      r"confirm[aá] que (sos|eres) (una persona|humano)", re.I)
@@ -272,13 +277,12 @@ def cookies_cargadas() -> None:
     frenaba el reintento por un código que nadie escribió tampoco. Lo de una contraseña o una cuenta mala queda."""
     with candado("ig_login"):
         e = estado()
-        if e.get("estado") in ACTIVOS:
-            return                           # es el propio login guardando sus cookies, o hay uno en marcha
         cambios = {"dispositivo_de": ""}         # las cookies de dispositivo ahora son del navegador de otra persona
-        if e.get("estado") == "error":
-            cambios.update(estado="parado", mensaje="")
-        if e.get("bloqueado") and e.get("bloqueado") != "definitivo":
-            cambios["bloqueado"] = False
+        if e.get("estado") not in ACTIVOS:       # (con un inicio en marcha, su resultado manda)
+            if e.get("estado") == "error":
+                cambios.update(estado="parado", mensaje="")
+            if e.get("bloqueado") and e.get("bloqueado") != "definitivo":
+                cambios["bloqueado"] = False
         estado(**cambios)
 
 
@@ -286,6 +290,7 @@ def borrar_sesion() -> None:
     """«Borrar la sesión guardada»: saca la sesión de Instagram del servidor (cookies.txt; el navegador del buscador
     la suelta en la próxima búsqueda o inicio de sesión) y el próximo inicio arranca con el navegador limpio. Para
     cuando quedó cargada la cuenta de otra persona (por ejemplo, la personal de quien exportó cookies)."""
+    from ..db import ahora
     from .buscador import borrar_cookies
     borrar_cookies("instagram")
     with candado("ig_login"):
@@ -294,6 +299,9 @@ def borrar_sesion() -> None:
         if e.get("estado") not in ACTIVOS:
             cambios.update(estado="parado", mensaje="")
         estado(**cambios)
+    # el navegador vive en el worker: lo limpia un trabajo del grupo del buscador (espera a lo que esté corriendo y
+    # pasa adelante de las búsquedas en cola)
+    encolar("ig_borrar", {}, clave=f"ig_borrar:{time.time_ns()}", max_intentos=2, cuando=ahora() - timedelta(minutes=30))
 
 
 def cancelar() -> dict:
@@ -478,6 +486,27 @@ def _sigue() -> None:
         raise ErrorLogin(M_CANCELADO, "cancelado")
 
 
+def _boton_entrar(pg, campo_clave):
+    """El botón que manda el formulario de la contraseña (no el primero de la página: si la tarjeta de la cuenta
+    guardada sigue a la vista, su «Continuar» puede estar antes). None = apretar Enter en la contraseña."""
+    el = None
+    try:
+        h = campo_clave.evaluate_handle("c => c.form && (c.form.querySelector('button[type=submit], input[type=submit]')"
+                                        " || c.form.querySelector('button'))")
+        el = h.as_element()
+        if el is not None and not el.is_visible():
+            el = None
+    except Exception:
+        el = None
+    el = el or _boton(pg, BOTON_ENTRAR)
+    try:
+        if el is not None and CONTINUAR.search(" ".join((el.inner_text() or el.get_attribute("value") or "").split())):
+            return None
+    except Exception:
+        return None
+    return el
+
+
 def _avance(**cambios) -> None:
     """Un paso del intento en curso, salvo que lo hayan cancelado desde el panel (el estado ya no está activo)."""
     with candado("ig_login"):
@@ -589,13 +618,49 @@ def _borrar_sesion_vieja(ctx, pg=None, todo: bool = False) -> None:
         log.info("no pude sacar la sesión vieja de Instagram del navegador: %s", type(ex).__name__)
 
 
+def limpiar_instagram(ctx) -> None:
+    """Todo lo de Instagram fuera del navegador (cookies y lo que guardó la página), con una página de paso."""
+    pg = None
+    try:
+        pg = ctx.new_page()
+        _borrar_sesion_vieja(ctx, pg, todo=True)
+    except Exception as ex:
+        log.info("no pude limpiar Instagram del navegador: %s", type(ex).__name__)
+    finally:
+        if pg is not None:
+            try:
+                pg.close()
+            except Exception:
+                pass
+
+
+def _hay_sesion_guardada() -> bool:
+    from .buscador import SESION_DE, _red, cookies_guardadas
+    return any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in cookies_guardadas())
+
+
+@manejador("ig_borrar")
+def _borrar_navegador(datos: dict) -> None:
+    """Después de «Borrar la sesión guardada»: saca todo lo de Instagram del navegador del buscador. Nada si mientras
+    esperaba entró bien una cuenta (el navegador ya quedó limpio para ella y la sesión es suya)."""
+    if estado().get("dispositivo_de") or _hay_sesion_guardada():
+        return
+    from .buscador import _contexto, _playwright, abrir
+    sync_playwright = _playwright()
+    abrir()
+    with sync_playwright() as p:
+        _, ctx = _contexto(p)
+        limpiar_instagram(ctx)
+    log.info("se limpió Instagram del navegador del buscador")
+
+
 def _guardar_cookies(ctx) -> int:
     from .buscador import _netscape, importar_cookies
     cs = [{"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c.get("path") or "/",
            "secure": bool(c.get("secure")), "httpOnly": bool(c.get("httpOnly")),
            "expires": max(0, int(c.get("expires") or 0))}
           for c in ctx.cookies() if "instagram" in str(c.get("domain"))]
-    return importar_cookies(_netscape(cs))
+    return importar_cookies(_netscape(cs), de_login=True)
 
 
 def _verificar(pg, ctx) -> int | None:
@@ -659,7 +724,7 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
     campo_clave = _visible(pg, CLAVE)
     _escribir(campo_clave, clave, "la contraseña")
     _aceptar_cookies(pg)
-    _apretar(pg, _visible(pg, "button[type='submit']") or _boton(pg, BOTON_ENTRAR), campo_clave)
+    _apretar(pg, _boton_entrar(pg, campo_clave), campo_clave)
     enviado, codigos, sesion_desde, aprobar, fui_yo = time.time(), 0, 0.0, 0.0, 0
     while time.time() < hasta:
         latido()
