@@ -60,7 +60,8 @@ class _YDLMientrasCarganOtra(_YDLQueBorra):
 
     def extract_info(self, link, download=False):
         from hookline.servicios import buscador
-        buscador.importar_cookies("sessionid=222%3Anueva%3A33; csrftoken=tok2; ds_user_id=222")
+        if self.o.get("cookiefile"):                       # una sola vez: mientras baja con la vieja
+            buscador.importar_cookies("sessionid=222%3Anueva%3A33; csrftoken=tok2; ds_user_id=222")
         return super().extract_info(link, download)
 
 
@@ -87,8 +88,28 @@ def test_fichas_tampoco_le_borran_la_sesion(ytdlp):
 
 
 @pytest.mark.parametrize("error,avisos,sesion,espera", [
-    ("There is no video in this post", [], False, "no da los videos sin sesión"),
-    ("Instagram sent an empty media response", [], False, "no da los videos sin sesión"),
+    ("There is no video in this post", [], False, "puede ser una foto o un video que Instagram solo muestra con sesión"),
+    ("Instagram sent an empty media response", [], False, "no dio el video sin sesión"),
+    ("ERROR: [Instagram] DgDwFQHByVM: No video formats found!; please report this issue on  https://github.com/yt-dlp/"
+     "yt-dlp/issues?q= , filling out", [], False, "no dio el video sin sesión"),            # lo del 26/11, sin sesión
+    ("ERROR: [Instagram] DgDwFQHByVM: No video formats found!", [], True, "puede ser de fotos, privado o borrado"),
+    ("Unable to download webpage: HTTP Error 404", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 400: "
+     "Bad Request (caused by <HTTPError 400: Bad Request>)"], True, "Instagram no dio ese video "
+     "(Video info extraction failed: HTTP Error 400: Bad Request)"),
+    ("Unable to download webpage: HTTP Error 404", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 503: "
+     "Service Unavailable"], True, "Instagram no respondió bien al pedir ese video"),             # 5xx: pasajero
+    ("Unable to download webpage", ["ERROR: [Instagram] X: Video info extraction failed: The read operation timed out"],
+     True, "Probá de nuevo en un rato"),
+    ("x", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 404: Not Found"], True, "no existe"),
+    ("ERROR: unable to write data: [Errno 28] No space left on device", [], True, "se quedó sin espacio"),
+    ("ERROR: Postprocessing: Conversion failed!", [], True, "No se pudo bajar («Postprocessing: Conversion failed!»)"),
+    ("no se guardó", [], True, "No se pudo bajar («no se guardó»)"),                    # no es «Instagram dijo»
+    ("ERROR: unable to download video data: HTTP Error 404: File not found", [], True,
+     "No se pudo bajar (Instagram dijo: «unable to download video data: HTTP Error 404: File not found»)"),
+    ("x", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 429: Too Many Requests"], True,
+     "frenó la cuenta «para mirar»"),
+    ("ERROR: Requested format is not available. Use --list-formats", [], True,
+     "No se pudo bajar («Requested format is not available. Use --list-formats»)"),
     ("There is no video in this post", [], True, "puede ser de fotos, privado o borrado"),
     ("There is no video in this post", ["The provided Instagram account cookies are no longer valid"], True, "venció"),
     ("This post is a photo", [], True, "es de fotos"),
