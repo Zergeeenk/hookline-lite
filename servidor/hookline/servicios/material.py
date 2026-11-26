@@ -373,6 +373,10 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
                 raise RuntimeError("no se guardó")
             if not tiene_audio(video):
                 video = _sumar_audio_aparte(yt_dlp, info, video, opts, log_y) or video
+            if not tiene_audio(video):
+                video = _sumar_audio_de_instagram(yt_dlp, info, video, opts) or video
+                if not tiene_audio(video):
+                    log.warning("el video %s (%s) quedó sin sonido: no hubo audio en ningún lado", video.name, link)
     except Exception as ex:
         log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
         # solo si la sesión que se usó sigue siendo la guardada: si mientras tanto cargaron o iniciaron otra, el
@@ -436,6 +440,108 @@ def _sumar_audio_aparte(yt_dlp, info: dict, video: Path, opts: dict, log_y) -> P
     finally:
         for p in video.parent.glob(tmp.name + ".*"):
             p.unlink(missing_ok=True)
+
+
+# El sonido de un reel cuando el video viene mudo y no hay pista de audio suelta: está en los datos del reel
+# (api/v1/media/<pk>/info → items[0].clips_metadata), como audio original o como la canción con licencia.
+ESQUEMAS_AUDIO = ("https://",)                        # los tests suman el servidor local
+HOSTS_AUDIO_IG = (".cdninstagram.com", ".fbcdn.net")  # de dónde se acepta bajar ese audio
+MAX_AUDIO = 60 * 1024 * 1024
+_LETRAS_IG = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _pk_instagram(codigo: str) -> int:
+    """El número del reel a partir de su código del link (lo mismo que hace yt-dlp; los privados traen 28 de más)."""
+    codigo = codigo[:-28] if len(codigo) > 28 else codigo
+    n = 0
+    for c in codigo:
+        n = n * 64 + _LETRAS_IG.index(c)
+    return n
+
+
+def _audio_permitido(url) -> bool:
+    if not isinstance(url, str) or len(url) > 4000 or not url.startswith(ESQUEMAS_AUDIO):
+        return False
+    import urllib.parse
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return any(host == h.lstrip(".") or host.endswith(h) for h in HOSTS_AUDIO_IG)
+
+
+def _audio_en_datos(medio) -> tuple[str, float] | None:
+    """(dirección del audio, desde qué segundo) en los datos del reel: primero el audio original del reel, después la
+    canción. Cualquier forma rara → None."""
+    cm = medio.get("clips_metadata") if isinstance(medio, dict) else None
+    if not isinstance(cm, dict):
+        return None
+    orig = cm.get("original_sound_info")
+    mus = cm.get("music_info")
+    asset = mus.get("music_asset_info") if isinstance(mus, dict) else None
+    consumo = mus.get("music_consumption_info") if isinstance(mus, dict) else None
+    candidatos = []
+    if isinstance(orig, dict):
+        candidatos.append((orig.get("progressive_download_url"), orig.get("audio_asset_start_time_in_ms")))
+    if isinstance(asset, dict):
+        desde = (consumo.get("audio_asset_start_time_in_ms") if isinstance(consumo, dict) else None) \
+            or mus.get("audio_asset_start_time_in_ms")
+        for k in ("fast_start_progressive_download_url", "progressive_download_url"):
+            candidatos.append((asset.get(k), desde))
+    for url, desde in candidatos:
+        if _audio_permitido(url):
+            ms = desde if isinstance(desde, (int, float)) and not isinstance(desde, bool) and 0 <= desde < 36e5 else 0
+            return url, ms / 1000
+    return None
+
+
+def _sumar_audio_de_instagram(yt_dlp, info: dict, video: Path, opts: dict) -> Path | None:
+    """Reel mudo sin pista de audio suelta: pide los datos del reel con la sesión «para mirar» (por el extractor de
+    Instagram de yt-dlp: sus cookies y sus encabezados), baja el audio original o la canción y lo une al video desde
+    el segundo en que arranca, al largo del video. Sin sesión, o si algo no está, queda como está."""
+    if info.get("extractor_key") != "Instagram" or not isinstance(info.get("id"), str) \
+            or not re.fullmatch(r"[\w-]{5,80}", info["id"]):
+        return None
+    tmp = video.with_name(video.stem + ".musica")
+    junto = video.with_name(video.stem + ".con-musica.mp4")
+    try:
+        o = {k: v for k, v in opts.items() if k not in ("merge_output_format",)}
+        with yt_dlp.YoutubeDL(o) as y:
+            ie = y.get_info_extractor("Instagram")
+            if not ie._is_logged_in:
+                log.info("el video %s vino sin sonido; sin la sesión «para mirar» no se pueden pedir los datos del reel",
+                         video.name)
+                return None
+            datos = ie._download_json(f"{ie._API_BASE_URL}/media/{_pk_instagram(info['id'])}/info/", info["id"],
+                                      note=False, errnote=False, fatal=False, headers=ie._api_headers)
+            items = datos.get("items") if isinstance(datos, dict) else None
+            hallado = _audio_en_datos(items[0]) if isinstance(items, list) and items else None
+            if not hallado:
+                log.info("el video %s vino sin sonido y los datos del reel no traen audio", video.name)
+                return None
+            url, desde = hallado
+            total = 0
+            with y.urlopen(url) as r, open(tmp, "wb") as f:
+                while bloque := r.read(1 << 16):
+                    total += len(bloque)
+                    if total > MAX_AUDIO:
+                        raise ValueError("audio demasiado grande")
+                    f.write(bloque)
+        r2 = subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-i", str(video), "-ss", f"{desde:.3f}", "-i", str(tmp),
+                             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                             "-af", "apad", "-shortest", str(junto)],
+                            capture_output=True, text=True, errors="ignore", timeout=600)
+        if r2.returncode or not junto.is_file() or not tiene_audio(junto):
+            log.info("no pude unir el audio del reel a %s: %s", video.name, r2.stderr[-200:])
+            return None
+        final = video.with_suffix(".mp4")
+        junto.replace(final)
+        if video != final:
+            video.unlink(missing_ok=True)
+        return final
+    except Exception as ex:
+        log.info("no pude bajar el audio del reel para %s: %s", video.name, ex)
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+        junto.unlink(missing_ok=True)
 
 
 def sacar_audio(video: Path, destino: Path) -> Path | None:
