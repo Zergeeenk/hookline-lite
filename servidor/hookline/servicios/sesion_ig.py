@@ -492,14 +492,20 @@ def _captchas_adentro(marco) -> list:
     return out
 
 
+def _captcha_para_tocar(pg, marco) -> bool:
+    """Un marco de captcha de los de más adentro (sin otro de captcha adentro), que no es invisible y se ve: algo para
+    tocar. El invisible de Google trae dos marcos: el que vigila (size=invisible) y el del desafío, escondido."""
+    return _es_captcha(marco) and not _invisible(marco) and not _captchas_adentro(marco) and _a_la_vista(pg, marco)
+
+
 def _captcha_en_marcos(pg) -> bool:
-    """Un captcha que el texto de la página no muestra: un marco de captcha a la vista, también adentro de otro marco.
-    Decide el de más adentro: el de Meta envuelve al de Google, y si el de Google es invisible (solo vigila) no hay nada
-    para tocar. Se mira cuando el inicio de sesión ya lleva un rato trabado: elige el mensaje, no corta un intento que
-    venía bien."""
+    """Un captcha que el texto de la página no muestra: un marco de captcha para tocar, también adentro de otro marco.
+    Decide el de más adentro: el de Meta envuelve al de Google, y si el de Google no pide nada (invisible, escondido)
+    no hay captcha. Se mira cuando el inicio de sesión ya lleva un rato trabado (sin código, sin botones, sin esperar
+    una aprobación)."""
     for f in _marcos(pg):
         try:
-            if _es_captcha(f) and not _invisible(f) and not _captchas_adentro(f) and _a_la_vista(pg, f):
+            if _captcha_para_tocar(pg, f):
                 return True
         except Exception:
             continue
@@ -507,15 +513,16 @@ def _captcha_en_marcos(pg) -> bool:
 
 
 def _marco_captcha(pg) -> bool:
-    """Un iframe de captcha a la vista en la página (MARCO_CAPTCHA). Si es un envoltorio (el de Meta) y adentro solo hay
-    captchas invisibles, no cuenta."""
+    """Un iframe de captcha a la vista en la página (MARCO_CAPTCHA). Si es un envoltorio (el de Meta), cuenta solo si
+    adentro hay un captcha para tocar: si adentro solo está el invisible de Google (el que vigila y el del desafío
+    escondido), no."""
     try:
         for el in pg.query_selector_all(MARCO_CAPTCHA):
             if not el.is_visible():
                 continue
             f = el.content_frame()
             adentro = _captchas_adentro(f) if f else []
-            if adentro and all(_invisible(h) for h in adentro):
+            if adentro and not any(_captcha_para_tocar(pg, h) for h in adentro):
                 continue
             return True
     except Exception:

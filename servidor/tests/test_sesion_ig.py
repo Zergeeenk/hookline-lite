@@ -144,11 +144,16 @@ class _IG(http.server.BaseHTTPRequestHandler):
         if ruta == "/captcha/meta/marco":             # el marco de Meta, que envuelve al «No soy un robot» de Google
             return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=normal' "
                                            "style='width:304px;height:78px;border:0'></iframe>"))
+        if ruta == "/recaptcha/api2/bframe":
+            return self._responder(_pagina("<p>Select all images with traffic lights</p>"))
         if ruta == "/recaptcha/api2/anchor":
             return self._responder(_pagina("<label>I'm not a robot</label><p>reCAPTCHA · Privacy - Terms</p>"))
-        if ruta == "/captcha/recaptcha/iframe/":
+        if ruta == "/captcha/recaptcha/iframe/":   # el invisible de Google: el que vigila y el del desafío, escondido
             return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=invisible' "
-                                           "style='width:256px;height:60px;border:0'></iframe>"))
+                                           "style='width:256px;height:60px;border:0'></iframe>"
+                                           "<iframe src='/recaptcha/api2/bframe?k=clave-del-sitio' style='width:400px;"
+                                           "height:580px;border:0;visibility:hidden;position:absolute;top:-10000px'>"
+                                           "</iframe>"))
         if ruta == "/marco/chiquito":
             return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=normal' "
                                            "style='width:1px;height:1px;border:0'></iframe>"))
@@ -158,7 +163,7 @@ class _IG(http.server.BaseHTTPRequestHandler):
             return self._responder(_pagina("<iframe src='/captcha/meta/marco?ctx=dato-de-la-sesion' "
                                            "style='width:320px;height:100px;border:0'></iframe>"))
         if ruta == "/accounts/login/aprobar":
-            return self._responder(_pagina(APROBAR))
+            return self._responder(_pagina(APROBAR + (META_INVISIBLE if self.op.get("meta_invisible") else "")))
         if ruta == "/accounts/onetap/":
             return self._responder(_pagina("<p>Save your login info?</p><button>Save info</button><button>Not now</button>"))
         if ruta == "/accounts/suspended/":
@@ -866,6 +871,25 @@ def test_un_captcha_que_no_pide_nada_no_cambia_el_mensaje(ig, monkeypatch, op):
     ig.iniciar()
     _worker()
     assert ig.publico()["mensaje"] == ig.M_NO_SE_MANDO, ig.publico()
+
+
+@con_chrome
+def test_esperando_la_aprobacion_un_captcha_invisible_envuelto_no_corta(ig, monkeypatch):
+    """Revisión: el invisible de Google envuelto por el marco de Meta (que dice «recaptcha») mientras se espera que
+    aprueben desde el celular. El chequeo de cada vuelta lo tomaba por un captcha y cortaba un login que iba a entrar."""
+    _IG.op["meta_invisible"] = True
+    ig.guardar_credenciales("aprobar", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    fin = time.time() + 60
+    while ig.publico()["mensaje"] != ig.M_APROBAR:                 # ya miró la página (con el marco) al menos una vez
+        assert time.time() < fin and ig.publico()["estado"] == "iniciando", ig.publico()
+        time.sleep(0.3)
+    time.sleep(4)                                                   # unas vueltas más mirando, sin cortar
+    assert ig.publico()["estado"] == "iniciando" and h.is_alive(), ig.publico()
+    _IG.op["aprobado"] = True
+    h.join(60)
+    assert ig.publico()["estado"] == "listo", ig.publico()
 
 
 @con_chrome
