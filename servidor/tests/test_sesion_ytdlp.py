@@ -94,8 +94,8 @@ def test_fichas_tampoco_le_borran_la_sesion(ytdlp):
      "yt-dlp/issues?q= , filling out", [], False, "no dio el video sin sesión"),            # lo del 26/11, sin sesión
     ("ERROR: [Instagram] DgDwFQHByVM: No video formats found!", [], True, "puede ser de fotos, privado o borrado"),
     ("Unable to download webpage: HTTP Error 404", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 400: "
-     "Bad Request (caused by <HTTPError 400: Bad Request>)"], True, "Instagram no dio ese video "
-     "(Video info extraction failed: HTTP Error 400: Bad Request)"),
+     "Bad Request (caused by <HTTPError 400: Bad Request>)"], True, "Instagram no dio ese video con la sesión «para "
+     "mirar» (Video info extraction failed: HTTP Error 400: Bad Request)"),
     ("Unable to download webpage: HTTP Error 404", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 503: "
      "Service Unavailable"], True, "Instagram no respondió bien al pedir ese video"),             # 5xx: pasajero
     ("Unable to download webpage", ["ERROR: [Instagram] X: Video info extraction failed: The read operation timed out"],

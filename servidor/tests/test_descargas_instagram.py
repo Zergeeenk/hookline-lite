@@ -300,8 +300,8 @@ def test_sesion_trabada_y_sin_sesion_tampoco_dice_el_motivo(ig, tmp_path):
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, VIDEO)
     m = str(e.value)
-    assert m.startswith("Instagram no dio ese video (") and "HTTP Error 400" in m and "confirmá que sos vos" in m, m
-    assert "la cuenta «para mirar»" in m and len(m) <= 300, m
+    assert m.startswith("Instagram no dio ese video con la sesión «para mirar» (") and "HTTP Error 400" in m, m
+    assert "confirmá que sos vos" in m and len(m) <= 300, m
     assert "github" not in m.lower() and "please report" not in m.lower()
 
 
@@ -342,7 +342,8 @@ def test_si_instagram_falla_al_pedir_el_post_dice_que_se_pruebe_en_un_rato(ig, t
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, VIDEO)
     m = str(e.value)
-    assert m.startswith("Instagram no respondió bien al pedir ese video (") and "Probá de nuevo en un rato" in m, m
+    assert m.startswith("Instagram no respondió bien al pedir ese video con la sesión «para mirar» ("), m
+    assert "Probá de nuevo en un rato" in m
     assert "fotos" not in m and "privado" not in m
 
 
@@ -479,6 +480,56 @@ def test_el_filtro_del_carrusel():
     assert f({"id": None, "formats": [{"url": "u"}]}, incomplete=True) is None                # sin código: no lo frena
     g = material._un_solo_video()                                     # cada descarga empieza de cero
     assert g({"id": "V2", "formats": [{"url": "u"}]}, incomplete=True) is None
+
+
+def _motivos(monkeypatch) -> dict:
+    """Los mensajes de bajar_video, por caso, y si son de ese link (True) o fallarían con cualquier link (False)."""
+    from hookline.servicios import buscador, material as m
+    L, aviso = "https://www.instagram.com/p/X/", "ERROR: [Instagram] X: Video info extraction failed: "
+    monkeypatch.setattr(buscador, "estado_sesion", lambda: {"instagram": True, "tiktok": True})
+    con = {
+        "foto": (m.M_FOTO, True),
+        "carrusel de fotos": (m.M_CARRUSEL, True),
+        "post que no existe": (m.motivo_ytdlp(RuntimeError("x"), L, [aviso + "HTTP Error 404: Not Found"], True), True),
+        "sin video con la sesión andando": (m.motivo_ytdlp(RuntimeError("No video formats found!"), L, []), True),
+        "el CDN no tiene el video": (m.motivo_ytdlp(RuntimeError("unable to download video data: HTTP Error 404"), L, []),
+                                     True),
+        "sesión vencida": (m.motivo_ytdlp(RuntimeError("x"), L, ["cookies are no longer valid"]), False),
+        "sesión frenada": (m.motivo_ytdlp(RuntimeError("x"), L, [aviso + "HTTP Error 429: Too Many"], True), False),
+        "sesión trabada": (m.motivo_ytdlp(RuntimeError("HTTP Error 404"), L, [aviso + "HTTP Error 400: Bad"], True), False),
+        "Instagram fallando": (m.motivo_ytdlp(RuntimeError("x"), L, [aviso + "HTTP Error 503: Unavailable"], True), False),
+        "sin video sin sesión": (m.motivo_ytdlp(RuntimeError("There is no video in this post"), L,
+                                                [aviso + "HTTP Error 400: Bad"], True), False),
+    }
+    monkeypatch.setattr(buscador, "estado_sesion", lambda: {"instagram": False, "tiktok": False})
+    con["sin ninguna sesión"] = (m.motivo_ytdlp(RuntimeError("There is no video in this post"), L, []), False)
+    return con
+
+
+@pytest.mark.parametrize("caso", ["foto", "carrusel de fotos", "post que no existe", "sin video con la sesión andando",
+                                  "el CDN no tiene el video", "sesión vencida", "sesión frenada", "sesión trabada",
+                                  "Instagram fallando", "sin video sin sesión", "sin ninguna sesión"])
+def test_hacer_n_pone_otro_link_solo_si_el_problema_es_de_ese_link(monkeypatch, caso):
+    """«Hacer N» (fabrica, #38) pone otro link guardado en el lugar de uno que no baja, salvo que el motivo diga
+    «sesión»: ahí fallarían todos y se gastaría el banco. Los mensajes de bajar_video tienen que respetar eso (se prueba
+    con fabrica tal cual, sin tocarla): los que son de ese link no dicen «sesión»; los que fallarían con cualquiera, sí."""
+    from hookline.db import sesion
+    from hookline.modelos import LinkBanco
+    from hookline.servicios import fabrica, material
+    motivo, de_ese_link = _motivos(monkeypatch)[caso]
+
+    def falla(*a, **k):
+        raise ValueError(motivo)
+
+    monkeypatch.setattr(material, "bajar_video", falla)
+    roto, libre = "https://www.instagram.com/reel/ROTO1/", "https://www.instagram.com/reel/LIBRE1/"
+    fabrica.guardar_links(f"{roto}\n{libre}")
+    with sesion() as s:                                   # el roto es el más viejo: «Hacer 1» lo toma primero
+        s.get(LinkBanco, libre).agregado = s.get(LinkBanco, roto).agregado.replace(year=2099)
+    [cid] = fabrica.hacer_guardados(1, "")
+    fabrica._descargar({"copia": cid, "link": roto})
+    with sesion() as s:
+        assert bool(s.get(LinkBanco, libre).copia_id) is de_ese_link, motivo
 
 
 def test_los_mensajes_entran_en_lo_que_muestra_el_panel(monkeypatch):
