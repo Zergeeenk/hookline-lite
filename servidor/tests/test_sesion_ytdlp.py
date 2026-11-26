@@ -87,8 +87,18 @@ def test_fichas_tampoco_le_borran_la_sesion(ytdlp):
 
 
 @pytest.mark.parametrize("error,avisos,sesion,espera", [
-    ("There is no video in this post", [], False, "no da los videos sin sesión"),
-    ("Instagram sent an empty media response", [], False, "no da los videos sin sesión"),
+    ("There is no video in this post", [], False, "puede ser una foto o un video que Instagram solo muestra con sesión"),
+    ("Instagram sent an empty media response", [], False, "no dio el video sin sesión"),
+    ("ERROR: [Instagram] DgDwFQHByVM: No video formats found!; please report this issue on  https://github.com/yt-dlp/"
+     "yt-dlp/issues?q= , filling out", [], False, "no dio el video sin sesión"),            # lo del 26/11, sin sesión
+    ("ERROR: [Instagram] DgDwFQHByVM: No video formats found!", [], True, "puede ser de fotos, privado o borrado"),
+    ("Unable to download webpage: HTTP Error 404", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 400: "
+     "Bad Request (caused by <HTTPError 400: Bad Request>)"], True, "ni con la sesión «para mirar» ni sin ella "
+     "(Video info extraction failed: HTTP Error 400: Bad Request)"),
+    ("x", ["ERROR: [Instagram] X: Video info extraction failed: HTTP Error 429: Too Many Requests"], True,
+     "frenó la cuenta «para mirar»"),
+    ("ERROR: Requested format is not available. Use --list-formats", [], True,
+     "No se pudo bajar (Instagram dijo: «Requested format is not available. Use --list-formats»)"),
     ("There is no video in this post", [], True, "puede ser de fotos, privado o borrado"),
     ("There is no video in this post", ["The provided Instagram account cookies are no longer valid"], True, "venció"),
     ("This post is a photo", [], True, "es de fotos"),

@@ -289,6 +289,23 @@ def _hay_sesion(link: str) -> bool:
     return bool(est.get("tiktok" if "tiktok.com" in link else "instagram"))
 
 
+M_FOTO = "Ese link es de una foto, no de un video: no hay nada para copiar. Si te sirve la imagen, sacale captura y subila."
+M_CARRUSEL = ("Ese link es un carrusel de fotos, sin ningún video: no hay nada para copiar. Si te sirven las imágenes, "
+              "sacales captura y subilas.")
+
+
+def _detalle(ex) -> str:
+    """El error de yt-dlp, corto, para el final del mensaje: sin «ERROR: [Instagram] <código>:», sin el pedido de
+    reportarlo, sin «(caused by …)» y sin links."""
+    t = " ".join(str(ex or "").split())
+    t = re.sub(r"^(?:ERROR:\s*)+", "", t)
+    t = re.sub(r"^\[[^\]]{1,40}\]\s*(?:[\w-]{1,80}:\s*)?", "", t)
+    t = re.split(r"[;,]?\s*please report this issue", t, flags=re.I)[0]
+    t = re.sub(r"\s*\(caused by .*$", "", t, flags=re.I)
+    t = re.sub(r"https?://\S+", "", t)
+    return " ".join(t.split()).strip(" .;:,")[:140]
+
+
 def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> str:
     """El error de yt-dlp en criollo, diciendo qué hacer."""
     txt = (str(ex) + " " + " ".join(avisos or [])).lower()
@@ -306,19 +323,33 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> s
         if any(k in txt for k in ("no video", "not available", "unable to extract", "no formats", "404")):
             return "Ese pin no tiene video (es una imagen) o lo borraron: probá con otro o subí el video con «Subir video»."
         return "No se pudo bajar ese pin de Pinterest. Fijate que sea un pin de video público."
+    http = re.search(r"video info extraction failed: http error (\d{3})", txt) if ig else None
+    if http:
+        # con la sesión, Instagram contestó con un error al pedir el video (y bajar_video ya probó sin sesión): un post
+        # borrado o privado, un «confirmá que sos vos» pendiente en esa cuenta, un freno por muchos pedidos…
+        if http.group(1) == "429":
+            return ("Instagram frenó la cuenta «para mirar» por muchos pedidos y sin sesión tampoco dio el video. "
+                    "Esperá un rato y probá de nuevo.")
+        dijo = next((a for a in avisos or [] if "video info extraction failed" in a.lower()), str(ex))
+        return (f"Instagram no dio ese video ni con la sesión «para mirar» ni sin ella ({_detalle(dijo)}). Abrí el link "
+                "en el navegador: si no está, lo borraron o es privado; si está, puede que esa cuenta tenga un aviso "
+                "pendiente (como «confirmá que sos vos»): entrá a esa cuenta desde el celular y fijate.")
     if red and any(k in txt for k in ("login", "cookie", "rate", "empty media", "no video in this post",
-                                       "registered users", "not available")):
+                                       "no video formats", "registered users", "not available")):
         if _hay_sesion(link):
             return (f"{red} no dio ese video ni con la sesión cargada: puede ser de fotos, privado o borrado. Abrilo en "
                     "el navegador; si es un video público, subilo con «Subir video».")
         if ig:
-            return ("Instagram no da los videos sin sesión. Iniciá sesión con la cuenta «para mirar» en Memes → «Sesión "
-                    "de Instagram», o subilo con el botón «Subir video».")
-        return (f"{red} no da los videos sin sesión. Cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado», o "
+            return ("Instagram no dio el video sin sesión: puede ser una foto o un video que Instagram solo muestra con "
+                    "sesión. Si es un video, iniciá sesión con la cuenta «para mirar» en Memes → «Sesión de Instagram», "
+                    "o subilo con el botón «Subir video».")
+        return (f"{red} no dio el video sin sesión. Cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado», o "
                 "subilo con el botón «Subir video».")
     if "private" in txt:
         return "Ese video es privado: subilo con el botón «Subir video»."
-    return "No se pudo bajar. Fijate que el link sea de un video público."
+    d = _detalle(ex)
+    return ("No se pudo bajar" + (f" ({red + ' dijo: ' if red else ''}«{d}»)" if d else "") + ". Fijate que el link "
+            "sea de un video público; si lo es, probá de nuevo en un rato o subilo con «Subir video».")
 
 
 ESQUEMAS_VIDEO = ("https://",)   # de dónde se acepta un video directo guardado en el banco (los tests suman el local)
@@ -343,8 +374,68 @@ def _url_descarga(link: str) -> str:
     return v if video_valido(v) else link
 
 
+class _SinVideo(Exception):
+    """yt-dlp trajo el post y no tiene ningún video (un carrusel de fotos)."""
+
+
+def _que_es(datos) -> str:
+    """Lo que dicen los datos del post que trajo yt-dlp con la sesión (api/v1/media/<pk>/info): «foto» o «carrusel» (de
+    fotos, sin ningún video); «» si tiene video o no se sabe."""
+    items = datos.get("items") if isinstance(datos, dict) else None
+    m = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    if m is None:
+        return ""
+
+    def video(x) -> bool:
+        return x.get("media_type") != 1 or bool(x.get("video_versions") or x.get("video_dash_manifest"))
+
+    hijos = m.get("carousel_media")
+    if isinstance(hijos, list) and hijos:
+        return "" if any(not isinstance(h, dict) or video(h) for h in hijos) else "carrusel"
+    return "" if video(m) else "foto"
+
+
+def _un_solo_video():
+    """match_filter de yt-dlp para los carruseles: saltea las fotos (sin eso, la primera foto hace fallar todo) y deja
+    bajar un solo video, el primero. Con un video suelto no cambia nada."""
+    elegido: list = []
+
+    def filtro(info, *, incomplete=False):
+        if "formats" in info and not info.get("formats") and not info.get("url"):
+            return "es una foto"
+        clave = info.get("id")
+        if not clave or not (info.get("formats") or info.get("url")):
+            return None                          # todavía no es un video (el carrusel mismo, o algo a medio armar)
+        if not elegido:                          # por el código: yt-dlp mira cada uno más de una vez (primero sin su
+            elegido.append(clave)                # número en el carrusel)
+        return None if clave == elegido[0] else "ya hay un video"
+
+    return filtro
+
+
+def _extraer(yt_dlp, opts: dict, link: str, capturado: list) -> tuple[Path, dict]:
+    """Una pasada de yt-dlp: baja el video y devuelve (ruta, info). De un carrusel, el primer video."""
+    with yt_dlp.YoutubeDL({**opts, "match_filter": _un_solo_video()}) as y:
+        _capturar_datos_ig(y, link, capturado)
+        info = y.extract_info(_url_descarga(link), download=True)
+        if not isinstance(info, dict):
+            raise RuntimeError("yt-dlp no devolvió nada")
+        if info.get("_type") in ("playlist", "multi_video"):
+            info = next((e for e in info.get("entries") or [] if isinstance(e, dict) and e.get("requested_downloads")),
+                        None)
+            if info is None:
+                raise _SinVideo("carrusel")
+        hecho = [d.get("filepath") for d in info.get("requested_downloads") or [] if d.get("filepath")]
+        video = Path(hecho[0]) if hecho else Path(y.prepare_filename(info))
+    if not video.is_file():
+        raise RuntimeError("no se guardó")
+    return video, info
+
+
 def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B_%(id)s") -> tuple[Path, dict]:
-    """yt-dlp. Devuelve (ruta, info). ValueError con el motivo en criollo."""
+    """yt-dlp. Devuelve (ruta, info). ValueError con el motivo en criollo. De Instagram: si los datos del post dicen que
+    es de fotos, lo dice sin insistir; si con la sesión «para mirar» no sale (vencida, trabada, frenada), prueba una
+    vez sin sesión, como lo ve cualquiera."""
     try:
         import yt_dlp
     except ImportError:
@@ -361,35 +452,50 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             "socket_timeout": 20, "retries": 2}
     red = "tiktok" if "tiktok.com" in link else "instagram"
     sesion_antes = _sesion_guardada(red)
-    try:
-        with cookies_ytdlp() as ck:
-            if ck:
-                opts["cookiefile"] = ck
-            capturado: list[dict] = []
-            with yt_dlp.YoutubeDL(opts) as y:
-                _capturar_datos_ig(y, link, capturado)
-                info = y.extract_info(_url_descarga(link), download=True)
-                hecho = [d.get("filepath") for d in info.get("requested_downloads") or [] if d.get("filepath")]
-                video = Path(hecho[0]) if hecho else Path(y.prepare_filename(info))
-            if not video.is_file():
-                raise RuntimeError("no se guardó")
-            if not tiene_audio(video):
-                video = _sumar_audio_aparte(yt_dlp, info, video, opts, log_y) or video
-            if not tiene_audio(video):
-                video = _sumar_audio_de_instagram(yt_dlp, info, video, opts,
-                                                  capturado[-1] if capturado else None) or video
-                if not tiene_audio(video):
-                    log.warning("el video %s (%s) quedó sin sonido: no hubo audio en ningún lado", video.name, link)
-    except Exception as ex:
-        log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
-        # solo si la sesión que se usó sigue siendo la guardada: si mientras tanto cargaron o iniciaron otra, el
-        # error es de la vieja y la nueva no venció
-        if any("no longer valid" in a.lower() for a in log_y.avisos) and _sesion_guardada(red) == sesion_antes:
+    capturado: list[dict] = []
+    marcada: list = []
+
+    def si_vencio():
+        """Si yt-dlp avisó que la sesión no vale, se marca vencida (aunque el video haya bajado igual, sin sesión). Solo
+        si la que se usó sigue siendo la guardada: si mientras tanto cargaron o iniciaron otra, la nueva no venció."""
+        if marcada or not any("no longer valid" in a.lower() for a in log_y.avisos):
+            return
+        marcada.append(True)
+        if _sesion_guardada(red) == sesion_antes:
             try:
                 from .buscador import marcar_sesion
                 marcar_sesion(red, True, "Venció al bajar un video (la cerraron o expiró)")
             except Exception:
                 pass
+
+    try:
+        with cookies_ytdlp() as ck:
+            usadas = {**opts, "cookiefile": ck} if ck else opts
+            try:
+                video, info = _extraer(yt_dlp, usadas, link, capturado)
+            except _SinVideo:
+                raise
+            except Exception as ex:
+                if not (ck and sesion_antes and "instagram.com" in link) or _que_es(capturado[-1] if capturado else None):
+                    raise
+                log.info("yt-dlp no pudo con %s con la sesión «para mirar» (%s): pruebo sin sesión", link, _detalle(ex))
+                si_vencio()
+                usadas = opts
+                video, info = _extraer(yt_dlp, usadas, link, [])
+            si_vencio()
+            if not tiene_audio(video):
+                video = _sumar_audio_aparte(yt_dlp, info, video, usadas, log_y) or video
+            if not tiene_audio(video):
+                video = _sumar_audio_de_instagram(yt_dlp, info, video, usadas,
+                                                  capturado[-1] if capturado else None) or video
+                if not tiene_audio(video):
+                    log.warning("el video %s (%s) quedó sin sonido: no hubo audio en ningún lado", video.name, link)
+    except Exception as ex:
+        log.info("yt-dlp no pudo con %s: %s | %s", link, ex, " | ".join(log_y.avisos)[:500])
+        si_vencio()
+        que = "carrusel" if isinstance(ex, _SinVideo) else _que_es(capturado[-1] if capturado else None)
+        if que:
+            raise ValueError(M_FOTO if que == "foto" else M_CARRUSEL) from None
         raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None
     return video, info
 
