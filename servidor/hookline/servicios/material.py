@@ -308,7 +308,9 @@ def _detalle(ex) -> str:
 
 def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None) -> str:
     """El error de yt-dlp en criollo, diciendo qué hacer."""
-    txt = (str(ex) + " " + " ".join(avisos or [])).lower()
+    # «Requested format is not available» es del formato pedido, no de la sesión ni del post: que no lo tome
+    # «not available»
+    txt = (str(ex) + " " + " ".join(avisos or [])).lower().replace("requested format is not available", "")
     ig = "instagram.com" in str(link)
     red = "Instagram" if ig else "TikTok" if "tiktok.com" in str(link) else ""
     if "no longer valid" in txt:
