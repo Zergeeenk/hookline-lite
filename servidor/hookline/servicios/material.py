@@ -445,9 +445,21 @@ def _sumar_audio_aparte(yt_dlp, info: dict, video: Path, opts: dict, log_y) -> P
         shutil.rmtree(oculta, ignore_errors=True)
 
 
+TEMPORALES_VIEJOS = 3600   # segundos: una carpeta temporal más vieja que esto ya no es de una descarga en curso
+
+
 def _temporales(video: Path) -> Path:
     """Una carpeta oculta y propia de esta descarga, al lado del video: si el worker se corta a mitad, lo que quede
-    no aparece en Ejemplos ni en la vista previa (las listas saltean lo oculto y las carpetas)."""
+    no aparece en Ejemplos ni en la vista previa (las listas saltean lo oculto y las carpetas). De paso barre las de
+    más de una hora que dejó una descarga cortada por un reinicio (las recientes pueden ser de otra que sigue)."""
+    import time
+    limite = time.time() - TEMPORALES_VIEJOS
+    for vieja in video.parent.glob(".temporal-*"):
+        try:
+            if vieja.is_dir() and not vieja.is_symlink() and vieja.stat().st_mtime < limite:
+                shutil.rmtree(vieja)
+        except Exception as ex:
+            log.info("no pude barrer %s: %s", vieja.name, ex)
     d = video.parent / f".temporal-{uuid.uuid4().hex[:10]}"
     d.mkdir()
     return d
