@@ -2328,6 +2328,8 @@ function cargarCookies() {
       <div class="dlg-tx" style="margin-top:8px">En tu navegador, con la cuenta iniciada, exportá las cookies con una extensión (<b>Cookie-Editor</b> → Export) y pegalas acá. ${icn("alert", "sm")} No las mandes por chat: con eso cualquiera entra a la cuenta.</div>
       <textarea class="in" id="ckTexto" rows="6" placeholder="# Netscape HTTP Cookie File   ·   o   [{&quot;name&quot;: ...}]   ·   o   sessionid=...; csrftoken=..." style="font-family:monospace;font-size:12px" autocomplete="off" spellcheck="false"></textarea>
       <div style="margin-top:8px"><button class="btn" data-ok>${icn("check")}Guardar cookies</button></div>
+      <div class="dlg-tx" style="margin-top:14px">¿Quedó cargada otra cuenta (por ejemplo, la tuya personal)? Borrala del servidor: el buscador queda sin sesión de Instagram hasta que inicies sesión de nuevo.</div>
+      <div style="margin-top:8px"><button class="btn fant peligro" data-igborrar>${icn("trash")}Borrar la sesión guardada</button></div>
     </details>
     <div class="dlg-pie">${si.tiene_credenciales ? `<button class="btn fant" data-olvidar>Olvidar la cuenta</button>` : ""}<span style="flex:1"></span><button class="btn" data-x>Cerrar</button><button class="btn prim" data-iglogin>${icn("key")}Iniciar sesión</button></div></div>`;
   document.body.appendChild(f);
@@ -2394,6 +2396,11 @@ function cargarCookies() {
     }
     if (ev.target.closest("[data-igcancelar]")) {
       await mandar({ op: "ig_cancelar" });
+      return;
+    }
+    if (ev.target.closest("[data-igborrar]")) {
+      if (!confirm("¿Borrar la sesión de Instagram guardada en el servidor? El buscador y las descargas quedan sin sesión hasta que inicies sesión de nuevo.")) return;
+      await mandar({ op: "ig_borrar_sesion" }, r => { if (CP) CP.sesiones = r.sesiones; toast("Listo: se borró la sesión guardada. El navegador del servidor la suelta apenas termine lo que está haciendo."); });
       return;
     }
     if (ev.target.closest("[data-olvidar]")) {

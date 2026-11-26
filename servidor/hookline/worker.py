@@ -24,7 +24,7 @@ log = logging.getLogger("hookline.worker")
 
 GRUPOS = {"publicar": ("publicar",), "render": ("render", "preparar_copia"),
           "descargas": ("descargar_ejemplo", "bajar_material", "fichas", "pyro_material"),
-          "buscador": ("buscar", "ig_login")}     # comparten el navegador del buscador: de a uno
+          "buscador": ("buscar", "ig_login", "ig_borrar")}     # comparten el navegador del buscador: de a uno
 PERIODO_RAPIDO = 4       # recoger resultados de Claude Code, avanzar encargos, escanear la bandeja
 PERIODO_COLA = 30
 
