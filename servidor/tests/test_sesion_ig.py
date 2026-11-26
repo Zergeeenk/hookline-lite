@@ -53,10 +53,17 @@ SPA_LOGIN = ('<form id="lf"><input name="username" aria-label="Phone number, use
              '<input name="password" type="password"><button type="submit">Log in</button></form><p id="msg"></p>'
              '<script>document.getElementById("lf").onsubmit = async ev => { ev.preventDefault();'
              'if (window.MUDO) return;'
-             'const r = await fetch("/api/v1/web/accounts/login/ajax/", {method: "POST",'
+             'const ruta = window.BLOKS ? "/async/wbloks/fetch/?appid=com.bloks.www.caa.login.async.send_login_request&type=action"'
+             ' : "/api/v1/web/accounts/login/ajax/";'
+             'const r = await fetch(ruta, {method: "POST",'
              ' body: new URLSearchParams(new FormData(ev.target))});'
              'const j = await r.json();'
              'if (j.authenticated) location.href = "/";'
+             'else if (j.aprobar) { document.body.innerHTML = "<h2>Check your notifications on another device</h2>'
+             '<p>We sent a notification to your Xiaomi Redmi Note 13 4G, Windows.</p><p>Waiting for approval</p>'
+             '<button type=button>Try another way</button>";'
+             ' setInterval(async () => { const k = await (await fetch("/api/aprobado", {method: "POST"})).json();'
+             ' if (k.ok) location.href = "/"; }, 500); }'
              'else if (j.mostrar) document.getElementById("msg").textContent = j.mostrar; };</script>')
 APROBAR = ("<h2>Check your notifications on another device</h2><p>Approve this login to continue.</p><script>"
            "setInterval(async () => { const j = await (await fetch('/api/aprobado', {method: 'POST'})).json();"
@@ -80,7 +87,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
 
     def _login_html(self) -> str:
         if self.op.get("spa_login"):
-            return ("<script>window.MUDO = 1</script>" if self.op.get("boton_mudo") else "") + SPA_LOGIN
+            return (("<script>window.MUDO = 1</script>" if self.op.get("boton_mudo") else "")
+                    + ("<script>window.BLOKS = 1</script>" if self.op.get("bloks") else "") + SPA_LOGIN)
         clave = '<input name="password" type="password"%s>' % (" disabled" if self.op.get("clave_deshabilitada") else "")
         if self.op.get("escondido"):               # un input de usuario oculto ANTES del visible
             return ('<input name="username" style="display:none"><form method="post" action="/accounts/login/ajax/">'
@@ -170,11 +178,22 @@ class _IG(http.server.BaseHTTPRequestHandler):
             ok = bool(self.op.get("aprobado"))
             return self._responder(json.dumps({"ok": ok}).encode(), sesion="aprobar" if ok else "",
                                    tipo="application/json")
+        if self.path.startswith("/async/wbloks/fetch/"):     # el login nuevo de Meta: otra ruta y otra respuesta
+            time.sleep(float(self.op.get("demora_login") or 0))
+            if campo("username") == "aprobar" and campo("password") == "clave-buena":   # «aprobalo desde tu celular»
+                return self._json({"payload": {"layout": "x"}, "aprobar": True})
+            if campo("password") != "clave-buena":           # solo el texto nuevo de Meta en la página
+                return self._json({"payload": {"layout": "x"}, "mostrar": "The login information you entered is incorrect."})
+            return self._json({"payload": {"layout": "x"}, "authenticated": True}, sesion=campo("username"))
         if self.path == "/api/v1/web/accounts/login/ajax/":   # el login de la app de una página: contesta JSON
+            time.sleep(float(self.op.get("demora_login") or 0))
             usuario, clave = campo("username"), campo("password")
             if usuario == "esperar2":
                 return self._json({"message": "Please wait a few minutes before you try again.", "spam": True,
                                    "status": "fail"}, 429)
+            if usuario == "limitada":                           # el bloqueo «Try Again Later» de Instagram
+                return self._json({"message": "feedback_required", "spam": True, "feedback_title": "Try Again Later",
+                                   "status": "fail"}, 400)
             if usuario == "noexiste":
                 return self._json({"user": False, "authenticated": False, "status": "ok"})
             if clave != "clave-buena":                          # la página muestra un texto que no conocemos
@@ -638,6 +657,88 @@ def test_lo_que_contesta_instagram_al_login_se_explica_enseguida(ig, usuario, cl
 
 
 @con_chrome
+def test_el_login_nuevo_de_meta_por_otra_ruta_entra(ig):
+    _IG.op.update(spa_login=True, bloks=True)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+def test_aprobar_desde_el_celular_con_el_login_nuevo_de_meta(ig):
+    """Lo que pasó en el servidor el 26/11: Instagram contestó por la ruta nueva de Meta y mostró «Check your
+    notifications on another device» en la misma página; el login cortaba a los 30 s («el botón no respondió») y cuando
+    ella aprobaba en el celular ya no había nadie esperando."""
+    _IG.op.update(spa_login=True, bloks=True)
+    ig.guardar_credenciales("aprobar", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    fin = time.time() + 60
+    while ig.publico()["mensaje"] != ig.M_APROBAR:
+        assert time.time() < fin and ig.publico()["estado"] == "iniciando", ig.publico()
+        time.sleep(0.3)
+    time.sleep(35)                                                  # ella tarda en ver la notificación: no se corta
+    assert ig.publico()["estado"] == "iniciando" and h.is_alive(), ig.publico()
+    _IG.op["aprobado"] = True                                       # la aprueba en el Redmi
+    h.join(60)
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+def test_si_instagram_tarda_en_contestar_el_login_no_lo_corta(ig, monkeypatch):
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 2)                     # contesta después del tope
+    _IG.op.update(spa_login=True, demora_login=5)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+def test_el_texto_nuevo_de_meta_para_usuario_o_contrasena_incorrectos(ig):
+    _IG.op.update(spa_login=True, bloks=True)
+    ig.guardar_credenciales("bien", "otra-clave")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and p["mensaje"] == ig.M_DATOS, p
+    assert time.time() - t0 < 30 and ig.estado().get("bloqueado") == "definitivo"
+
+
+@con_chrome
+def test_feedback_required_frena(ig):
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("limitada", "clave-buena")
+    ig.iniciar()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and "esperar unos minutos" in p["mensaje"], p
+    assert float(ig.estado().get("espera_hasta") or 0) > time.time()
+
+
+@con_chrome
+def test_la_captura_tapa_el_codigo(ig, monkeypatch):
+    from PIL import Image
+
+    from hookline import almacen
+    monkeypatch.setattr(ig, "ESPERA_RESULTADO", 2)
+    monkeypatch.setattr(ig, "ESPERA_CODIGO", 4)
+    _IG.op["demora"] = 30                                           # valida tan lento que se rinde con el código escrito
+    ig.guardar_credenciales("spa", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    _esperar(ig, "pide_codigo")
+    ig.dar_codigo("123456")
+    h.join(90)
+    assert ig.publico()["mensaje"] == ig.M_SIN_CODIGO, ig.publico()
+    im = Image.open(almacen.dir_de("navegador") / "login-ultimo.png").convert("RGB")
+    magenta = sum(n for n, (r, g, b) in im.getcolors(maxcolors=1 << 24) if r > 240 and g < 20 and b > 240)
+    assert magenta > 500, magenta                                   # el campo del código salió tapado
+
+
+@con_chrome
 def test_si_pide_confirmar_y_la_pagina_no_va_sola_va_al_checkpoint(ig):
     from hookline.servicios import buscador
     _IG.op["spa_login"] = True
@@ -652,8 +753,10 @@ def test_si_pide_confirmar_y_la_pagina_no_va_sola_va_al_checkpoint(ig):
 
 
 @con_chrome
-def test_si_el_boton_no_manda_nada_lo_dice_y_deja_la_captura(ig, cliente_api):
+def test_si_el_boton_no_manda_nada_lo_dice_y_deja_la_captura(ig, cliente_api, monkeypatch):
     from hookline import almacen
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 3)
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 6)
     _IG.op.update(spa_login=True, boton_mudo=True)
     ig.guardar_credenciales("bien", "Clave-Secreta-987")
     ig.iniciar()
@@ -1056,6 +1159,18 @@ def test_usar_otro_perfil_y_continuar_en_todas_sus_formas():
         assert not s.CONTINUAR.search(t), repr(t)
 
 
+def test_la_captura_es_solo_para_quien_puede_iniciar_sesion(cliente_api):
+    from fastapi.testclient import TestClient
+
+    from hookline import api
+    from hookline.auth import crear_usuario
+    crear_usuario("lectora@hookline.test", "una-clave-larga", "Lectora", "lector")
+    c = TestClient(api.app)
+    assert c.post("/api/login", json={"email": "lectora@hookline.test", "clave": "una-clave-larga"}).status_code == 200
+    assert c.get("/api/sesion_ig/captura").status_code == 403
+    assert c.get("/api/sesion_ig/diagnostico").status_code == 403
+
+
 def test_sin_captura_la_api_dice_que_no_hay(cliente_api):
     assert cliente_api.get("/api/sesion_ig/captura").status_code == 404
     assert cliente_api.get("/api/sesion_ig/diagnostico").json() == {}
@@ -1251,6 +1366,8 @@ def test_errores_de_instagram_en_criollo():
              "We couldn't connect to Instagram. Make sure you're connected to the internet.": "no dejó iniciar sesión",
              "No pudimos conectarnos a Instagram.": "no dejó iniciar sesión",
              "Se produjo un error con tu solicitud.": "no dejó iniciar sesión",
+             "The login information you entered is incorrect. Find your account and log in.": "usuario o la contraseña",
+             "La información de inicio de sesión que ingresaste no es correcta.": "usuario o la contraseña",
              "Your account has been disabled for violating our terms.": "suspendió esa cuenta",
              "We suspended your account": "suspendió esa cuenta",
              "Enter the 6-digit code we sent to your number ending in 12.": None}
