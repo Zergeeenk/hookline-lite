@@ -504,7 +504,7 @@ def _sesion_ig_publico() -> dict:
 
 
 @app.get("/api/sesion_ig/captura")
-def sesion_ig_captura(q: Quien = requerir()):
+def sesion_ig_captura(q: Quien = requerir("editor")):
     """Lo que mostró Instagram en el último inicio de sesión que no anduvo (captura de pantalla)."""
     p = _mod(svc_sesion_ig, "inicio de sesión de Instagram").captura()
     if not p:
@@ -513,7 +513,7 @@ def sesion_ig_captura(q: Quien = requerir()):
 
 
 @app.get("/api/sesion_ig/diagnostico")
-def sesion_ig_diagnostico(q: Quien = requerir()):
+def sesion_ig_diagnostico(q: Quien = requerir("editor")):
     """El texto de la página y lo que contestó Instagram en el último inicio de sesión que no anduvo."""
     return _mod(svc_sesion_ig, "inicio de sesión de Instagram").diagnostico()
 
