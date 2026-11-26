@@ -51,6 +51,7 @@ class _Instagram:
         self.cdn = cdn
         self.posts: dict[int, dict] = {}
         self.sin_sesion = True
+        self.sin_urls_sin_sesion = False                 # sin sesión, los videos vienen sin sus URLs (como el 20/11)
         self.pedidos: list[tuple[str, str]] = []        # (ruta, sesión con la que se pidió: «» = sin sesión)
 
     def medio(self, codigo, tipo, hijos=()):
@@ -97,12 +98,21 @@ class _Instagram:
             if "frenada" in sesion:
                 return self._resp(url, {"message": "Please wait a few minutes before you try again.", "status": "fail"},
                                   429)
+            if "rota" in sesion:
+                return self._resp(url, "<html>Service Unavailable</html>", 503, "text/html")
+            if "lenta" in sesion:
+                from yt_dlp.networking.exceptions import TransportError
+                raise TransportError("The read operation timed out")
             medio = self.posts.get(int(u.path.split("/")[4]))
             return self._resp(url, {"items": [medio], "num_results": 1, "status": "ok"} if medio else {}, 200 if medio else 404)
         if u.path == "/api/v1/web/get_ruling_for_content/":
             return self._resp(url, {"status": "ok"})
         if u.path.startswith("/p/") and self.sin_sesion:
             medio = next((m for m in self.posts.values() if m["code"] == u.path.split("/")[2]), None)
+            if medio and self.sin_urls_sin_sesion:
+                medio = json.loads(json.dumps(medio))
+                for x in [medio] + medio.get("carousel_media", []):
+                    x.pop("video_versions", None)
             if medio:
                 datos = {"require": [["ScheduledServerJS", "handle", None, [{"__bbox": {"require": [
                     ["RelayPrefetchedStreamCache", "next", [], ["adp_PolarisPostRoot", {"__bbox": {"result": {"data": {
@@ -249,7 +259,8 @@ def test_sesion_trabada_y_sin_sesion_tampoco_dice_el_motivo(ig, tmp_path):
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, VIDEO)
     m = str(e.value)
-    assert "ni con la sesión «para mirar» ni sin ella" in m and "HTTP Error 400" in m and "confirmá que sos vos" in m, m
+    assert m.startswith("Instagram no dio ese video (") and "HTTP Error 400" in m and "confirmá que sos vos" in m, m
+    assert "la cuenta «para mirar»" in m and len(m) <= 300, m
     assert "github" not in m.lower() and "please report" not in m.lower()
 
 
@@ -275,8 +286,39 @@ def test_una_foto_con_la_sesion_trabada_o_frenada_dice_que_puede_ser_una_foto(ig
     ig.publicar(FOTO, 1)
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, FOTO)
-    assert str(e.value) == material.M_SIN_VIDEO_SIN_SESION
+    assert str(e.value) == material.SIN_VIDEO + " " + material.CONSEJO[sesion]       # frenada: esperá, no recargues
     assert f"/p/{FOTO}" in _sin_sesion(ig)
+
+
+@pytest.mark.parametrize("sesion", ["lenta", "rota"])
+def test_si_instagram_falla_al_pedir_el_post_dice_que_se_pruebe_en_un_rato(ig, tmp_path, sesion):
+    """Revisión: con la sesión buena, el pedido se corta por tiempo o Instagram da 503; sin sesión choca con el muro.
+    Antes decía «puede ser de fotos, privado o borrado» de un video público."""
+    from hookline.servicios import buscador
+    buscador.importar_cookies(_cookies(sesion))
+    ig.publicar(VIDEO, 2)
+    ig.sin_sesion = False
+    with pytest.raises(ValueError) as e:
+        _bajar(tmp_path, VIDEO)
+    m = str(e.value)
+    assert m.startswith("Instagram no respondió bien al pedir ese video (") and "Probá de nuevo en un rato" in m, m
+    assert "fotos" not in m and "privado" not in m
+
+
+@pytest.mark.parametrize("sesion,espera", [("trabada", "aviso pendiente"), ("frenada", "esperá un rato"),
+                                           ("vieja", "venció"), ("", "iniciá sesión")])
+def test_un_carrusel_con_video_que_sin_sesion_no_trae_el_video_no_dice_carrusel_de_fotos(ig, tmp_path, sesion, espera):
+    """Revisión: sin una sesión que ande, Instagram puede mostrar el carrusel sin las URLs de sus videos. Antes decía
+    «carrusel de fotos, sin ningún video» (falso y definitivo)."""
+    from hookline.servicios import buscador, material
+    if sesion:
+        buscador.importar_cookies(_cookies(sesion))
+    ig.publicar(CARRUSEL, 8, [ig.medio(HIJO_FOTO, 1), ig.medio(HIJO_VIDEO, 2)])
+    ig.sin_urls_sin_sesion = True
+    with pytest.raises(ValueError) as e:
+        _bajar(tmp_path, CARRUSEL)
+    m = str(e.value)
+    assert m != material.M_CARRUSEL and "puede ser una foto o un video que" in m and espera in m, m
 
 
 def test_sesion_frenada_prueba_sin_sesion_y_baja(ig, tmp_path):
@@ -333,8 +375,7 @@ def test_un_post_que_no_existe_no_queda_con_el_mensaje_mudo(ig, tmp_path):
     ig.sin_sesion = False
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, "N0Ex1st3aaa")
-    m = str(e.value)
-    assert "404" in m and "lo borraron o es privado" in m, m
+    assert str(e.value) == "Instagram dice que ese post no existe: lo borraron o el link está mal copiado."
 
 
 # --- piezas sueltas ----------------------------------------------------------------------------------------------------
@@ -368,6 +409,39 @@ def test_el_filtro_del_carrusel():
     assert f({"id": None, "formats": [{"url": "u"}]}, incomplete=True) is None                # sin código: no lo frena
     g = material._un_solo_video()                                     # cada descarga empieza de cero
     assert g({"id": "V2", "formats": [{"url": "u"}]}, incomplete=True) is None
+
+
+def test_los_mensajes_entran_en_lo_que_muestra_el_panel(monkeypatch):
+    """La API corta los errores en 300 caracteres (la vista previa los muestra así): ningún mensaje se pasa, ni con el
+    detalle más largo."""
+    from hookline.servicios import buscador, material
+    largo = "x" * 400
+    for sesion in (True, False):
+        monkeypatch.setattr(buscador, "estado_sesion", lambda s=sesion: {"instagram": s, "tiktok": s})
+        for avisos in ([], [f"ERROR: [Instagram] X: Video info extraction failed: HTTP Error {c}: {largo}"
+                            for c in (400, 403, 404, 429, 500)], ["ERROR: [Instagram] X: Video info extraction failed: "
+                                                                  + largo],
+                       ["WARNING: The provided Instagram account cookies are no longer valid"]):
+            for error in (largo, "There is no video in this post " + largo, "No video formats found! " + largo,
+                          "login required " + largo, "private " + largo, "[Errno 28] No space left on device"):
+                for avs in ([a] for a in avisos or [""]):
+                    for sin in (True, False):
+                        for link in ("https://www.instagram.com/p/X/", "https://www.tiktok.com/@a/video/1",
+                                     "https://www.pinterest.com/pin/1/"):
+                            m = material.motivo_ytdlp(RuntimeError(error), link, [a for a in avs if a], sin_sesion=sin)
+                            assert len(m) <= 300, (len(m), m)
+    for m in [material.M_FOTO, material.M_CARRUSEL, material.M_SIN_ESPACIO] + [
+            material.SIN_VIDEO + " " + c for c in material.CONSEJO.values()]:
+        assert len(m) <= 300, m
+
+
+def test_el_chip_del_error_al_bajar_no_se_sale_de_la_pantalla():
+    """Revisión: los mensajes son más largos y el chip de Material → Ejemplos no cortaba renglón (se salía de la
+    pantalla y lo que había que hacer quedaba afuera)."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "hookline" / "panel" / "index.html").read_text(encoding="utf-8")
+    linea = next(r for r in html.splitlines() if "const bajando = (MT.bajando" in r)
+    assert "white-space:normal" in linea
 
 
 @pytest.mark.parametrize("error,queda", [
