@@ -503,6 +503,21 @@ def _sesion_ig_publico() -> dict:
         return {}
 
 
+@app.get("/api/sesion_ig/captura")
+def sesion_ig_captura(q: Quien = requerir()):
+    """Lo que mostró Instagram en el último inicio de sesión que no anduvo (captura de pantalla)."""
+    p = _mod(svc_sesion_ig, "inicio de sesión de Instagram").captura()
+    if not p:
+        raise HTTPException(404, "No hay captura del último intento.")
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/sesion_ig/diagnostico")
+def sesion_ig_diagnostico(q: Quien = requerir()):
+    """El texto de la página y lo que contestó Instagram en el último inicio de sesión que no anduvo."""
+    return _mod(svc_sesion_ig, "inicio de sesión de Instagram").diagnostico()
+
+
 @app.get("/api/sesion_ig")
 def sesion_ig_estado(q: Quien = requerir()):
     """El inicio de sesión de Instagram con usuario y contraseña (el panel lo consulta mientras corre)."""
