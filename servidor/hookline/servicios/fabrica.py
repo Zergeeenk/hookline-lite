@@ -1072,7 +1072,14 @@ def _leido(t, l: dict) -> None:
 
 @tareas.al_fallar("lectura")
 def _lectura_fallo(t, motivo: str) -> None:
+    from ..ia.motor_api import es_rechazo
     try:
+        if es_rechazo(motivo):   # Claude se negó (suele ser porque no puede asegurar la edad): se descarta, no se insiste
+            _datos(t.referencia, estado="error", leido=True,
+                   error="Descartado: Claude no aceptó este ejemplo (suele pasar cuando no puede asegurar que quien "
+                         "aparece sea mayor de edad). Probá con otro.")
+            actividad("aviso", "Ejemplo descartado: Claude no pudo asegurar la edad de quien aparece", copia=t.referencia)
+            return
         _datos(t.referencia, estado="error", error=f"Claude no pudo leer el ejemplo: {motivo[:150]}")
     except ValueError:
         pass

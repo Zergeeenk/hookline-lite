@@ -38,6 +38,7 @@ from .material import video_valido
 log = logging.getLogger("hookline.buscador")
 PUERTO = 9333
 POR_TANDA = 40          # miniaturas por hoja que mira Claude
+MIN_PARTE = 5           # hoja rechazada: se parte en mitades hasta grupos de este tamaño; lo que siga rechazado se descarta
 MAX_CANDIDATOS = 400
 FUENTES_POR_VEZ = 12
 MAX_VUELTAS = 5
@@ -1156,48 +1157,71 @@ def _autores(pg) -> None:
     sumar_fuentes(nuevas)
 
 
-def _hojas(d: Path, buenos: list[dict]):
+def _dibujar_hoja(d: Path, parte: list[dict], hoja: Path) -> Path:
     from PIL import Image, ImageDraw
-    out = []
     cw, ch, cols = 200, 300, 10
+    img = Image.new("RGB", (cw * cols, ch * ((len(parte) + cols - 1) // cols)), "white")
+    dr = ImageDraw.Draw(img)
+    for i, c in enumerate(parte):
+        try:
+            im = Image.open(d / f"{c['n']}.jpg")
+            im.thumbnail((cw - 4, ch - 4))
+        except Exception:
+            continue
+        x, y = (i % cols) * cw, (i // cols) * ch
+        img.paste(im, (x + 2, y + 2))
+        dr.rectangle((x, y, x + 34, y + 20), fill="black")
+        dr.text((x + 5, y + 4), str(c["n"]), fill="yellow")
+    img.save(hoja, quality=82)
+    return hoja
+
+
+def _hojas(d: Path, buenos: list[dict]):
+    out = []
     for k in range(0, len(buenos), POR_TANDA):
         parte = buenos[k:k + POR_TANDA]
-        img = Image.new("RGB", (cw * cols, ch * ((len(parte) + cols - 1) // cols)), "white")
-        dr = ImageDraw.Draw(img)
-        for i, c in enumerate(parte):
-            try:
-                im = Image.open(d / f"{c['n']}.jpg")
-                im.thumbnail((cw - 4, ch - 4))
-            except Exception:
-                continue
-            x, y = (i % cols) * cw, (i // cols) * ch
-            img.paste(im, (x + 2, y + 2))
-            dr.rectangle((x, y, x + 34, y + 20), fill="black")
-            dr.text((x + 5, y + 4), str(c["n"]), fill="yellow")
-        hoja = d / f"hoja-{k // POR_TANDA + 1}.jpg"
-        img.save(hoja, quality=82)
+        hoja = _dibujar_hoja(d, parte, d / f"hoja-{k // POR_TANDA + 1}.jpg")
         out.append((hoja, (parte[0]["n"], parte[-1]["n"]), parte))
     return out
 
 
 # --- lo que eligió Claude ----------------------------------------------------------------------------------------------------
-def _tanda_hecha(lote: str, k: int, fil: dict) -> None:
+def _tanda_hecha(lote: str, k: int, fil: dict, rango: tuple[int, int] | None = None, descartadas: int = 0) -> None:
     with _lock_tandas, candado("buscador"):
-        _tanda_hecha_ya(lote, k, fil)
+        _tanda_hecha_ya(lote, k, fil, rango, descartadas)
 
 
-def _tanda_hecha_ya(lote: str, k: int, fil: dict) -> None:
+def _candidatos(lote: str) -> dict:
     import json
+    try:
+        return {c["n"]: c for c in json.loads((almacen.dir_de("candidatos", lote) / "candidatos.json")
+                                              .read_text(encoding="utf-8"))}
+    except Exception:
+        return {}
+
+
+def _de_hoja(cands: dict, k: int, rango: tuple[int, int] | None) -> list[dict]:
+    """Los candidatos que estaban en esa hoja (la tanda k entera, o la parte desde-hasta si se partió)."""
+    if rango:
+        return [c for n, c in sorted(cands.items()) if rango[0] <= n <= rango[1]]
+    return [c for n, c in sorted(cands.items()) if (k - 1) * POR_TANDA < n <= k * POR_TANDA]
+
+
+def _tanda_hecha_ya(lote: str, k: int, fil: dict, rango: tuple[int, int] | None = None, descartadas: int = 0) -> None:
     e = estado()
     if e.get("lote") != lote:
         return
     d = almacen.dir_de("candidatos", lote)
-    try:
-        cands = {c["n"]: c for c in json.loads((d / "candidatos.json").read_text(encoding="utf-8"))}
-    except Exception:
-        cands = {}
-    de_hoja = [c for n, c in cands.items() if (k - 1) * POR_TANDA < n <= k * POR_TANDA]
-    ok_ns = {int(x["n"]) for x in fil.get("sirven") or []}
+    cands = _candidatos(lote)
+    de_hoja = _de_hoja(cands, k, rango)
+    en_hoja = {c["n"] for c in de_hoja}
+    ok_ns = set()
+    for x in fil.get("sirven") or []:
+        try:
+            if int(x["n"]) in en_hoja:       # solo números que estaban en esa hoja
+                ok_ns.add(int(x["n"]))
+        except (KeyError, TypeError, ValueError):
+            continue
     with sesion() as s:   # qué fuentes dan buenos (aprende solo)
         for c in de_hoja:
             red, _, q = c.get("fuente", "? ?").partition(" ")
@@ -1214,38 +1238,97 @@ def _tanda_hecha_ya(lote: str, k: int, fil: dict) -> None:
     sumar_fuentes(nuevas)
     items = []
     for x in fil.get("sirven") or []:
-        c = cands.get(int(x["n"]))
+        try:
+            c = cands.get(int(x["n"])) if int(x["n"]) in ok_ns else None
+        except (KeyError, TypeError, ValueError):
+            c = None
         if c:
             items.append({"link": c["link"], "titulo": str(x.get("titulo") or c["alt"])[:120], "cat": str(x.get("cat") or "")[:30],
                           "img": d / f"{c['n']}.jpg", "video": c.get("video", ""), "dur": c.get("dur", 0)})
     nuevos = int(e.get("nuevos") or 0) + fabrica.agregar_encontrados(items)
+    sin_edad = int(e.get("descartadas_edad") or 0) + descartadas
+    partes = dict(e.get("partes") or {})
+    quedan = int(partes.get(str(k), 1)) - 1
+    if quedan > 0:                        # faltan otras partes de esta misma hoja
+        partes[str(k)] = quedan
+        estado(nuevos=nuevos, partes=partes, descartadas_edad=sin_edad)
+        return
+    partes.pop(str(k), None)
     hechas = int(e.get("hechas") or 0) + 1
     if hechas < int(e.get("hojas") or 0):
-        estado(hechas=hechas, nuevos=nuevos, mensaje=f"Claude está mirando… ({hechas} de {e['hojas']} tandas, {nuevos} sirven)")
+        estado(hechas=hechas, nuevos=nuevos, partes=partes, descartadas_edad=sin_edad,
+               mensaje=f"Claude está mirando… ({hechas} de {e['hojas']} tandas, {nuevos} sirven)")
         return
     shutil.rmtree(d, ignore_errors=True)
     total = int(e.get("acumulado") or 0) + nuevos
     vuelta, objetivo = int(e.get("vuelta") or 1), int(e.get("objetivo") or 30)
     if total < objetivo and vuelta < MAX_VUELTAS:
-        estado(estado="buscando", hechas=0, nuevos=0, acumulado=total, vuelta=vuelta + 1, lote="",
+        estado(estado="buscando", hechas=0, nuevos=0, acumulado=total, vuelta=vuelta + 1, lote="", partes={},
+               descartadas_edad=sin_edad,
                mensaje=f"Vuelta {vuelta + 1} de {MAX_VUELTAS}: llevo {total} de {objetivo}, busco en otros lados…")
         encolar("buscar", {}, clave=f"buscar:{time.time():.0f}:{vuelta + 1}", max_intentos=1)
     else:
         vueltas = "1 vuelta" if vuelta == 1 else f"{vuelta} vueltas"
-        estado(estado="listo", hechas=hechas, nuevos=nuevos, acumulado=total, fin=_hora("%H:%M"),
-               mensaje=f"Listo: {total} memes nuevos en {vueltas}.")
+        edad = (f" {sin_edad} se descartaron porque no se podía asegurar que fueran mayores de edad."
+                if sin_edad else "")
+        estado(estado="listo", hechas=hechas, nuevos=nuevos, acumulado=total, fin=_hora("%H:%M"), partes={},
+               descartadas_edad=0, mensaje=f"Listo: {total} memes nuevos en {vueltas}.{edad}")
+
+
+def _ref(referencia: str) -> tuple[str, int, tuple[int, int] | None]:
+    """«lote:k» (la hoja k entera) o «lote:k:desde-hasta» (una parte de la hoja k después de un rechazo)."""
+    m = re.fullmatch(r"(.+?):(\d+)(?::(\d+)-(\d+))?", referencia or "")
+    if not m:
+        return "", 0, None
+    return m.group(1), int(m.group(2)), ((int(m.group(3)), int(m.group(4))) if m.group(3) else None)
 
 
 @tareas.al_terminar("filtrar")
 def _filtrado(t, fil: dict) -> None:
-    lote, _, k = t.referencia.rpartition(":")
-    _tanda_hecha(lote, int(k or 0), fil)
+    lote, k, rango = _ref(t.referencia)
+    _tanda_hecha(lote, k, fil, rango)
+
+
+def _preparar_partes(lote: str, k: int, rango: tuple[int, int] | None) -> list[tuple[dict, str, str]]:
+    """Hoja rechazada por Claude: dos hojas nuevas con la mitad cada una, así lo dudoso queda aislado y lo bueno no se
+    pierde. Vacía si ya es chica (MIN_PARTE o menos): esa parte se descarta entera. Lo que Claude rechaza nunca se
+    usa; solo se le vuelve a mostrar lo demás."""
+    e = estado()
+    if e.get("lote") != lote or not k:
+        return []
+    d = almacen.dir_de("candidatos", lote)
+    parte = [c for c in _de_hoja(_candidatos(lote), k, rango) if (d / f"{c['n']}.jpg").is_file()]
+    if len(parte) <= MIN_PARTE:
+        return []
+    mitad = len(parte) // 2
+    nuevas = []
+    for grupo in (parte[:mitad], parte[mitad:]):
+        a, b = grupo[0]["n"], grupo[-1]["n"]
+        hoja = _dibujar_hoja(d, grupo, d / f"hoja-{k}-{a}-{b}.jpg")
+        nuevas.append(({"desde": a, "hasta": b, "textos": {str(c["n"]): c["alt"] for c in grupo if c.get("alt")}},
+                       f"{lote}:{k}:{a}-{b}", almacen.relativa(hoja)))
+    partes = dict(e.get("partes") or {})
+    partes[str(k)] = int(partes.get(str(k), 1)) + 1      # esta parte se cambia por dos
+    estado(partes=partes)
+    return nuevas
 
 
 @tareas.al_fallar("filtrar")
 def _filtro_fallo(t, motivo: str) -> None:
-    lote, _, k = t.referencia.rpartition(":")
-    _tanda_hecha(lote, int(k or 0), {"sirven": []})
+    from ..ia.motor_api import es_rechazo
+    lote, k, rango = _ref(t.referencia)
+    if es_rechazo(motivo):
+        with _lock_tandas, candado("buscador"):
+            nuevas = _preparar_partes(lote, k, rango)
+            chica = len(_de_hoja(_candidatos(lote), k, rango)) if not nuevas else 0
+        if nuevas:
+            for datos, ref, hoja in nuevas:
+                tareas.crear("filtrar", datos, referencia=ref, imagenes=[hoja])
+            return
+        log.info("buscador: Claude rechazó %s y ya no se parte más: se descartan %d", t.referencia, chica)
+        _tanda_hecha(lote, k, {"sirven": []}, rango, descartadas=chica)
+        return
+    _tanda_hecha(lote, k, {"sirven": []}, rango)
 
 
 def recoger() -> None:
