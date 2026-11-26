@@ -750,7 +750,8 @@ def previa(link: str) -> Path:
             pass
     carpeta = almacen.dir_de("copias", "_previas")
     nombre = hashlib.md5(link.encode()).hexdigest()[:12]
-    ya = next(iter(carpeta.glob(nombre + ".*")), None)
+    # solo el video ya bajado con ese nombre exacto (nunca un temporal que quedó de una descarga cortada)
+    ya = next((p for p in (carpeta / (nombre + ext) for ext in sorted(medios.VIDEOS)) if p.is_file()), None)
     if ya:
         return ya
     return material.bajar_video(link, carpeta, nombre)[0]
