@@ -353,6 +353,10 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
     if "no space left on device" in txt or "errno 28" in txt:
         return M_SIN_ESPACIO
     problema = _problema_de_sesion(txt) if ig else ""
+    if ig and sin_sesion and not problema:
+        # la sesión no trajo el post por algo que yt-dlp no explica (una respuesta que no es JSON o sin «items», un
+        # corte al leerla): algo pasajero de Instagram
+        problema = "falla"
     sin_video = "no video in this post" in txt
     if ig and sin_video and (sin_sesion or problema):
         # la sesión no anduvo y sin sesión Instagram mostró el post sin video: una foto o un video que solo se ve con
@@ -372,7 +376,8 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
         return "No se pudo bajar ese pin de Pinterest. Fijate que sea un pin de video público."
     if problema:
         # con la sesión, Instagram contestó con un error al pedir el post (y bajar_video ya probó sin sesión)
-        dijo = _detalle(next((a for a in avisos or [] if "video info extraction failed" in a.lower()), str(ex)))[:90]
+        dijo = _detalle(next((a for a in avisos or [] if "video info extraction failed" in a.lower()), None)
+                        or next((a for a in avisos or [] if a.lower().startswith("error")), str(ex)))[:90]
         if problema == "frenada":
             return ("Instagram frenó la cuenta «para mirar» por muchos pedidos y sin sesión tampoco dio el video. "
                     "Esperá un rato y probá de nuevo.")

@@ -108,6 +108,10 @@ class _Instagram:
             if "lenta" in sesion:
                 from yt_dlp.networking.exceptions import TransportError
                 raise TransportError("The read operation timed out")
+            if "html" in sesion:                     # 200 con una página en vez de los datos
+                return self._resp(url, "<html><body>Algo salió mal</body></html>", tipo="text/html")
+            if "sinitems" in sesion:                 # 200 con un JSON sin «items»
+                return self._resp(url, {"status": "ok"})
             medio = self.posts.get(int(u.path.split("/")[4]))
             return self._resp(url, {"items": [medio], "num_results": 1, "status": "ok"} if medio else {}, 200 if medio else 404)
         if u.path == "/api/v1/web/get_ruling_for_content/":
@@ -327,7 +331,7 @@ def test_una_foto_con_la_sesion_trabada_o_frenada_dice_que_puede_ser_una_foto(ig
     assert f"/p/{FOTO}" in _sin_sesion(ig)
 
 
-@pytest.mark.parametrize("sesion", ["lenta", "rota"])
+@pytest.mark.parametrize("sesion", ["lenta", "rota", "html", "sinitems"])
 def test_si_instagram_falla_al_pedir_el_post_dice_que_se_pruebe_en_un_rato(ig, tmp_path, sesion):
     """Revisión: con la sesión buena, el pedido se corta por tiempo o Instagram da 503; sin sesión choca con el muro.
     Antes decía «puede ser de fotos, privado o borrado» de un video público."""
@@ -359,6 +363,19 @@ def test_un_carrusel_que_sin_sesion_no_muestra_videos_no_dice_carrusel_de_fotos(
     assert m != material.M_CARRUSEL and "puede ser una foto o un video que" in m and espera in m, m
     if sesion == "vieja":
         assert buscador.sesiones()["instagram"]["vencida"]                # y queda marcada en el panel
+
+
+@pytest.mark.parametrize("sesion", ["html", "sinitems"])
+def test_si_instagram_contesta_algo_raro_con_la_sesion_baja_sin_sesion(ig, tmp_path, sesion):
+    from hookline.servicios import buscador, material
+    buscador.importar_cookies(_cookies(sesion))
+    ig.publicar(VIDEO, 2)
+    video, info = _bajar(tmp_path, VIDEO)
+    assert info["id"] == VIDEO and f"/p/{VIDEO}" in _sin_sesion(ig)
+    ig.publicar(FOTO, 1)                                               # y si sin sesión no hay video
+    with pytest.raises(ValueError) as e:
+        _bajar(tmp_path / "otra", FOTO)
+    assert str(e.value) == material.SIN_VIDEO + " " + material.CONSEJO["falla"]
 
 
 def test_sesion_frenada_prueba_sin_sesion_y_baja(ig, tmp_path):
