@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 from datetime import timedelta
 
 from ..comun import ajuste, candado, guardar_ajuste
@@ -29,7 +30,8 @@ log = logging.getLogger("hookline.sesion_ig")
 
 URL_LOGIN = "https://www.instagram.com/accounts/login/"
 CRED = "ig_login_cred"            # cifrado: {"usuario", "clave"}
-ESTADO = "ig_login_estado"        # {estado, mensaje, cuando, auto, desde, ultimo_auto, bloqueado, espera_hasta}
+ESTADO = "ig_login_estado"        # {estado, mensaje, cuando, auto, desde, ultimo_auto, bloqueado, espera_hasta,
+#                                    dispositivo_de: de qué cuenta son las cookies de «dispositivo» del navegador}
 CODIGO = "ig_login_codigo"        # cifrado: el código que escribieron en el panel
 ESPERA_CODIGO = 300               # segundos que se espera el código
 ESPERA_RESULTADO = 25             # segundos que se le dan a Instagram para contestar un código (valida por detrás)
@@ -51,6 +53,10 @@ BOTON_CONFIRMAR = re.compile(r"^(confirm|confirmar|submit|enviar|next|siguiente|
 BOTON_COOKIES = re.compile(r"^(allow all cookies|allow essential and optional cookies|accept all( cookies)?|accept|"
                            r"permitir todas las cookies|permitir cookies esenciales y opcionales|aceptar todas"
                            r"( las cookies)?|aceptar)$", re.I)
+# «Continuar como <cuenta guardada>»: nunca se toca «Continuar» (entraría a esa cuenta); siempre «Usar otro perfil»
+OTRA_CUENTA = re.compile(r"^(use another (profile|account)|switch accounts?|log ?in (to|with) another account|"
+                         r"not you\??|usar otro perfil|usar otra cuenta|cambiar de cuenta|"
+                         r"iniciar sesi[oó]n (en|con) otra cuenta|¿no (eres|sos) (t[uú]|vos)\??)$", re.I)
 BOTON_FUI_YO = re.compile(r"^(this was me|it was me|yes, it was me|fui yo|s[ií], fui yo|era yo)$", re.I)
 CAPTCHA = re.compile(r"captcha|i.?m not a robot|no soy un robot|confirm (that )?you.?re (a )?human|"
                      r"confirm[aá] que (sos|eres) (una persona|humano)", re.I)
@@ -74,6 +80,8 @@ M_CAPTCHA = ("Instagram pide resolver un captcha y desde el servidor no se puede
              "la sesión con cookies (en «Avanzado»).")
 M_SIN_APROBAR = ("Nadie aprobó el inicio de sesión desde la app a tiempo. Iniciá sesión de nuevo cuando tengas a mano "
                  "el celular de esa cuenta.")
+M_OTRA_GUARDADA = ("Instagram muestra otra cuenta guardada en el navegador del servidor y no pude pasar a «Usar otro "
+                   "perfil». Tocá «Borrar la sesión guardada» (en «Avanzado») y probá de nuevo.")
 M_CORTADO = "El inicio de sesión se cortó (se reinició el servidor). Probá de nuevo."
 M_CORTANDO = "Se está cortando el intento anterior: probá de nuevo en unos segundos."
 M_EN_ESPERA = "En espera: arranca apenas termine la búsqueda que está corriendo."
@@ -266,13 +274,26 @@ def cookies_cargadas() -> None:
         e = estado()
         if e.get("estado") in ACTIVOS:
             return                           # es el propio login guardando sus cookies, o hay uno en marcha
-        cambios = {}
+        cambios = {"dispositivo_de": ""}         # las cookies de dispositivo ahora son del navegador de otra persona
         if e.get("estado") == "error":
             cambios.update(estado="parado", mensaje="")
         if e.get("bloqueado") and e.get("bloqueado") != "definitivo":
             cambios["bloqueado"] = False
-        if cambios:
-            estado(**cambios)
+        estado(**cambios)
+
+
+def borrar_sesion() -> None:
+    """«Borrar la sesión guardada»: saca la sesión de Instagram del servidor (cookies.txt; el navegador del buscador
+    la suelta en la próxima búsqueda o inicio de sesión) y el próximo inicio arranca con el navegador limpio. Para
+    cuando quedó cargada la cuenta de otra persona (por ejemplo, la personal de quien exportó cookies)."""
+    from .buscador import borrar_cookies
+    borrar_cookies("instagram")
+    with candado("ig_login"):
+        e = estado()
+        cambios = {"dispositivo_de": ""}
+        if e.get("estado") not in ACTIVOS:
+            cambios.update(estado="parado", mensaje="")
+        estado(**cambios)
 
 
 def cancelar() -> dict:
@@ -394,6 +415,20 @@ def _boton(pg, rx: re.Pattern):
     except Exception:
         pass
     return None
+
+
+def _tocar_texto(pg, rx: re.Pattern) -> bool:
+    """Toca el elemento visible cuyo texto entero coincide (sea <button>, <a> o un <span> adentro de algo clicable)."""
+    try:
+        loc = pg.get_by_text(rx)
+        for i in range(min(loc.count(), 5)):
+            el = loc.nth(i)
+            if el.is_visible():
+                el.click(timeout=8000)
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _aceptar_cookies(pg) -> None:
@@ -532,12 +567,24 @@ def _limpio(texto: str) -> str:
     return t
 
 
-def _borrar_sesion_vieja(ctx) -> None:
-    """Saca la sesión vieja de Instagram del navegador pero deja las cookies que lo identifican como el mismo
-    dispositivo (mid, ig_did, datr, csrftoken) y las de las otras redes: un dispositivo nuevo en cada inicio de sesión
-    es lo que más hace que Instagram pida códigos."""
+def _borrar_sesion_vieja(ctx, pg=None, todo: bool = False) -> None:
+    """Saca la sesión vieja de Instagram del navegador. Para la MISMA cuenta deja las cookies que lo identifican como
+    el mismo dispositivo (mid, ig_did, datr, csrftoken): un dispositivo nuevo en cada inicio de sesión es lo que más
+    hace que Instagram pida códigos. Para OTRA cuenta (todo=True) borra todo lo de Instagram, también lo guardado por
+    la página: si no, Instagram muestra «Continuar como <la cuenta de antes>» y deja a las dos cuentas asociadas al
+    mismo dispositivo. Las cookies de las otras redes no se tocan."""
     try:
-        ctx.clear_cookies(name=SESION_IG, domain=re.compile("instagram"))
+        if not todo:
+            ctx.clear_cookies(name=SESION_IG, domain=re.compile("instagram"))
+            return
+        ctx.clear_cookies(domain=re.compile("instagram|facebook"))
+        if pg is not None:
+            origen = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(URL_LOGIN))
+            cdp = ctx.new_cdp_session(pg)
+            try:
+                cdp.send("Storage.clearDataForOrigin", {"origin": origen, "storageTypes": "all"})
+            finally:
+                cdp.detach()
     except Exception as ex:
         log.info("no pude sacar la sesión vieja de Instagram del navegador: %s", type(ex).__name__)
 
@@ -583,22 +630,30 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
     except Exception as ex:
         raise ErrorLogin(f"No pude abrir Instagram desde el servidor ({type(ex).__name__}). Probá de nuevo en un "
                          "rato.") from None
-    fin = time.time() + 20                       # el primer campo VISIBLE (puede haber otro escondido antes)
+    fin, otra = time.time() + 20, 0              # el primer campo VISIBLE (puede haber otro escondido antes)
     while not (campo_usuario := _visible(pg, USUARIO)):
         if time.time() > fin or (_tiene_sesion(ctx) and not _en_paso(pg.url)):
             break
         latido()
         _sigue()
         _aceptar_cookies(pg)
+        if otra < 3 and _tocar_texto(pg, OTRA_CUENTA):   # «Continuar como …»: nunca «Continuar», sí «Usar otro perfil»
+            otra += 1
+            fin = max(fin, time.time() + 10)
+            pg.wait_for_timeout(1500)
+            continue
         pg.wait_for_timeout(400)
     if not campo_usuario:
         if _tiene_sesion(ctx) and not _en_paso(pg.url):
             n = _verificar(pg, ctx)
             if n is not None:
                 return n
+        if otra or pg.get_by_text(OTRA_CUENTA).count():
+            raise ErrorLogin(M_OTRA_GUARDADA)
         texto = _texto(pg)
         err = _error(texto)
-        raise ErrorLogin("No apareció el formulario de Instagram. " + (err or texto[:160]), _tipo(err) if err else "pasajero")
+        raise ErrorLogin("No apareció el formulario de Instagram" + (f": {err}" if err else
+                         f" (la página dice: «{texto[:100]}»). Probá de nuevo en un rato."), _tipo(err) if err else "pasajero")
     _aceptar_cookies(pg)
     _escribir(campo_usuario, usuario, "el usuario")
     campo_clave = _visible(pg, CLAVE)
@@ -717,8 +772,9 @@ def _login(datos: dict) -> None:
         abrir()
         with sync_playwright() as p:
             _, ctx = _contexto(p)
-            _borrar_sesion_vieja(ctx)
             pg = ctx.new_page()
+            misma = str(estado().get("dispositivo_de") or "") == cred[0].lower()
+            _borrar_sesion_vieja(ctx, pg, todo=not misma)      # otra cuenta: el navegador arranca limpio
             try:
                 n = hacer_login(pg, ctx, *cred)
             except ErrorLogin as ex:
@@ -731,7 +787,8 @@ def _login(datos: dict) -> None:
                 except Exception:
                     pass
         _final(estado="listo", mensaje=f"Sesión iniciada como @{cred[0]} ({n} cookies).", bloqueado=False,
-               espera_hasta=0, ultimo_auto=time.time())   # recién iniciada: el automático no la pisa por 6 h
+               espera_hasta=0, ultimo_auto=time.time(),   # recién iniciada: el automático no la pisa por 6 h
+               dispositivo_de=cred[0].lower())
         log.info("sesión de Instagram iniciada (%s cookies)", n)
     except ErrorLogin as ex:
         if ex.tipo == "cancelado":

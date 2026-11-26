@@ -46,6 +46,9 @@ FUI_YO = ("<h2>Was this you?</h2><p>We noticed a login attempt from a new device
           '<form method="post" action="/challenge/fuiyo/"><button type="submit">This Was Me</button></form>')
 CAPTCHA = ("<h2>Help us confirm you're human</h2><iframe src='/recaptcha/anchor' title='reCAPTCHA' "
            "style='width:300px;height:80px'></iframe>")
+ELEGIR = ("<h2>See everyday moments from your close friends.</h2><div><span>flwrencia</span>"
+          '<form method="post" action="/accounts/login/continuar"><button type="submit">Continue</button></form>'
+          '<a href="%s">Use another profile</a><button type="button">Create new account</button></div>')
 APROBAR = ("<h2>Check your notifications on another device</h2><p>Approve this login to continue.</p><script>"
            "setInterval(async () => { const j = await (await fetch('/api/aprobado', {method: 'POST'})).json();"
            "if (j.ok) location.href = '/'; }, 500);</script>")
@@ -77,6 +80,10 @@ class _IG(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         ruta, _, qs = self.path.partition("?")
+        recordada = "recordado=" in (self.headers.get("Cookie") or "") or self.op.get("elegir_siempre")
+        if ruta == "/accounts/login/" and recordada and "otro=1" not in qs and "error=" not in qs:
+            otro = "javascript:void(0)" if self.op.get("otro_roto") else "/accounts/login/?otro=1"
+            return self._responder(_pagina(ELEGIR % otro))
         if ruta == "/accounts/login/":
             error = ("<p id='slfErrorAlert'>Sorry, your password was incorrect. Please double-check your password.</p>"
                      if "error=1" in qs else
@@ -150,6 +157,9 @@ class _IG(http.server.BaseHTTPRequestHandler):
             ok = bool(self.op.get("aprobado"))
             return self._responder(json.dumps({"ok": ok}).encode(), sesion="aprobar" if ok else "",
                                    tipo="application/json")
+        if self.path == "/accounts/login/continuar":      # «Continuar como flwrencia»: NUNCA se tiene que tocar
+            self.vistos["continuar"] = True
+            return self._responder(ir="/", sesion="flwrencia")
         if self.path == "/challenge/fuiyo/":
             return self._responder(ir="/", sesion="fuiyo")
         if self.path == "/challenge/enviar":
@@ -419,6 +429,7 @@ def test_conserva_el_dispositivo_y_las_otras_redes(ig):
                          {"name": "sessionid", "value": "sesion-vencida", "domain": HOST, "path": "/"},
                          {"name": "sid_tt", "value": "de-tiktok", "domain": OTRA, "path": "/"}])
     ig.guardar_credenciales("bien", "clave-buena")
+    ig.estado(dispositivo_de="bien")                              # la última que inició sesión fue esta misma cuenta
     ig.iniciar()
     _worker()
     assert ig.publico()["estado"] == "listo", ig.publico()
@@ -428,6 +439,74 @@ def test_conserva_el_dispositivo_y_las_otras_redes(ig):
         _, ctx = buscador._contexto(p)
         hay = {(c["name"], c["value"]) for c in ctx.cookies()}
     assert ("sid_tt", "de-tiktok") in hay and ("mid", "dispositivo-viejo") in hay, hay
+
+
+@con_chrome
+def test_otra_cuenta_arranca_con_el_navegador_limpio_y_sin_la_cuenta_guardada(ig):
+    """Lo que pasó el 26/11: el navegador del servidor recordaba la cuenta personal de quien había cargado cookies e
+    Instagram mostraba «Continuar como flwrencia» en vez del formulario."""
+    from playwright.sync_api import sync_playwright
+
+    from hookline.servicios import buscador
+    buscador.abrir()
+    with sync_playwright() as p:
+        _, ctx = buscador._contexto(p)
+        ctx.add_cookies([{"name": "recordado", "value": "flwrencia", "domain": HOST, "path": "/"},
+                         {"name": "mid", "value": "de-flor", "domain": HOST, "path": "/"},
+                         {"name": "sessionid", "value": "flor-vieja", "domain": HOST, "path": "/"},
+                         {"name": "sid_tt", "value": "de-tiktok", "domain": OTRA, "path": "/"}])
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+    enviada = _IG.vistos["cookie_login"]
+    assert "recordado" not in enviada and "de-flor" not in enviada and "flor-vieja" not in enviada, enviada
+    assert not _IG.vistos.get("continuar")
+    assert ig.estado()["dispositivo_de"] == "bien"
+    assert any(c["name"] == "sessionid" and c["value"].startswith("bien") for c in buscador.cookies_guardadas())
+    with sync_playwright() as p:
+        _, ctx = buscador._contexto(p)
+        assert ("sid_tt", "de-tiktok") in {(c["name"], c["value"]) for c in ctx.cookies()}   # TikTok no se toca
+
+
+@con_chrome
+def test_si_igual_muestra_la_cuenta_guardada_toca_usar_otro_perfil_y_nunca_continuar(ig):
+    from hookline.servicios import buscador
+    _IG.op["elegir_siempre"] = True
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+    assert not _IG.vistos.get("continuar")                        # nunca entró a la cuenta guardada
+    assert any(c["name"] == "sessionid" and c["value"].startswith("bien") for c in buscador.cookies_guardadas())
+
+
+@con_chrome
+def test_si_no_puede_pasar_a_otro_perfil_lo_explica(ig):
+    _IG.op.update(elegir_siempre=True, otro_roto=True)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and p["mensaje"] == ig.M_OTRA_GUARDADA, p
+    assert not _IG.vistos.get("continuar")
+
+
+@con_chrome
+def test_cargar_sesion_saca_del_navegador_la_sesion_de_instagram_que_ya_no_esta(ig):
+    from playwright.sync_api import sync_playwright
+
+    from hookline.servicios import buscador
+    buscador.importar_cookies("sid_tt=x; sessionid=tt; ttwid=1")      # cookies.txt: solo TikTok
+    buscador.abrir()
+    with sync_playwright() as p:
+        _, ctx = buscador._contexto(p)
+        ctx.add_cookies([{"name": "sessionid", "value": "de-otra-persona", "domain": ".instagram.com", "path": "/"},
+                         {"name": "mid", "value": "m", "domain": ".instagram.com", "path": "/"}])
+        buscador._cargar_sesion(ctx)
+        hay = {(c["name"], c["value"], c["domain"]) for c in ctx.cookies()}
+    assert not any(n == "sessionid" and "instagram" in d for n, _, d in hay), hay
+    assert any(n == "sessionid" and "tiktok" in d for n, _, d in hay), hay
 
 
 @con_chrome
@@ -589,6 +668,7 @@ async function api(url, body) { window.LLAMADAS.push([url, body || null]);
   if (url === "/api/sesion_ig" && window.SIN_SESION) throw new SinSesion("Iniciá sesión para seguir");
   if (url === "/api/sesion_ig" && window.VACIO) return {sesion_ig: {}, sesiones: {}};
   if (body && body.op === "ig_codigo") CP.sesion_ig = {...CP.sesion_ig, estado: "iniciando", mensaje: "Probando el código…"};
+  if (body && body.op === "ig_borrar_sesion") CP.sesion_ig = {...CP.sesion_ig, estado: "parado", mensaje: ""};
   if (body && body.op === "ig_cancelar") CP.sesion_ig = {...CP.sesion_ig, estado: "parado", mensaje: "Se canceló el inicio de sesión."};
   return {sesion_ig: CP.sesion_ig, sesiones: {}}; }
 %s
@@ -674,6 +754,18 @@ def test_doble_enter_manda_el_codigo_una_sola_vez(panel):
 
 
 @con_chrome
+def test_borrar_la_sesion_guardada_desde_el_panel(panel):
+    pg = panel
+    pg.on("dialog", lambda d: d.accept())                          # el «¿Borrar…?» del confirm
+    pg.evaluate("CP.sesion_ig = {estado: 'error', mensaje: 'No apareció el formulario', usuario: 'x', tiene_credenciales: true};"
+                " cargarCookies()")
+    pg.click("details summary")
+    pg.click("[data-igborrar]")
+    pg.wait_for_function("window.LLAMADAS.some(l => l[1] && l[1].op === 'ig_borrar_sesion')")
+    pg.wait_for_function("window.TOASTS.some(t => t.includes('se borró la sesión'))")
+
+
+@con_chrome
 def test_se_puede_cancelar_mientras_inicia(panel):
     pg = panel
     pg.evaluate("CP.sesion_ig = {estado: 'iniciando', mensaje: 'Instagram pide aprobar el inicio de sesión desde la app.',"
@@ -726,6 +818,25 @@ def test_la_contrasena_queda_cifrada_y_no_sale_por_la_api(cliente_api):
     assert cliente_api.post("/api/copiar", json={"op": "ig_olvidar"}).status_code == 200
     assert sesion_ig.credenciales() is None and not sesion_ig.publico()["tiene_credenciales"]
     assert _ig_logins(pendientes=True) == 0                        # el que esperaba en la cola se canceló
+
+
+def test_borrar_la_sesion_guardada(cliente_api, monkeypatch):
+    from hookline.servicios import buscador
+    from hookline.servicios import sesion_ig as s
+    monkeypatch.setattr(buscador, "_abierto", lambda: False)
+    netscape = ("# Netscape HTTP Cookie File\n"
+                ".instagram.com\tTRUE\t/\tTRUE\t2000000000\tsessionid\tde-flor\n"
+                ".instagram.com\tTRUE\t/\tTRUE\t2000000000\tmid\tm\n"
+                ".tiktok.com\tTRUE\t/\tTRUE\t2000000000\tsessionid\ttt\n")
+    assert cliente_api.post("/api/copiar", json={"op": "importar_cookies", "texto": netscape}).status_code == 200
+    assert buscador.estado_sesion() == {"instagram": True, "tiktok": True}
+    s.estado(dispositivo_de="bien")
+    r = cliente_api.post("/api/copiar", json={"op": "ig_borrar_sesion"})
+    assert r.status_code == 200, r.text
+    assert buscador.estado_sesion() == {"instagram": False, "tiktok": True}
+    assert not r.json()["sesiones"]["instagram"]["cargada"] and r.json()["sesiones"]["tiktok"]["cargada"]
+    assert s.estado()["dispositivo_de"] == ""                      # el próximo inicio arranca con el navegador limpio
+    assert not any(c["value"] == "de-flor" for c in buscador.cookies_guardadas())
 
 
 def test_corregir_el_usuario_con_la_clave_guardada(cliente_api):

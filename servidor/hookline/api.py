@@ -607,6 +607,11 @@ def copiar(d: dict = Depends(_json), q: Quien = requerir()):
         return {"ok": True, "sesion_ig": s.iniciar()}
     if op == "ig_codigo":
         return {"ok": True, "sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").dar_codigo(d.get("codigo"))}
+    if op == "ig_borrar_sesion":          # sacar del servidor la sesión de Instagram guardada (de quien sea)
+        s = _mod(svc_sesion_ig, "inicio de sesión de Instagram")
+        s.borrar_sesion()
+        comun.actividad("sesion", "Se borró la sesión de Instagram guardada")
+        return {"ok": True, "sesion_ig": s.publico(), "sesiones": svc_buscador.sesiones() if svc_buscador else {}}
     if op == "ig_cancelar":
         return {"ok": True, "sesion_ig": _mod(svc_sesion_ig, "inicio de sesión de Instagram").cancelar()}
     if op == "ig_olvidar":

@@ -532,9 +532,36 @@ def _sesion_viva(ctx, red: str) -> bool:
 
 
 def _cargar_sesion(ctx) -> None:
+    """Pasa cookies.txt al navegador. Para Instagram manda cookies.txt: si ahí no hay sesión (la borraron), el
+    navegador tampoco se queda con una vieja."""
     cs = cookies_guardadas()
+    if not any(_red(c["domain"]) == "instagram" and c["name"] == SESION_DE["instagram"] for c in cs):
+        try:
+            ctx.clear_cookies(name=re.compile(r"^(sessionid|ds_user_id|rur|shbid|shbts)$"), domain=re.compile("instagram"))
+        except Exception as ex:
+            log.info("no pude sacar la sesión de Instagram del navegador: %s", type(ex).__name__)
     if cs:
         ctx.add_cookies(cs)
+
+
+def borrar_cookies(red: str) -> int:
+    """Saca de cookies.txt las cookies de una red (las otras quedan). Devuelve cuántas sacó."""
+    if red not in REDES:
+        return 0
+    with candado("cookies"):
+        todas = cookies_guardadas()
+        quedan = [c for c in todas if _red(c["domain"]) != red]
+        f = _ruta_cookies()
+        if len(quedan) != len(todas) and f.exists():
+            tmp = f.with_suffix(".tmp")
+            tmp.write_text(_netscape(quedan), encoding="utf-8")
+            tmp.chmod(0o600)
+            tmp.replace(f)
+        with candado("sesiones_redes"):
+            d = dict(ajuste("sesiones_redes", {}) or {})
+            d.pop(red, None)
+            guardar_ajuste("sesiones_redes", d)
+    return len(todas) - len(quedan)
 
 
 def exportar_cookies(destino) -> int:
