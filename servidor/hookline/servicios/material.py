@@ -292,6 +292,9 @@ def _hay_sesion(link: str) -> bool:
 M_FOTO = "Ese link es de una foto, no de un video: no hay nada para copiar. Si te sirve la imagen, sacale captura y subila."
 M_CARRUSEL = ("Ese link es un carrusel de fotos, sin ningún video: no hay nada para copiar. Si te sirven las imágenes, "
               "sacales captura y subilas.")
+M_SIN_VIDEO_SIN_SESION = ("La sesión «para mirar» no anduvo y sin sesión Instagram muestra ese post sin video: puede ser "
+                          "una foto, o un video que solo se ve con sesión. Si en el celular es un video, cargá la sesión de "
+                          "nuevo en Memes → «Sesión de Instagram» y probá otra vez.")
 
 
 def _detalle(ex) -> str:
@@ -380,6 +383,13 @@ class _SinVideo(Exception):
     """yt-dlp trajo el post y no tiene ningún video (un carrusel de fotos)."""
 
 
+def _trajo_el_post(capturado: list) -> bool:
+    """yt-dlp trajo los datos del post con la sesión: la sesión anduvo (si después algo falla, no es por la sesión)."""
+    datos = capturado[-1] if capturado else None
+    items = datos.get("items") if isinstance(datos, dict) else None
+    return isinstance(items, list) and bool(items) and isinstance(items[0], dict)
+
+
 def _que_es(datos) -> str:
     """Lo que dicen los datos del post que trajo yt-dlp con la sesión (api/v1/media/<pk>/info): «foto» o «carrusel» (de
     fotos, sin ningún video); «» si tiene video o no se sabe."""
@@ -456,6 +466,7 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
     sesion_antes = _sesion_guardada(red)
     capturado: list[dict] = []
     marcada: list = []
+    sin_sesion = False
 
     def si_vencio():
         """Si yt-dlp avisó que la sesión no vale, se marca vencida (aunque el video haya bajado igual, sin sesión). Solo
@@ -478,11 +489,14 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             except _SinVideo:
                 raise
             except Exception as ex:
-                if not (ck and sesion_antes and "instagram.com" in link) or _que_es(capturado[-1] if capturado else None):
+                # solo si la sesión no llegó a traer el post (vencida, trabada, frenada): si lo trajo, la sesión anduvo
+                # y lo que falló es otra cosa (el video en el CDN, el disco…), que sin sesión no se arregla y taparía
+                # el motivo real
+                if not (ck and sesion_antes and "instagram.com" in link) or _trajo_el_post(capturado):
                     raise
                 log.info("yt-dlp no pudo con %s con la sesión «para mirar» (%s): pruebo sin sesión", link, _detalle(ex))
                 si_vencio()
-                usadas = opts
+                usadas, sin_sesion = opts, True
                 video, info = _extraer(yt_dlp, usadas, link, [])
             si_vencio()
             if not tiene_audio(video):
@@ -498,6 +512,12 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
         que = "carrusel" if isinstance(ex, _SinVideo) else _que_es(capturado[-1] if capturado else None)
         if que:
             raise ValueError(M_FOTO if que == "foto" else M_CARRUSEL) from None
+        if (sin_sesion and "there is no video in this post" in str(ex).lower()
+                and not any("no longer valid" in a.lower() for a in log_y.avisos)):
+            # la sesión no anduvo (trabada, frenada) y sin sesión Instagram mostró el post sin video: una foto o un
+            # video que solo se ve con sesión (el 20/11, con la sesión vencida, los videos daban esto). Si venció, eso
+            # va primero: motivo_ytdlp lo dice
+            raise ValueError(M_SIN_VIDEO_SIN_SESION) from None
         raise ValueError(motivo_ytdlp(ex, link, log_y.avisos)) from None
     return video, info
 

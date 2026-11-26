@@ -44,8 +44,8 @@ def _cookies(valor: str) -> str:
 class _Instagram:
     """Contesta lo que pide el extractor de Instagram de yt-dlp. La sesión del pedido (su cookie sessionid) decide:
     «buena» entra; «vieja» redirige al login (yt-dlp avisa «no longer valid» y sigue sin sesión); «trabada» contesta
-    400 (un «confirmá que sos vos» pendiente: yt-dlp no sigue). Sin sesión, la página del post trae los datos que ve
-    cualquiera (o 404 si sin_sesion=False)."""
+    400 (un «confirmá que sos vos» pendiente: yt-dlp no sigue); «frenada» contesta 429. Sin sesión, la página del post
+    trae los datos que ve cualquiera (o 404 si sin_sesion=False)."""
 
     def __init__(self, cdn: str):
         self.cdn = cdn
@@ -74,7 +74,8 @@ class _Instagram:
         if isinstance(cuerpo, str):
             cuerpo = cuerpo.encode()
         r = Response(io.BytesIO(cuerpo), url=url, headers={"Content-Type": tipo + "; charset=utf-8"}, status=codigo,
-                     reason={200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"}.get(codigo))
+                     reason={200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
+                             429: "Too Many Requests"}.get(codigo))
         if codigo >= 400:
             raise HTTPError(r)
         return r
@@ -93,6 +94,9 @@ class _Instagram:
                                   "<html>login</html>", 401, "text/html")
             if "trabada" in sesion:
                 return self._resp(url, {"message": "checkpoint_required", "status": "fail"}, 400)
+            if "frenada" in sesion:
+                return self._resp(url, {"message": "Please wait a few minutes before you try again.", "status": "fail"},
+                                  429)
             medio = self.posts.get(int(u.path.split("/")[4]))
             return self._resp(url, {"items": [medio], "num_results": 1, "status": "ok"} if medio else {}, 200 if medio else 404)
         if u.path == "/api/v1/web/get_ruling_for_content/":
@@ -214,8 +218,9 @@ def test_un_video_con_sesion_baja_como_siempre(ig, tmp_path):
 
 
 def test_p_y_reel_piden_lo_mismo(ig, tmp_path):
-    """Lo que se había creído: que «/p/» necesitaba sesión y «/reel/» no. yt-dlp usa solo el código del post: los dos
-    piden exactamente lo mismo."""
+    """Lo que se había creído: que «/p/» necesitaba sesión y «/reel/» no. yt-dlp usa solo el código del post: sin
+    curl_cffi (como la imagen del servidor) los dos piden exactamente lo mismo. Con curl_cffi cambiaría solo el Referer
+    de un pedido sin sesión (a /api/graphql), no lo que se baja."""
     ig.publicar(VIDEO, 2)
     _bajar(tmp_path / "a", VIDEO, "p")
     con_p, ig.pedidos[:] = list(ig.pedidos), []
@@ -248,6 +253,41 @@ def test_sesion_trabada_y_sin_sesion_tampoco_dice_el_motivo(ig, tmp_path):
     assert "github" not in m.lower() and "please report" not in m.lower()
 
 
+def test_si_la_sesion_trajo_el_post_y_falla_el_video_no_culpa_al_post(ig, tmp_path):
+    """Revisión: con la sesión buena, el video no está en el CDN (404). Antes probaba sin sesión, chocaba con el muro de
+    Instagram y decía «puede ser de fotos, privado o borrado», tapando el motivo real."""
+    from hookline.servicios import buscador
+    buscador.importar_cookies(_cookies("buena"))
+    ig.publicar("Vid30N0Cdn1", 2)                                   # su MP4 no está en el CDN
+    with pytest.raises(ValueError) as e:
+        _bajar(tmp_path, "Vid30N0Cdn1")
+    m = str(e.value)
+    assert "404" in m and "fotos" not in m and "privado" not in m, m
+    assert _sin_sesion(ig) == []                                      # no probó sin sesión: la sesión anduvo
+
+
+@pytest.mark.parametrize("sesion", ["trabada", "frenada"])
+def test_una_foto_con_la_sesion_trabada_o_frenada_dice_que_puede_ser_una_foto(ig, tmp_path, sesion):
+    """Revisión: la sesión no anda (400 o 429) y sin sesión Instagram muestra el post sin video. Antes el mensaje
+    hablaba solo de la sesión y ella no sabía que podía ser una foto."""
+    from hookline.servicios import buscador, material
+    buscador.importar_cookies(_cookies(sesion))
+    ig.publicar(FOTO, 1)
+    with pytest.raises(ValueError) as e:
+        _bajar(tmp_path, FOTO)
+    assert str(e.value) == material.M_SIN_VIDEO_SIN_SESION
+    assert f"/p/{FOTO}" in _sin_sesion(ig)
+
+
+def test_sesion_frenada_prueba_sin_sesion_y_baja(ig, tmp_path):
+    from hookline.servicios import buscador
+    buscador.importar_cookies(_cookies("frenada"))
+    ig.publicar(VIDEO, 2)
+    video, info = _bajar(tmp_path, VIDEO)
+    assert info["id"] == VIDEO and f"/p/{VIDEO}" in _sin_sesion(ig)
+    assert not buscador.sesiones()["instagram"]["vencida"]
+
+
 def test_sesion_vencida_baja_igual_y_queda_marcada(ig, tmp_path):
     """yt-dlp ve que la sesión no vale, sigue sin sesión y baja. Antes la sesión vencida quedaba como buena en el panel
     (solo se marcaba si la descarga fallaba)."""
@@ -258,6 +298,15 @@ def test_sesion_vencida_baja_igual_y_queda_marcada(ig, tmp_path):
     assert info["id"] == VIDEO
     s = buscador.sesiones()["instagram"]
     assert s["vencida"] and "bajar" in s["motivo"]
+
+
+def test_sesion_vencida_y_sin_sesion_sin_video_dice_que_vencio(ig, tmp_path):
+    """Si la sesión venció, eso va primero (el 20/11 los videos daban «no hay video» sin sesión)."""
+    from hookline.servicios import buscador
+    buscador.importar_cookies(_cookies("vieja"))
+    ig.publicar(FOTO, 1)
+    with pytest.raises(ValueError, match="venció"):
+        _bajar(tmp_path, FOTO)
 
 
 def test_sesion_vencida_y_sin_sesion_tampoco_dice_que_vencio(ig, tmp_path):
