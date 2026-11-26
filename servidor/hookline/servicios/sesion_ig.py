@@ -23,6 +23,8 @@ import time
 import urllib.parse
 from datetime import timedelta
 
+from pathlib import Path
+
 from ..comun import ajuste, candado, guardar_ajuste
 from ..trabajos import encolar, latido, manejador
 
@@ -36,6 +38,9 @@ CODIGO = "ig_login_codigo"        # cifrado: el código que escribieron en el pa
 ESPERA_CODIGO = 300               # segundos que se espera el código
 ESPERA_RESULTADO = 25             # segundos que se le dan a Instagram para contestar un código (valida por detrás)
 SIN_RESPUESTA = 45                # segundos con el formulario quieto después de mandarlo: Instagram no contestó
+ESPERA_ENVIO = 30                 # segundos que se espera el pedido de login después de apretar «Entrar»
+CLAVES_RESPUESTA = ("status", "message", "authenticated", "user", "two_factor_required", "checkpoint_url",
+                    "error_type", "spam", "lock", "showAccountRecoveryModal")   # lo único que se lee de la respuesta
 TIEMPO_MAX = 480                  # segundos de todo el inicio de sesión
 AUTO_CADA = 6 * 3600              # reintento automático como mucho cada 6 h
 PAUSA_SI_FRENA = 180              # si Instagram pide esperar, no se vuelve a probar antes de esto
@@ -87,6 +92,10 @@ M_SIN_APROBAR = ("Nadie aprobó el inicio de sesión desde la app a tiempo. Inic
                  "el celular de esa cuenta.")
 M_OTRA_GUARDADA = ("Instagram muestra otra cuenta guardada en el navegador del servidor y no pude pasar a «Usar otro "
                    "perfil». Tocá «Borrar la sesión guardada» (en «Avanzado») y probá de nuevo.")
+M_NO_SE_MANDO = ("No pude mandar el formulario de Instagram: el botón de entrar no respondió. Probá de nuevo en un "
+                 "rato; si sigue, tocá «Ver qué mostró Instagram».")
+ERROR_TIPO = {"bad_password": M_CLAVE, "invalid_user": M_USUARIO, "rate_limit_error": M_ESPERAR,
+              "sentry_block": M_NO_DEJA, "ip_block": M_NO_DEJA}
 M_CORTADO = "El inicio de sesión se cortó (se reinició el servidor). Probá de nuevo."
 M_CORTANDO = "Se está cortando el intento anterior: probá de nuevo en unos segundos."
 M_EN_ESPERA = "En espera: arranca apenas termine la búsqueda que está corriendo."
@@ -111,6 +120,7 @@ ERRORES = [
 ]
 
 _secretos: list[str] = []         # la contraseña y los códigos del intento en curso: se tachan de cualquier log
+_respuesta: dict = {}             # lo que contestó Instagram al último login (solo CLAVES_RESPUESTA), para el diagnóstico
 _avisado = {"cred": False}
 
 
@@ -261,7 +271,26 @@ def publico() -> dict:
         elif time.time() - float(e.get("desde") or e.get("cuando") or 0) > 20:
             msg = M_ESPERANDO
     return {"estado": est, "mensaje": msg, "usuario": cred[0] if cred else "", "tiene_credenciales": bool(cred),
-            "auto": bool(e.get("auto"))}
+            "auto": bool(e.get("auto")),
+            "captura": est == "error" and float(e.get("diagnostico") or 0) >= float(e.get("desde") or 0) > 0
+            and bool(captura())}
+
+
+def captura() -> Path | None:
+    """La captura de pantalla del último inicio de sesión que no anduvo (si hay)."""
+    from .. import almacen
+    p = almacen.dir_de("navegador") / "login-ultimo.png"
+    return p if p.is_file() else None
+
+
+def diagnostico() -> dict:
+    """Lo que se guardó del último inicio de sesión que no anduvo: qué decía la página y qué contestó Instagram."""
+    from .. import almacen
+    p = almacen.dir_de("navegador") / "login-ultimo.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def olvidar() -> None:
@@ -507,6 +536,95 @@ def _boton_entrar(pg, campo_clave):
     return el
 
 
+def _es_login(r) -> bool:
+    try:
+        return r.request.method == "POST" and urllib.parse.urlsplit(r.url).path.rstrip("/").endswith("/accounts/login/ajax")
+    except Exception:
+        return False
+
+
+def _mandar_formulario(pg, boton, campo_clave) -> dict | None:
+    """Aprieta «Entrar» y espera el pedido de login de Instagram. Devuelve lo que contestó, solo CLAVES_RESPUESTA (nunca
+    lo que se mandó, que lleva la contraseña): {"http": 302} si contestó con otra página (formulario clásico); None si
+    no salió ningún pedido (el botón no respondió)."""
+    try:
+        with pg.expect_response(_es_login, timeout=ESPERA_ENVIO * 1000) as info:
+            _apretar(pg, boton, campo_clave)
+        r = info.value
+    except Exception:
+        return None
+    resumen = {"http": r.status}
+    try:
+        d = r.json()
+    except Exception:
+        return resumen
+    if isinstance(d, dict):
+        resumen.update({k: d[k] for k in CLAVES_RESPUESTA
+                        if k in d and isinstance(d[k], (str, int, float, bool, type(None)))})
+    return resumen
+
+
+def _leer_respuesta(resp: dict | None) -> None:
+    """Lo que contestó Instagram al login: lo que no tiene vuelta se corta acá, con su mensaje en criollo. Lo demás
+    (entró, pide código, «confirmá que sos vos») lo sigue el bucle mirando la página."""
+    if resp is None:
+        raise ErrorLogin(M_NO_SE_MANDO)
+    if resp.get("authenticated") is True or resp.get("two_factor_required") or resp.get("checkpoint_url") \
+            or resp.get("message") == "checkpoint_required":
+        return
+    tipo_err = ERROR_TIPO.get(str(resp.get("error_type") or ""))
+    if tipo_err:
+        raise ErrorLogin(tipo_err, _tipo(tipo_err))
+    if resp.get("status") == "ok" and resp.get("authenticated") is False:
+        raise ErrorLogin(M_USUARIO if resp.get("user") is False else M_CLAVE, "definitivo")
+    if resp.get("http") == 429:
+        raise ErrorLogin(M_ESPERAR, "freno")
+    msg = " ".join(str(resp.get("message") or "").split())
+    if resp.get("status") == "fail" and msg:
+        err = _error(msg)
+        raise (ErrorLogin(err, _tipo(err)) if err else
+               ErrorLogin(f"Instagram contestó: «{msg[:160]}». Probá de nuevo en un rato."))
+
+
+def _ir_al_checkpoint(pg, url: str) -> bool:
+    """Si Instagram pidió «confirmá que sos vos» y la página no fue sola, ir (solo dentro de Instagram)."""
+    destino = urllib.parse.urljoin(_base(), str(url or ""))
+    if urllib.parse.urlsplit(destino).hostname != urllib.parse.urlsplit(_base()).hostname:
+        return False
+    try:
+        pg.goto(destino, wait_until="domcontentloaded", timeout=40000)
+        return True
+    except Exception:
+        return False
+
+
+def _tachar(texto: str) -> str:
+    for s in _secretos:
+        if s:
+            texto = texto.replace(s, "•••")
+    return texto
+
+
+def _diagnostico(pg, motivo: str) -> None:
+    """Para entender un inicio de sesión que no anduvo: captura de pantalla y texto de la página (los campos de
+    contraseña se ven tapados y el texto no trae lo tipeado; igual se tacha) y lo que contestó Instagram (solo
+    CLAVES_RESPUESTA). Lo ven el panel («Ver qué mostró Instagram») y quien diagnostica."""
+    try:
+        from .. import almacen
+        d = almacen.dir_de("navegador")
+        try:
+            pg.screenshot(path=str(d / "login-ultimo.png"), timeout=10000)
+        except Exception:
+            (d / "login-ultimo.png").unlink(missing_ok=True)
+        datos = {"cuando": time.strftime("%Y-%m-%d %H:%M:%S"), "motivo": _tachar(motivo),
+                 "pagina": urllib.parse.urlsplit(pg.url).path, "texto": _tachar(_texto(pg)[:2000]),
+                 "respuesta_login": _respuesta}
+        (d / "login-ultimo.json").write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
+        estado(diagnostico=time.time())
+    except Exception as ex:
+        log.info("no pude guardar el diagnóstico del inicio de sesión: %s", type(ex).__name__)
+
+
 def _avance(**cambios) -> None:
     """Un paso del intento en curso, salvo que lo hayan cancelado desde el panel (el estado ya no está activo)."""
     with candado("ig_login"):
@@ -724,13 +842,22 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
     campo_clave = _visible(pg, CLAVE)
     _escribir(campo_clave, clave, "la contraseña")
     _aceptar_cookies(pg)
-    _apretar(pg, _boton_entrar(pg, campo_clave), campo_clave)
+    resp = _mandar_formulario(pg, _boton_entrar(pg, campo_clave), campo_clave)
+    _respuesta.clear()
+    _respuesta.update(resp or {})
+    log.info("inicio de sesión de Instagram: contestó %s", {k: v for k, v in (resp or {}).items() if k != "checkpoint_url"})
+    _leer_respuesta(resp)
+    checkpoint = str((resp or {}).get("checkpoint_url") or "")
     enviado, codigos, sesion_desde, aprobar, fui_yo = time.time(), 0, 0.0, 0.0, 0
     while time.time() < hasta:
         latido()
         _sigue()
         pg.wait_for_timeout(1500)
         _aceptar_cookies(pg)
+        if checkpoint and "/accounts/login" in pg.url and time.time() - enviado > 8:
+            _ir_al_checkpoint(pg, checkpoint)       # pidió «confirmá que sos vos» y la página no fue sola
+            checkpoint = ""
+            continue
         if _tiene_sesion(ctx):
             if not _en_paso(pg.url):
                 n = _verificar(pg, ctx)
@@ -805,7 +932,9 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             continue
         if (not codigos and "/accounts/login" in pg.url and _visible(pg, CLAVE)
                 and time.time() - enviado > SIN_RESPUESTA):
-            raise ErrorLogin("Instagram no contestó al iniciar sesión. Probá de nuevo en un rato.")
+            dijo = ", ".join(f"{k}={v}" for k, v in _respuesta.items() if k in ("http", "status", "message"))
+            raise ErrorLogin("Instagram no siguió después de mandar el formulario" + (f" (contestó: {dijo[:160]})" if dijo
+                             else "") + ". Probá de nuevo en un rato; si sigue, tocá «Ver qué mostró Instagram».")
     if aprobar:
         raise ErrorLogin(M_SIN_APROBAR, "codigo")
     raise ErrorLogin("Instagram no terminó el inicio de sesión. " + (_texto(pg)[:160] or ""))
@@ -840,11 +969,18 @@ def _login(datos: dict) -> None:
             pg = ctx.new_page()
             misma = str(estado().get("dispositivo_de") or "") == cred[0].lower()
             _borrar_sesion_vieja(ctx, pg, todo=not misma)      # otra cuenta: el navegador arranca limpio
+            _respuesta.clear()
             try:
                 n = hacer_login(pg, ctx, *cred)
             except ErrorLogin as ex:
-                if ex.tipo == "cancelado" and _tiene_sesion(ctx):
-                    _borrar_sesion_vieja(ctx)    # entró justo cuando la cancelaban: que no quede en el perfil
+                if ex.tipo == "cancelado":
+                    if _tiene_sesion(ctx):
+                        _borrar_sesion_vieja(ctx)    # entró justo cuando la cancelaban: que no quede en el perfil
+                else:
+                    _diagnostico(pg, str(ex))
+                raise
+            except Exception as ex:
+                _diagnostico(pg, f"{type(ex).__name__}: {_limpio(str(ex))}")
                 raise
             finally:
                 try:

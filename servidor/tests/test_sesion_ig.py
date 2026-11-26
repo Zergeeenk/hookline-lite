@@ -49,6 +49,15 @@ CAPTCHA = ("<h2>Help us confirm you're human</h2><iframe src='/recaptcha/anchor'
 ELEGIR = ("<h2>See everyday moments from your close friends.</h2><div><span>flwrencia</span>"
           '<form method="post" action="/accounts/login/continuar"><button type="submit">Continue</button></form>'
           '<a href="%s">Use another profile</a><button type="button">Create new account</button></div>')
+SPA_LOGIN = ('<form id="lf"><input name="username" aria-label="Phone number, username, or email">'
+             '<input name="password" type="password"><button type="submit">Log in</button></form><p id="msg"></p>'
+             '<script>document.getElementById("lf").onsubmit = async ev => { ev.preventDefault();'
+             'if (window.MUDO) return;'
+             'const r = await fetch("/api/v1/web/accounts/login/ajax/", {method: "POST",'
+             ' body: new URLSearchParams(new FormData(ev.target))});'
+             'const j = await r.json();'
+             'if (j.authenticated) location.href = "/";'
+             'else if (j.mostrar) document.getElementById("msg").textContent = j.mostrar; };</script>')
 APROBAR = ("<h2>Check your notifications on another device</h2><p>Approve this login to continue.</p><script>"
            "setInterval(async () => { const j = await (await fetch('/api/aprobado', {method: 'POST'})).json();"
            "if (j.ok) location.href = '/'; }, 500);</script>")
@@ -70,6 +79,8 @@ class _IG(http.server.BaseHTTPRequestHandler):
         self.wfile.write(cuerpo)
 
     def _login_html(self) -> str:
+        if self.op.get("spa_login"):
+            return ("<script>window.MUDO = 1</script>" if self.op.get("boton_mudo") else "") + SPA_LOGIN
         clave = '<input name="password" type="password"%s>' % (" disabled" if self.op.get("clave_deshabilitada") else "")
         if self.op.get("escondido"):               # un input de usuario oculto ANTES del visible
             return ('<input name="username" style="display:none"><form method="post" action="/accounts/login/ajax/">'
@@ -159,6 +170,22 @@ class _IG(http.server.BaseHTTPRequestHandler):
             ok = bool(self.op.get("aprobado"))
             return self._responder(json.dumps({"ok": ok}).encode(), sesion="aprobar" if ok else "",
                                    tipo="application/json")
+        if self.path == "/api/v1/web/accounts/login/ajax/":   # el login de la app de una página: contesta JSON
+            usuario, clave = campo("username"), campo("password")
+            if usuario == "esperar2":
+                return self._json({"message": "Please wait a few minutes before you try again.", "spam": True,
+                                   "status": "fail"}, 429)
+            if usuario == "noexiste":
+                return self._json({"user": False, "authenticated": False, "status": "ok"})
+            if clave != "clave-buena":                          # la página muestra un texto que no conocemos
+                return self._json({"user": True, "authenticated": False, "status": "ok",
+                                   "mostrar": "The login information you entered is incorrect."})
+            if usuario == "reto2":                              # pide «confirmá que sos vos» y la página no va sola
+                return self._json({"message": "checkpoint_required", "checkpoint_url": "/challenge/inicio/",
+                                   "lock": False, "status": "fail"})
+            if usuario == "rara":
+                return self._json({"message": "Algo raro pasó en el servidor.", "status": "fail"})
+            return self._json({"user": True, "authenticated": True, "status": "ok"}, sesion=usuario)
         if self.path == "/accounts/login/continuar":      # «Continuar como flwrencia»: NUNCA se tiene que tocar
             self.vistos["continuar"] = True
             return self._responder(ir="/", sesion="flwrencia")
@@ -172,6 +199,15 @@ class _IG(http.server.BaseHTTPRequestHandler):
             return self._responder(ir="/challenge/codigo/")
         self.send_response(404)
         self.end_headers()
+
+    def _json(self, d: dict, codigo: int = 200, sesion: str = ""):
+        self.send_response(codigo)
+        if sesion:
+            for c in (f"sessionid={sesion}%3A1%3Axyz; Path=/; HttpOnly", "csrftoken=tok; Path=/", "ds_user_id=1; Path=/"):
+                self.send_header("Set-Cookie", c)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(d).encode())
 
     def log_message(self, *a):
         pass
@@ -571,6 +607,73 @@ def test_tarjeta_y_formulario_a_la_vez_aprieta_entrar_y_nunca_continuar(ig):
 
 
 @con_chrome
+def test_app_de_una_pagina_entra_leyendo_la_respuesta(ig):
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+@pytest.mark.parametrize("usuario,clave,mensaje,tipo", [
+    ("bien", "otra-clave", "La contraseña no es correcta.", "definitivo"),     # la página muestra un texto desconocido
+    ("noexiste", "clave-buena", "Ese usuario no existe en Instagram", "definitivo"),
+    ("esperar2", "clave-buena", "esperar unos minutos", "freno"),
+    ("rara", "clave-buena", "Instagram contestó: «Algo raro pasó en el servidor.»", ""),
+])
+def test_lo_que_contesta_instagram_al_login_se_explica_enseguida(ig, usuario, clave, mensaje, tipo):
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales(usuario, clave)
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and mensaje in p["mensaje"], p
+    assert time.time() - t0 < 30                                  # no espera los 45 s de «no contestó»
+    if tipo == "definitivo":
+        assert ig.estado().get("bloqueado") == "definitivo"
+    if tipo == "freno":
+        assert float(ig.estado().get("espera_hasta") or 0) > time.time()
+
+
+@con_chrome
+def test_si_pide_confirmar_y_la_pagina_no_va_sola_va_al_checkpoint(ig):
+    from hookline.servicios import buscador
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("reto2", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    p = _esperar(ig, "pide_codigo", 90)
+    assert "f***@gmail.com" in p["mensaje"], p
+    ig.dar_codigo("654321")
+    h.join(60)
+    assert ig.publico()["estado"] == "listo" and buscador.estado_sesion()["instagram"], ig.publico()
+
+
+@con_chrome
+def test_si_el_boton_no_manda_nada_lo_dice_y_deja_la_captura(ig, cliente_api):
+    from hookline import almacen
+    _IG.op.update(spa_login=True, boton_mudo=True)
+    ig.guardar_credenciales("bien", "Clave-Secreta-987")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and p["mensaje"] == ig.M_NO_SE_MANDO, p
+    assert time.time() - t0 < 60 and p["captura"]
+    d = almacen.dir_de("navegador")
+    datos = json.loads((d / "login-ultimo.json").read_text(encoding="utf-8"))
+    assert datos["pagina"] == "/accounts/login/" and "Log in" in datos["texto"] and datos["motivo"] == ig.M_NO_SE_MANDO
+    for f in ("login-ultimo.json", "login-ultimo.png"):
+        assert b"Clave-Secreta-987" not in (d / f).read_bytes()
+    r = cliente_api.get("/api/sesion_ig/captura")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG"
+    assert cliente_api.get("/api/sesion_ig/diagnostico").json()["motivo"] == ig.M_NO_SE_MANDO
+    assert cliente_api.get("/api/sesion_ig").json()["sesion_ig"]["captura"] is True
+
+
+@con_chrome
 def test_si_falla_el_formulario_la_clave_no_va_a_ningun_log(ig, caplog):
     from hookline.db import sesion
     from hookline.modelos import Ajuste, Trabajo
@@ -827,6 +930,19 @@ def test_borrar_la_sesion_guardada_desde_el_panel(panel):
 
 
 @con_chrome
+def test_el_error_ofrece_ver_que_mostro_instagram(panel):
+    pg = panel
+    pg.evaluate("CP.sesion_ig = {estado: 'error', mensaje: 'No pude mandar el formulario', usuario: 'x',"
+                " tiene_credenciales: true, captura: true}; cargarCookies()")
+    pg.wait_for_selector("[data-igcaptura]")
+    assert "/api/sesion_ig/captura" in pg.get_attribute("[data-igcaptura]", "href")
+    pg.evaluate("document.querySelectorAll('.dlg-fondo').forEach(x => x.remove());"
+                " CP.sesion_ig = {...CP.sesion_ig, captura: false}; cargarCookies()")
+    pg.wait_for_timeout(300)
+    assert not pg.query_selector("[data-igcaptura]")
+
+
+@con_chrome
 def test_se_puede_cancelar_mientras_inicia(panel):
     pg = panel
     pg.evaluate("CP.sesion_ig = {estado: 'iniciando', mensaje: 'Instagram pide aprobar el inicio de sesión desde la app.',"
@@ -866,7 +982,7 @@ def test_la_contrasena_queda_cifrada_y_no_sale_por_la_api(cliente_api):
         assert "secreta-123456" not in cliente_api.get(url).text, url
     p = cliente_api.get("/api/sesion_ig").json()["sesion_ig"]
     assert p == {"estado": "iniciando", "mensaje": "Iniciando sesión en Instagram…", "usuario": "para_mirar",
-                 "tiene_credenciales": True, "auto": False}               # en cola, pero sin una búsqueda delante
+                 "tiene_credenciales": True, "auto": False, "captura": False}   # en cola, sin una búsqueda delante
     r = cliente_api.post("/api/copiar", json={"op": "ig_login", "usuario": "para_mirar"})   # ya está en marcha
     assert r.status_code == 400 and "Ya está iniciando" in r.json()["error"]
     r = cliente_api.post("/api/copiar", json={"op": "ig_codigo", "codigo": "123456"})       # no pidió código
@@ -938,6 +1054,11 @@ def test_usar_otro_perfil_y_continuar_en_todas_sus_formas():
         assert s.CONTINUAR.search(t), repr(t)
     for t in ("Log in", "Iniciar sesión", "Entrar"):
         assert not s.CONTINUAR.search(t), repr(t)
+
+
+def test_sin_captura_la_api_dice_que_no_hay(cliente_api):
+    assert cliente_api.get("/api/sesion_ig/captura").status_code == 404
+    assert cliente_api.get("/api/sesion_ig/diagnostico").json() == {}
 
 
 def test_corregir_el_usuario_con_la_clave_guardada(cliente_api):
