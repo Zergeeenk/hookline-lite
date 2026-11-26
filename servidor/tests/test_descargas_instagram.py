@@ -52,7 +52,10 @@ class _Instagram:
         self.posts: dict[int, dict] = {}
         self.sin_sesion = True
         self.sin_urls_sin_sesion = False                 # sin sesión, los videos vienen sin sus URLs (como el 20/11)
+        self.al_pedir_el_post = None                     # algo que pasa mientras yt-dlp pide los datos con la sesión
         self.pedidos: list[tuple[str, str]] = []        # (ruta, sesión con la que se pidió: «» = sin sesión)
+        self.desconocidos: list[str] = []               # lo que yt-dlp pidió y este Instagram no conoce
+        self.del_cdn: list[str] = []                    # lo que se bajó del CDN
 
     def medio(self, codigo, tipo, hijos=()):
         m = {"pk": str(_pk(codigo)), "id": f"{_pk(codigo)}_9", "code": codigo, "media_type": tipo,
@@ -90,6 +93,8 @@ class _Instagram:
             return self._resp(url, '<html><script type="application/json" id="__eqmc">{"l": "LSD1"}</script></html>',
                               tipo="text/html")
         if u.path.startswith("/api/v1/media/") and u.path.endswith("/info/"):
+            if self.al_pedir_el_post:
+                self.al_pedir_el_post()
             if "vieja" in sesion:
                 return self._resp("https://www.instagram.com/accounts/login/?next=" + urllib.parse.quote(u.path),
                                   "<html>login</html>", 401, "text/html")
@@ -107,7 +112,11 @@ class _Instagram:
             return self._resp(url, {"items": [medio], "num_results": 1, "status": "ok"} if medio else {}, 200 if medio else 404)
         if u.path == "/api/v1/web/get_ruling_for_content/":
             return self._resp(url, {"status": "ok"})
-        if u.path.startswith("/p/") and self.sin_sesion:
+        if u.path == "/api/graphql":                   # solo con curl_cffi (impersonate): acá no da nada, sigue por /p/
+            return self._resp(url, {}, 404)
+        if u.path.startswith("/p/") and not self.sin_sesion:
+            return self._resp(url, "<html>login</html>", 404, "text/html")
+        if u.path.startswith("/p/"):
             medio = next((m for m in self.posts.values() if m["code"] == u.path.split("/")[2]), None)
             if medio and self.sin_urls_sin_sesion:
                 medio = json.loads(json.dumps(medio))
@@ -119,25 +128,42 @@ class _Instagram:
                         "xig_polaris_media": {"if_not_gated_logged_out": medio}}}}}]]]}}]]]}
                 return self._resp(url, f'<html><script type="application/json" data-sjs>{json.dumps(datos)}</script>'
                                        '</html>', tipo="text/html")
+            return self._resp(url, "<html>no existe</html>", 404, "text/html")
+        self.desconocidos.append(f"{req.method} {u.path}")   # yt-dlp pidió algo nuevo: que la prueba lo diga
         return self._resp(url, {}, 404)
 
 
-@pytest.fixture
-def ig(tmp_path, monkeypatch):
-    """El CDN (un servidor local con un MP4 con sonido por cada video) e Instagram de mentira."""
-    from hookline.servicios import buscador
-    monkeypatch.setattr(buscador, "_abierto", lambda: False)
-    monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
-    d = tmp_path / "cdn"
-    d.mkdir()
+@pytest.fixture(scope="module")
+def _videos(tmp_path_factory):
+    """Un MP4 con sonido por cada video (se arman una vez por archivo de tests)."""
+    d = tmp_path_factory.mktemp("cdn")
     for codigo in (VIDEO, HIJO_VIDEO, HIJO_VIDEO2):
         subprocess.run([medios.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i",
                         "color=c=green:size=360x640:rate=30:duration=2", "-f", "lavfi", "-i",
                         "sine=frequency=440:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                         "-shortest", str(d / f"{codigo}.mp4")], check=True)
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(
-        type("H", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None}), directory=str(d)))
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return d
+
+
+@pytest.fixture
+def ig(_videos, monkeypatch):
+    """El CDN (un servidor local con los MP4) e Instagram de mentira. Estricto: si yt-dlp pide algo que este Instagram
+    no conoce, o algo fuera de instagram.com y del CDN, la prueba falla diciendo qué (un yt-dlp nuevo cambió algo)."""
+    from hookline.servicios import buscador
+    monkeypatch.setattr(buscador, "_abierto", lambda: False)
+    monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
+    falso = None
+
+    class H(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            falso.del_cdn.append(self.path)
+            super().do_GET()
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(H, directory=str(_videos)))
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     falso = _Instagram(f"http://127.0.0.1:{srv.server_address[1]}")
     original = yt_dlp.YoutubeDL.urlopen
 
@@ -145,13 +171,20 @@ def ig(tmp_path, monkeypatch):
         if isinstance(req, str):
             from yt_dlp.networking import Request
             req = Request(req)
-        if (urllib.parse.urlsplit(req.url).hostname or "").endswith("instagram.com"):
+        host = urllib.parse.urlsplit(req.url).hostname or ""
+        if host.endswith("instagram.com"):
             return falso.contestar(self, req)
-        return original(self, req)
+        if host == "127.0.0.1":
+            return original(self, req)
+        from yt_dlp.networking.exceptions import TransportError
+        falso.desconocidos.append(f"{req.method} {host}")
+        raise TransportError(f"la prueba no sale a Internet ({host})")
 
     monkeypatch.setattr(yt_dlp.YoutubeDL, "urlopen", urlopen)
     yield falso
     srv.shutdown()
+    srv.server_close()
+    assert not falso.desconocidos, f"yt-dlp pidió {falso.desconocidos}: hay que sumarlo al Instagram de mentira"
 
 
 def _bajar(tmp_path, codigo, tipo="p"):
@@ -203,13 +236,17 @@ def test_un_carrusel_de_fotos_lo_dice(ig, tmp_path):
 
 
 def test_un_carrusel_con_video_baja_el_primer_video_y_nada_mas(ig, tmp_path):
-    from hookline.servicios import buscador
+    from hookline.servicios import buscador, material
     buscador.importar_cookies(_cookies("buena"))
     ig.publicar(CARRUSEL, 8, [ig.medio(HIJO_FOTO, 1), ig.medio(HIJO_VIDEO, 2), ig.medio(HIJO_VIDEO2, 2)])
     video, info = _bajar(tmp_path, CARRUSEL)
     assert video.name == "ejemplo.mp4" and "Audio: aac" in _pistas(video)
     assert info["id"] == HIJO_VIDEO and info.get("uploader") == "Cuenta Memes"
     assert sorted(x.name for x in video.parent.iterdir()) == ["ejemplo.mp4"]          # solo uno, sin restos
+    assert f"/{HIJO_VIDEO2}.mp4" not in ig.del_cdn                                          # el otro, ni lo pidió
+    # con el nombre de siempre (Material → Ejemplos): cada video tendría su archivo; queda uno solo
+    video, _ = material.bajar_video(f"https://www.instagram.com/p/{CARRUSEL}/", tmp_path / "ejemplos")
+    assert sorted(x.name for x in video.parent.iterdir()) == [f"Cuenta_Memes_{HIJO_VIDEO}.mp4"]
 
 
 def test_un_carrusel_con_video_sin_sesion_tambien(ig, tmp_path):
@@ -307,18 +344,21 @@ def test_si_instagram_falla_al_pedir_el_post_dice_que_se_pruebe_en_un_rato(ig, t
 
 @pytest.mark.parametrize("sesion,espera", [("trabada", "aviso pendiente"), ("frenada", "esperá un rato"),
                                            ("vieja", "venció"), ("", "iniciá sesión")])
-def test_un_carrusel_con_video_que_sin_sesion_no_trae_el_video_no_dice_carrusel_de_fotos(ig, tmp_path, sesion, espera):
+@pytest.mark.parametrize("hijos", ["foto_y_video", "fotos"])
+def test_un_carrusel_que_sin_sesion_no_muestra_videos_no_dice_carrusel_de_fotos(ig, tmp_path, sesion, espera, hijos):
     """Revisión: sin una sesión que ande, Instagram puede mostrar el carrusel sin las URLs de sus videos. Antes decía
-    «carrusel de fotos, sin ningún video» (falso y definitivo)."""
+    «carrusel de fotos, sin ningún video» (falso y definitivo): sin los datos de la sesión no se sabe."""
     from hookline.servicios import buscador, material
     if sesion:
         buscador.importar_cookies(_cookies(sesion))
-    ig.publicar(CARRUSEL, 8, [ig.medio(HIJO_FOTO, 1), ig.medio(HIJO_VIDEO, 2)])
+    ig.publicar(CARRUSEL, 8, [ig.medio(HIJO_FOTO, 1), ig.medio(HIJO_VIDEO, 2 if hijos == "foto_y_video" else 1)])
     ig.sin_urls_sin_sesion = True
     with pytest.raises(ValueError) as e:
         _bajar(tmp_path, CARRUSEL)
     m = str(e.value)
     assert m != material.M_CARRUSEL and "puede ser una foto o un video que" in m and espera in m, m
+    if sesion == "vieja":
+        assert buscador.sesiones()["instagram"]["vencida"]                # y queda marcada en el panel
 
 
 def test_sesion_frenada_prueba_sin_sesion_y_baja(ig, tmp_path):
@@ -360,6 +400,19 @@ def test_sesion_vencida_y_sin_sesion_tampoco_dice_que_vencio(ig, tmp_path):
         _bajar(tmp_path, VIDEO)
     assert buscador.sesiones()["instagram"]["vencida"]
     assert buscador.estado_sesion()["instagram"]                      # el archivo de ella, intacto (era una copia)
+    # yt-dlp ya probó sin sesión en esa misma vuelta: no se repite (pedidos sin sesión de más = freno de Instagram)
+    assert _sin_sesion(ig).count(f"/p/{VIDEO}") == 1, ig.pedidos
+
+
+def test_si_ella_carga_otra_sesion_mientras_baja_la_nueva_no_queda_vencida(ig, tmp_path):
+    """Revisión: mientras yt-dlp pedía con la sesión vieja (que venció), ella cargó una nueva. La nueva no venció."""
+    from hookline.servicios import buscador
+    buscador.importar_cookies(_cookies("vieja"))
+    ig.publicar(VIDEO, 2)
+    ig.al_pedir_el_post = lambda: buscador.importar_cookies(_cookies("nueva"))
+    video, info = _bajar(tmp_path, VIDEO)                             # baja igual, sin sesión
+    assert info["id"] == VIDEO
+    assert not buscador.sesiones()["instagram"]["vencida"]
 
 
 def test_una_foto_sin_sesion_dice_que_puede_ser_una_foto(ig, tmp_path):

@@ -535,10 +535,12 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
             except _SinVideo:
                 raise
             except Exception as ex:
-                # solo si la sesión no llegó a traer el post (vencida, trabada, frenada): si lo trajo, la sesión anduvo
-                # y lo que falló es otra cosa (el video en el CDN, el disco…), que sin sesión no se arregla y taparía
-                # el motivo real
-                if not (ck and sesion_antes and "instagram.com" in link) or _trajo_el_post(capturado):
+                # solo si la sesión no llegó a traer el post (trabada, frenada, Instagram fallando): si lo trajo, la
+                # sesión anduvo y lo que falló es otra cosa (el video en el CDN, el disco…), que sin sesión no se
+                # arregla y taparía el motivo real. Si venció, yt-dlp ya probó sin sesión en esa misma vuelta:
+                # repetirlo solo duplica los pedidos sin sesión (y el freno de Instagram a la IP del servidor)
+                if (not (ck and sesion_antes and "instagram.com" in link) or _trajo_el_post(capturado)
+                        or any("no longer valid" in a.lower() for a in log_y.avisos)):
                     raise
                 log.info("yt-dlp no pudo con %s con la sesión «para mirar» (%s): pruebo sin sesión", link, _detalle(ex))
                 si_vencio()

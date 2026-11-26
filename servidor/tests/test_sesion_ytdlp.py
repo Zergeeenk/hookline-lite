@@ -60,7 +60,8 @@ class _YDLMientrasCarganOtra(_YDLQueBorra):
 
     def extract_info(self, link, download=False):
         from hookline.servicios import buscador
-        buscador.importar_cookies("sessionid=222%3Anueva%3A33; csrftoken=tok2; ds_user_id=222")
+        if self.o.get("cookiefile"):                       # una sola vez: mientras baja con la vieja
+            buscador.importar_cookies("sessionid=222%3Anueva%3A33; csrftoken=tok2; ds_user_id=222")
         return super().extract_info(link, download)
 
 
