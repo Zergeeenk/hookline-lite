@@ -384,16 +384,15 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
         if problema == "no_existe":
             return "Instagram dice que ese post no existe: lo borraron o el link está mal copiado."
         if problema == "falla":
-            return (f"Instagram no respondió bien al pedir ese video con la sesión «para mirar» ({dijo}). Probá de nuevo "
-                    "en un rato.")
-        return (f"Instagram no dio ese video con la sesión «para mirar» ({dijo}). Si el post no está, lo borraron o es "
-                "privado; si está, esa cuenta puede tener un aviso pendiente (como «confirmá que sos vos»): mirala en el "
-                "celular.")
+            return f"Instagram no respondió bien al pedir ese video ({dijo}). Probá de nuevo en un rato."
+        return (f"Instagram no dio ese video ({dijo}). Si el post ya no está, lo borraron o es privado; si está, puede "
+                "que la cuenta «para mirar» tenga un aviso pendiente (como «confirmá que sos vos»): entrá a ella desde "
+                "el celular.")
     if red and any(k in txt for k in ("login", "cookie", "rate", "empty media", "no video in this post",
                                        "no video formats", "registered users", "not available")):
         if _hay_sesion(link):
-            return (f"{red} no dio ese video aunque la cuenta «para mirar» anda: puede ser de fotos, privado o borrado. "
-                    "Abrilo en el navegador; si es un video público, subilo con «Subir video».")
+            return (f"{red} no dio ese video ni con la sesión cargada: puede ser de fotos, privado o borrado. Abrilo en "
+                    "el navegador; si es un video público, subilo con «Subir video».")
         if ig:
             return ("Instagram no dio el video sin sesión: puede ser una foto o un video que Instagram solo muestra con "
                     "sesión. Si es un video, iniciá sesión con la cuenta «para mirar» en Memes → «Sesión de Instagram», "
