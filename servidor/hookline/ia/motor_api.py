@@ -109,11 +109,20 @@ def _uso(r) -> dict:
             "busquedas": (getattr(stu, "web_search_requests", 0) or 0) if stu else 0}
 
 
+PREFIJO_RECHAZO = "Claude no quiso hacer este pedido"
+
+
+def es_rechazo(motivo) -> bool:
+    """¿La tarea falló porque Claude se negó (y no por red, clave o formato)? Lo usan los que deciden qué hacer con
+    lo rechazado: descartarlo, nunca saltear el control."""
+    return str(motivo or "").startswith(PREFIJO_RECHAZO)
+
+
 def _revisar_rechazo(r) -> None:
     if getattr(r, "stop_reason", "") == "refusal":
         det = getattr(r, "stop_details", None)
         cat = getattr(det, "category", None) if det else None
-        raise ErrorIA(f"Claude no quiso hacer este pedido (motivo: {cat or 'seguridad'}). Revisalo a mano.")
+        raise ErrorIA(f"{PREFIJO_RECHAZO} (motivo: {cat or 'seguridad'}). Revisalo a mano.")
     if getattr(r, "stop_reason", "") == "max_tokens":
         raise ErrorIA("La respuesta de Claude quedó cortada (max_tokens).")
 

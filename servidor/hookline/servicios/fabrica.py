@@ -818,8 +818,10 @@ def _reponer(c: dict) -> str:
     quedan = int(c.get("reponer") or 0)
     if quedan <= 0:
         return ""
-    with sesion() as s:   # se reserva el link en la misma sesión: dos descartes a la vez no toman el mismo
-        x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == "").order_by(LinkBanco.agregado).limit(1)).first()
+    with sesion() as s:   # se reserva con bloqueo de fila: dos descartes a la vez no toman el mismo link (en Postgres
+        # el segundo saltea el que ya tomó el primero; SQLite no lo necesita porque escribe de a uno)
+        x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == "").order_by(LinkBanco.agregado).limit(1)
+                      .with_for_update(skip_locked=True)).first()
         if not x:
             return ""
         x.copia_id, link = "reponiendo", x.link
@@ -888,8 +890,9 @@ def _descargar(datos: dict) -> None:
         except ValueError:
             shutil.rmtree(_dir(cid), ignore_errors=True)
             return
-        # Si falla la sesión, fallan todos los links: reponer solo gastaría el banco. Si es ese link, va otro.
-        if "sesión" not in motivo.lower() and _reponer(c):
+        # Solo si el problema es ese link (fotos, privado, borrado) va otro. Si es la sesión, Instagram, el disco o la
+        # red, fallarían todos: reponer solo gastaría el banco.
+        if isinstance(ex, material.LinkInservible) and _reponer(c):
             _datos(cid, error=motivo + " Ya arranqué otro link guardado en su lugar.")
         return
     try:
@@ -1104,19 +1107,8 @@ def _leido(t, l: dict) -> None:
     except ValueError:
         return
     if l.get("descartar"):   # en el ejemplo sale alguien que puede ser menor: no se usa, y su cuenta tampoco
-        fuente_fuera = ""
-        with sesion() as s:
-            x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == cid).limit(1)).first()
-            if x:
-                x.voto, x.motivo = "malo", "Parece menor"
-                fuente_fuera = _sacar_de_fuentes(s, x)
-        error = "Descartado: en el ejemplo sale alguien que puede ser menor de edad."
-        if fuente_fuera:
-            error += f" El buscador deja de usar {fuente_fuera}."
-        _datos(cid, estado="error", leido=True, error=error)
-        actividad("aviso", "Ejemplo descartado: alguien puede ser menor de edad", copia=cid)
-        if _reponer(c):
-            _datos(cid, error=error + " Ya arranqué otro link guardado en su lugar.")
+        _descartar_por_edad(cid, c, "Descartado: en el ejemplo sale alguien que puede ser menor de edad.",
+                            "Ejemplo descartado: alguien puede ser menor de edad")
         return
     if not fuentes.claude_elige():          # Claude elige la letra solo si está prendido en Fuentes
         l = {k: v for k, v in l.items() if k != "fuente"}
@@ -1135,10 +1127,34 @@ def _leido(t, l: dict) -> None:
 
 @tareas.al_fallar("lectura")
 def _lectura_fallo(t, motivo: str) -> None:
+    from ..ia.motor_api import es_rechazo
     try:
+        if es_rechazo(motivo):   # Claude se negó (suele ser porque no puede asegurar la edad): igual que «descartar»
+            _descartar_por_edad(t.referencia, _datos(t.referencia),
+                                "Descartado: Claude no aceptó este ejemplo (suele pasar cuando no puede asegurar que "
+                                "quien aparece sea mayor de edad).",
+                                "Ejemplo descartado: Claude no pudo asegurar la edad de quien aparece")
+            return
         _datos(t.referencia, estado="error", error=f"Claude no pudo leer el ejemplo: {motivo[:150]}")
     except ValueError:
         pass
+
+
+def _descartar_por_edad(cid: str, c: dict, error: str, aviso: str) -> None:
+    """El ejemplo no se usa porque quien aparece puede ser menor (Claude lo dijo o se negó a leerlo): el link queda
+    votado malo, su cuenta deja de ser fuente del buscador y, si venía de «Hacer N», va otro link en su lugar."""
+    fuente_fuera = ""
+    with sesion() as s:
+        x = s.scalars(select(LinkBanco).where(LinkBanco.copia_id == cid).limit(1)).first()
+        if x:
+            x.voto, x.motivo = "malo", "Parece menor"
+            fuente_fuera = _sacar_de_fuentes(s, x)
+    if fuente_fuera:
+        error += f" El buscador deja de usar {fuente_fuera}."
+    _datos(cid, estado="error", leido=True, error=error)
+    actividad("aviso", aviso, copia=cid)
+    if _reponer(c):
+        _datos(cid, error=error + " Ya arranqué otro link guardado en su lugar.")
 
 
 def _elegir_foto(cid: str, cuenta: str, cual) -> None:

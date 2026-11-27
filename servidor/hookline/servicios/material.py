@@ -306,6 +306,15 @@ CONSEJO = {
 }
 
 
+class LinkInservible(ValueError):
+    """La descarga falló por el link en sí (es de fotos, privado, lo borraron): otro link sí puede andar. Todo lo demás
+    (sesión, Instagram frenando o fallando, disco lleno, red) sigue siendo ValueError: con otro link fallaría igual."""
+
+
+class _DelLink(str):
+    """Un motivo de motivo_ytdlp que es del link en sí (ver LinkInservible). Sigue siendo un str para quien lo use."""
+
+
 def _detalle(ex) -> str:
     """El error de yt-dlp, corto, para el final del mensaje: sin «ERROR: [Instagram] <código>:», sin el pedido de
     reportarlo, sin «(caused by …)» y sin links."""
@@ -369,10 +378,11 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
         return (f"La sesión de {red or 'la cuenta para mirar'} venció (la cerraron o expiró). Cargá las cookies de nuevo "
                 "en Memes → «Sesión de Instagram» → «Avanzado».")
     if "photo" in txt:
-        return "Ese link es de fotos (no video): sacales captura y subilas."
+        return _DelLink("Ese link es de fotos (no video): sacales captura y subilas.")
     if "pinterest." in str(link) or "pin.it/" in str(link):
         if any(k in txt for k in ("no video", "not available", "unable to extract", "no formats", "404")):
-            return "Ese pin no tiene video (es una imagen) o lo borraron: probá con otro o subí el video con «Subir video»."
+            return _DelLink("Ese pin no tiene video (es una imagen) o lo borraron: probá con otro o subí el video con "
+                            "«Subir video».")
         return "No se pudo bajar ese pin de Pinterest. Fijate que sea un pin de video público."
     if problema:
         # con la sesión, Instagram contestó con un error al pedir el post (y bajar_video ya probó sin sesión)
@@ -382,7 +392,7 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
             return ("Instagram frenó la cuenta «para mirar» por muchos pedidos y sin sesión tampoco dio el video. "
                     "Esperá un rato y probá de nuevo.")
         if problema == "no_existe":
-            return "Instagram dice que ese post no existe: lo borraron o el link está mal copiado."
+            return _DelLink("Instagram dice que ese post no existe: lo borraron o el link está mal copiado.")
         if problema == "falla":
             return f"Instagram no respondió bien al pedir ese video ({dijo}). Probá de nuevo en un rato."
         return (f"Instagram no dio ese video ({dijo}). Si el post ya no está, lo borraron o es privado; si está, puede "
@@ -400,7 +410,7 @@ def motivo_ytdlp(ex: Exception, link: str, avisos: list[str] | None = None, sin_
         return (f"{red} no dio el video sin sesión. Cargá sus cookies en Memes → «Sesión de Instagram» → «Avanzado», o "
                 "subilo con el botón «Subir video».")
     if "private" in txt:
-        return "Ese video es privado: subilo con el botón «Subir video»."
+        return _DelLink("Ese video es privado: subilo con el botón «Subir video».")
     d = _detalle(ex)
     quien = f"{red} dijo: " if red and _de_la_red(ex) else ""
     return ("No se pudo bajar" + (f" ({quien}«{d}»)" if d else "") + ". Fijate que el link sea de un video público; si "
@@ -564,8 +574,9 @@ def bajar_video(link: str, carpeta_destino: Path, nombre: str = "%(uploader).40B
         si_vencio()
         que = _que_es(capturado[-1] if capturado else None)     # solo con los datos que trajo la sesión: seguro
         if que:
-            raise ValueError(M_FOTO if que == "foto" else M_CARRUSEL) from None
-        raise ValueError(motivo_ytdlp(ex, link, log_y.avisos, sin_sesion=sin_sesion)) from None
+            raise LinkInservible(M_FOTO if que == "foto" else M_CARRUSEL) from None
+        m = motivo_ytdlp(ex, link, log_y.avisos, sin_sesion=sin_sesion)
+        raise (LinkInservible if isinstance(m, _DelLink) else ValueError)(str(m)) from None
     return video, info
 
 
