@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -49,6 +50,50 @@ def conectado() -> bool:
         return bool(url and clave)
     except ValueError:
         return False
+
+
+# --- mayor de edad verificada por la agencia -----------------------------------------------------------------------
+EDAD_CACHE = 300               # segundos que vale una respuesta de Pyro (así una desmarca llega rápido)
+EDAD_CACHE_ERROR = 60          # si Pyro no contestó: se vuelve a probar al minuto (mientras tanto, «no verificada»)
+_edad: dict[int, tuple[float, bool, float]] = {}
+_edad_lock = threading.Lock()
+
+
+def edad_verificada(cuenta: str) -> bool:
+    """¿Un admin de la agencia marcó en Pyro que la modelo de esta cuenta es mayor de edad, con su documento revisado
+    (ageVerified.verified = true en /api/v1/models/{id})? Se pregunta a Pyro en vivo (con 5 min de memoria). Las
+    multicuentas usan la modelo de su main. Ante cualquier duda (sin Pyro, sin modelo atada, error, forma rara): False.
+    Solo sirve para las fotos de ESA modelo; nunca para otras personas."""
+    if not cuenta:
+        return False
+    try:
+        with sesion() as s:
+            c = s.get(Cuenta, cuenta)
+            mid = c.pyro_modelo_id if c else None
+            if not mid and c and c.main_id:
+                m = s.get(Cuenta, c.main_id)
+                mid = m.pyro_modelo_id if m else None
+        url, clave = conexion()
+    except Exception:
+        return False
+    if not mid or not url or not clave:
+        return False
+    ya = time.monotonic()
+    with _edad_lock:
+        hit = _edad.get(mid)
+        if hit and ya - hit[0] < hit[2]:
+            return hit[1]
+    try:
+        ficha = cli.modelo(url, clave, mid)
+        av = ficha.get("ageVerified")
+        ok = isinstance(av, dict) and av.get("verified") is True and ficha.get("id") == mid
+        dura = EDAD_CACHE
+    except Exception as ex:
+        log.info("pyro: no pude preguntar si la modelo %s está verificada: %s", mid, ex)
+        ok, dura = False, EDAD_CACHE_ERROR
+    with _edad_lock:
+        _edad[mid] = (time.monotonic(), ok, dura)
+    return ok
 
 
 def estado() -> dict:

@@ -126,7 +126,8 @@ def lectura(p: dict) -> str:
         fotos = (f"""
 La SEGUNDA imagen son las fotos y videos de @{p.get('cuenta')} numerados (los videos tienen una V roja). Poné en
 "modelo" el número de la que mejor encaje con el ejemplo (encuadre, pose, ropa y situación parecidas; que la cara se vea y
-quede lugar para el texto).""" + (f" Ya usadas (número×veces): {p['usadas']}: preferí otras." if p.get("usadas") else ""))
+quede lugar para el texto).""" + (f" Ya usadas (número×veces): {p['usadas']}: preferí otras." if p.get("usadas") else "")
+                 + _verificada(p, "la modelo de la segunda imagen (sus fotos numeradas)"))
     return f"""La PRIMERA imagen es una hoja con cuadros de un video de ejemplo (un meme), con el segundo arriba a la
 izquierda de cada cuadro. Dura {p.get('duracion', 0):.1f} s. Hay que hacer una versión nueva con la foto de la modelo y el
 mismo texto, seguida del remate del ejemplo.{fotos}
@@ -149,6 +150,16 @@ Si no, completá:
 {_catalogo('estilo')[:3500]}"""
 
 
+def _verificada(p: dict, quien: str) -> str:
+    """Solo si la agencia marcó en Pyro a la modelo como mayor de edad (documento revisado) y hay fotos de ella."""
+    if not (p.get("hay_fotos") and p.get("modelo_verificada") is True):
+        return ""
+    return f"""
+Dato de la agencia: {quien} es de la agencia y un administrador revisó su documento de identidad: es MAYOR DE EDAD
+(verificado). Vale SOLO para ella. Para cualquier otra persona (la del video de ejemplo, o alguien más que aparezca)
+sigue la regla de siempre: si puede ser menor, se descarta."""
+
+
 def juez(p: dict) -> str:
     otra = " (con foto = número de la hoja de fotos de la modelo si querés una en particular)" if p.get("hay_fotos") else ""
     return f"""Sos el juez de calidad de un reel ya armado. La PRIMERA imagen son 8 cuadros del reel terminado (las
@@ -159,7 +170,8 @@ Poné DOS notas de edición de 1 a 5 (menos de 3 = no sirve), muy exigente con e
 - nota_tecnica: mirá cada cuadro, también el primero: ¿se cuela algo del video original (pelo, bordes, fondo) alrededor
   de capturas o recortes? ¿borroso, pixelado, negro, cortes raros, barras?
 motivo: una línea. Si la nota es baja, arreglo: "otra_foto"{otra}, "texto" (con texto_y 0-1 donde va mejor) o "musica"
-(si el audio no sirve: habla alguien, se escucha mal o no pega). Sé exigente pero no tachés por gusto."""
+(si el audio no sirve: habla alguien, se escucha mal o no pega). Sé exigente pero no tachés por gusto.""" + _verificada(
+        p, "la modelo de la cuenta (la de la foto fija con la que se armó el reel)")
 
 
 def filtrar(p: dict) -> str:

@@ -963,7 +963,8 @@ def _preparar(datos: dict) -> None:
             imagenes.append(almacen.relativa(fotos_hoja))
             usadas = _usadas(cuenta)
             usadas_txt = ", ".join(f"{i + 1}×{usadas[r.name]}" for i, (r, _) in enumerate(fotos) if usadas.get(r.name))
-        datos_l = {"duracion": dur, "cuenta": cuenta, "hay_fotos": bool(fotos_hoja), "usadas": usadas_txt}
+        datos_l = {"duracion": dur, "cuenta": cuenta, "hay_fotos": bool(fotos_hoja), "usadas": usadas_txt,
+                   "modelo_verificada": bool(fotos_hoja) and _modelo_verificada(cuenta)}
         m = fuentes.muestrario() if fuentes.claude_elige() else None
         if m:                               # la última imagen: cada fuente escrita en sí misma, con su clave
             imagenes.append(almacen.relativa(m[0]))
@@ -971,6 +972,16 @@ def _preparar(datos: dict) -> None:
         tareas.crear("lectura", datos_l, referencia=cid, imagenes=imagenes)
     except Exception as ex:
         _datos(cid, estado="error", error=f"No pude leer el video: {str(ex)[:150]}")
+
+
+def _modelo_verificada(cuenta: str) -> bool:
+    """La agencia marcó en Pyro que la modelo de esta cuenta es mayor de edad (documento revisado). Ante cualquier
+    problema, False: Claude sigue con la regla de siempre."""
+    try:
+        from . import pyro
+        return pyro.edad_verificada(cuenta)
+    except Exception:
+        return False
 
 
 def _fotos_de(cuenta: str) -> list[tuple[Path, list]]:
@@ -1732,7 +1743,9 @@ def _al_juez(cid: str, video: Path, dur: float) -> None:
     c = _datos(cid)
     _datos(cid, juez={**(c.get("juez") or {}), "estado": "mirando"}, revision="revision.jpg")
     fotos_hoja, _ = _candidatas(c.get("cuenta") or "")
-    tareas.crear("juez", {"hay_fotos": bool(fotos_hoja)}, referencia=cid,
+    tareas.crear("juez", {"hay_fotos": bool(fotos_hoja),
+                          "modelo_verificada": bool(fotos_hoja) and _modelo_verificada(c.get("cuenta") or "")},
+                 referencia=cid,
                  imagenes=[almacen.relativa(d / "revision.jpg"), almacen.relativa(d / "hoja.jpg")])
 
 
