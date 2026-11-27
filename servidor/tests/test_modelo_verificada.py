@@ -169,13 +169,13 @@ def _pedido(tipo):
     from hookline.ia import tareas
     pend = [t for t in tareas.pendientes_claude_code() if t.tipo == tipo]
     assert pend, f"no hay pedido de {tipo}"
-    return pend[0], json.loads((tareas.dir_tarea(pend[0].id) / "pedido.json").read_text())
+    return pend[0], json.loads((tareas.dir_tarea(pend[0].id) / "pedido.json").read_text(encoding="utf-8"))
 
 
 def _responder(tipo, resultado):
     from hookline.ia import tareas
     t, _ = _pedido(tipo)
-    (tareas.dir_tarea(t.id) / "resultado.json").write_text(json.dumps(resultado))
+    (tareas.dir_tarea(t.id) / "resultado.json").write_text(json.dumps(resultado), encoding="utf-8")
     tareas.recoger_claude_code()
 
 
