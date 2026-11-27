@@ -70,7 +70,10 @@ CONTINUAR = re.compile(r"^\W*(continu(e|ar)|seguir)\b", re.I)   # el botón de l
 BOTON_FUI_YO = re.compile(r"^(this was me|it was me|yes, it was me|fui yo|s[ií], fui yo|era yo)$", re.I)
 CAPTCHA = re.compile(r"captcha|i.?m not a robot|no soy un robot|confirm (that )?you.?re (a )?human|"
                      r"confirm[aá] que (sos|eres) (una persona|humano)", re.I)
-MARCO_CAPTCHA = "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[title*='captcha' i]"
+# un captcha a la vista en la página (los invisibles, que solo vigilan y no piden nada, no cuentan)
+MARCO_CAPTCHA = ", ".join(f"iframe{x}:not([src*='size=invisible'])"
+                          for x in ("[src*='recaptcha']", "[src*='hcaptcha']", "[title*='captcha' i]"))
+RUTA_CAPTCHA = re.compile(r"captcha|arkoselabs|funcaptcha", re.I)   # de dónde viene un marco de captcha
 PIDE_APROBAR = re.compile(r"check your notifications|approve (this|the) login|was this you|"
                           r"revis[aá] tus notificaciones|aprob[aá] (el|este) inicio|¿fuiste tú\?", re.I)
 
@@ -88,8 +91,8 @@ M_MUCHOS_CODIGOS = "Instagram no aceptó los códigos. Iniciá sesión de nuevo 
 M_OTRO_CODIGO = "El código no es correcto: escribí el último que te llegó."
 M_APROBAR = ("Instagram pide aprobar el inicio de sesión desde la app (en el celular de la cuenta para mirar). "
              "Aprobalo y esperá acá.")
-M_CAPTCHA = ("Instagram pide resolver un captcha y desde el servidor no se puede. Probá de nuevo más tarde o cargá "
-             "la sesión con cookies (en «Avanzado»).")
+M_CAPTCHA = ("Instagram pidió el «No soy un robot» (un captcha) y desde el servidor no se puede resolver. Cargá la "
+             "sesión con cookies (en «Avanzado»), o probá de nuevo más tarde.")
 M_SIN_APROBAR = ("Nadie aprobó el inicio de sesión desde la app a tiempo. Iniciá sesión de nuevo cuando tengas a mano "
                  "el celular de esa cuenta.")
 M_OTRA_GUARDADA = ("Instagram muestra otra cuenta guardada en el navegador del servidor y no pude pasar a «Usar otro "
@@ -447,6 +450,86 @@ def _visible(pg, sel: str):
     return None
 
 
+def _marcos(pg) -> list:
+    """Los marcos de la página, también los que están adentro de otro marco (sin el principal)."""
+    try:
+        return [f for f in pg.frames if f is not pg.main_frame]
+    except Exception:
+        return []
+
+
+def _a_la_vista(pg, marco) -> bool:
+    """El marco se ve en la página (él y cada marco que lo contiene), con un tamaño de algo para tocar."""
+    try:
+        while marco is not None and marco is not pg.main_frame:
+            el = marco.frame_element()
+            caja = el.bounding_box() if el.is_visible() else None
+            if not (caja and caja["width"] >= 60 and caja["height"] >= 30):
+                return False
+            marco = marco.parent_frame
+        return True
+    except Exception:
+        return False
+
+
+def _es_captcha(marco) -> bool:
+    u = urllib.parse.urlsplit(marco.url or "")
+    return bool(RUTA_CAPTCHA.search((u.hostname or "") + u.path))
+
+
+def _invisible(marco) -> bool:
+    """Un captcha invisible: solo vigila, no pide nada (el sello de «protegido por reCAPTCHA»)."""
+    return "size=invisible" in urllib.parse.urlsplit(marco.url or "").query.lower()
+
+
+def _captchas_adentro(marco) -> list:
+    """Los marcos de captcha que hay adentro de `marco`, a cualquier profundidad (sin contarlo a él)."""
+    out = []
+    for h in marco.child_frames:
+        if _es_captcha(h):
+            out.append(h)
+        out.extend(_captchas_adentro(h))
+    return out
+
+
+def _captcha_para_tocar(pg, marco) -> bool:
+    """Un marco de captcha de los de más adentro (sin otro de captcha adentro), que no es invisible y se ve: algo para
+    tocar. El invisible de Google trae dos marcos: el que vigila (size=invisible) y el del desafío, escondido."""
+    return _es_captcha(marco) and not _invisible(marco) and not _captchas_adentro(marco) and _a_la_vista(pg, marco)
+
+
+def _captcha_en_marcos(pg) -> bool:
+    """Un captcha que el texto de la página no muestra: un marco de captcha para tocar, también adentro de otro marco.
+    Decide el de más adentro: el de Meta envuelve al de Google, y si el de Google no pide nada (invisible, escondido)
+    no hay captcha. Se mira cuando el inicio de sesión ya lleva un rato trabado (sin código, sin botones, sin esperar
+    una aprobación)."""
+    for f in _marcos(pg):
+        try:
+            if _captcha_para_tocar(pg, f):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _marco_captcha(pg) -> bool:
+    """Un iframe de captcha a la vista en la página (MARCO_CAPTCHA). Si es un envoltorio (el de Meta), cuenta solo si
+    adentro hay un captcha para tocar: si adentro solo está el invisible de Google (el que vigila y el del desafío
+    escondido), no."""
+    try:
+        for el in pg.query_selector_all(MARCO_CAPTCHA):
+            if not el.is_visible():
+                continue
+            f = el.content_frame()
+            adentro = _captchas_adentro(f) if f else []
+            if adentro and not any(_captcha_para_tocar(pg, h) for h in adentro):
+                continue
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _boton(pg, rx: re.Pattern):
     """Un botón visible cuyo texto coincide (Instagram usa <button> y también <div role=button>)."""
     try:
@@ -664,9 +747,16 @@ def _diagnostico(pg, motivo: str) -> None:
                           mask=[pg.locator(CAMPO_CODIGO), pg.locator(CLAVE)])
         except Exception:
             (d / "login-ultimo.png").unlink(missing_ok=True)
+        marcos = []
+        for f in _marcos(pg)[:10]:
+            try:
+                u = urllib.parse.urlsplit(f.url or "")
+                marcos.append(((u.hostname or "") + u.path)[:120])
+            except Exception:
+                continue
         datos = {"cuando": time.strftime("%Y-%m-%d %H:%M:%S"), "motivo": _tachar(motivo),
                  "pagina": urllib.parse.urlsplit(pg.url).path, "texto": _tachar(_texto(pg)[:2000]),
-                 "respuesta_login": _respuesta}
+                 "respuesta_login": _respuesta, "marcos": marcos}
         (d / "login-ultimo.json").write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
         estado(diagnostico=time.time())
     except Exception as ex:
@@ -879,9 +969,11 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             n = _verificar(pg, ctx)
             if n is not None:
                 return n
+        texto = _texto(pg)
+        if CAPTCHA.search(texto) or _marco_captcha(pg) or _captcha_en_marcos(pg):
+            raise ErrorLogin(M_CAPTCHA, "freno")     # antes que «otra cuenta guardada»: pudo tocar «Usar otro perfil»
         if otra or pg.get_by_text(OTRA_CUENTA).count():
             raise ErrorLogin(M_OTRA_GUARDADA)
-        texto = _texto(pg)
         err = _error(texto)
         raise ErrorLogin("No apareció el formulario de Instagram" + (f": {err}" if err else
                          f" (la página dice: «{texto[:100]}»). Probá de nuevo en un rato."), _tipo(err) if err else "pasajero")
@@ -925,7 +1017,7 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
         else:
             sesion_desde = 0.0
         texto = _texto(pg)
-        if CAPTCHA.search(texto) or _visible(pg, MARCO_CAPTCHA):
+        if CAPTCHA.search(texto) or _marco_captcha(pg):
             raise ErrorLogin(M_CAPTCHA, "freno")
         err = _error(texto)
         campo = _visible(pg, CAMPO_CODIGO)
@@ -980,6 +1072,8 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
             aprobar = time.time() + ESPERA_CODIGO
             _avance(estado="iniciando", mensaje=M_APROBAR)
             continue
+        if not aprobar and time.time() - enviado > SIN_RESPUESTA and _captcha_en_marcos(pg):
+            raise ErrorLogin(M_CAPTCHA, "freno")     # trabado un rato con un captcha en un marco, en cualquier página
         if (not codigos and "/accounts/login" in pg.url and _visible(pg, CLAVE)
                 and time.time() - enviado > SIN_RESPUESTA):
             if not _respuesta.get("pedidos"):
@@ -990,6 +1084,8 @@ def hacer_login(pg, ctx, usuario: str, clave: str) -> int:
                              "mostró Instagram».")
     if aprobar:
         raise ErrorLogin(M_SIN_APROBAR, "codigo")
+    if _captcha_en_marcos(pg):
+        raise ErrorLogin(M_CAPTCHA, "freno")
     raise ErrorLogin("Instagram no terminó el inicio de sesión. " + (_texto(pg)[:160] or ""))
 
 

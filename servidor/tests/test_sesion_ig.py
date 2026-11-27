@@ -46,6 +46,15 @@ FUI_YO = ("<h2>Was this you?</h2><p>We noticed a login attempt from a new device
           '<form method="post" action="/challenge/fuiyo/"><button type="submit">This Was Me</button></form>')
 CAPTCHA = ("<h2>Help us confirm you're human</h2><iframe src='/recaptcha/anchor' title='reCAPTCHA' "
            "style='width:300px;height:80px'></iframe>")
+# el «No soy un robot» de Meta: un marco sin «captcha» en el atributo, con el de Google adentro (el texto no está en
+# la página y el marco de la página no dice recaptcha)
+MARCO_META = "<iframe src='/marco/desafio' style='width:340px;height:120px;border:0'></iframe>"
+INVISIBLE = ("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=invisible' "
+             "style='width:256px;height:60px;border:0'></iframe>")      # el que solo vigila: no pide nada
+# el invisible, pero envuelto por el marco de Meta (que dice «recaptcha» y no «size=invisible»)
+META_INVISIBLE = "<iframe src='/captcha/recaptcha/iframe/?envuelve=invisible' style='width:300px;height:80px;border:0'></iframe>"
+ESCONDIDO = "<iframe src='/marco/desafio' style='width:1px;height:1px;border:0'></iframe>"   # cargado, pero no se ve
+CHIQUITO = "<iframe src='/marco/chiquito' style='width:340px;height:120px;border:0'></iframe>"  # adentro, uno de 1x1
 ELEGIR = ("<h2>See everyday moments from your close friends.</h2><div><span>flwrencia</span>"
           '<form method="post" action="/accounts/login/continuar"><button type="submit">Continue</button></form>'
           '<a href="%s">Use another profile</a><button type="button">Create new account</button></div>')
@@ -86,9 +95,16 @@ class _IG(http.server.BaseHTTPRequestHandler):
         self.wfile.write(cuerpo)
 
     def _login_html(self) -> str:
+        if self.op.get("solo_captcha"):            # Meta muestra el captcha en vez del formulario
+            return MARCO_META
+        marco = ((MARCO_META if self.op.get("captcha_marco") else "")
+                 + (INVISIBLE if self.op.get("captcha_invisible") else "")
+                 + (META_INVISIBLE if self.op.get("meta_invisible") else "")
+                 + (ESCONDIDO if self.op.get("captcha_escondido") else "")
+                 + (CHIQUITO if self.op.get("captcha_chiquito") else ""))
         if self.op.get("spa_login"):
             return (("<script>window.MUDO = 1</script>" if self.op.get("boton_mudo") else "")
-                    + ("<script>window.BLOKS = 1</script>" if self.op.get("bloks") else "") + SPA_LOGIN)
+                    + ("<script>window.BLOKS = 1</script>" if self.op.get("bloks") else "") + SPA_LOGIN + marco)
         clave = '<input name="password" type="password"%s>' % (" disabled" if self.op.get("clave_deshabilitada") else "")
         if self.op.get("escondido"):               # un input de usuario oculto ANTES del visible
             return ('<input name="username" style="display:none"><form method="post" action="/accounts/login/ajax/">'
@@ -125,8 +141,29 @@ class _IG(http.server.BaseHTTPRequestHandler):
             return self._responder(_pagina(FUI_YO))
         if ruta == "/challenge/captcha/":
             return self._responder(_pagina(CAPTCHA))
+        if ruta == "/captcha/meta/marco":             # el marco de Meta, que envuelve al «No soy un robot» de Google
+            return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=normal' "
+                                           "style='width:304px;height:78px;border:0'></iframe>"))
+        if ruta == "/recaptcha/api2/bframe":
+            return self._responder(_pagina("<p>Select all images with traffic lights</p>"))
+        if ruta == "/recaptcha/api2/anchor":
+            return self._responder(_pagina("<label>I'm not a robot</label><p>reCAPTCHA · Privacy - Terms</p>"))
+        if ruta == "/captcha/recaptcha/iframe/":   # el invisible de Google: el que vigila y el del desafío, escondido
+            return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=invisible' "
+                                           "style='width:256px;height:60px;border:0'></iframe>"
+                                           "<iframe src='/recaptcha/api2/bframe?k=clave-del-sitio' style='width:400px;"
+                                           "height:580px;border:0;visibility:hidden;position:absolute;top:-10000px'>"
+                                           "</iframe>"))
+        if ruta == "/marco/chiquito":
+            return self._responder(_pagina("<iframe src='/recaptcha/api2/anchor?k=clave-del-sitio&size=normal' "
+                                           "style='width:1px;height:1px;border:0'></iframe>"))
+        if ruta == "/challenge/robot/":                  # «confirmá que sos vos» con el captcha de Meta en un marco
+            return self._responder(_pagina("<h2>Ayudanos a confirmar que sos vos</h2>" + MARCO_META))
+        if ruta == "/marco/desafio":
+            return self._responder(_pagina("<iframe src='/captcha/meta/marco?ctx=dato-de-la-sesion' "
+                                           "style='width:320px;height:100px;border:0'></iframe>"))
         if ruta == "/accounts/login/aprobar":
-            return self._responder(_pagina(APROBAR))
+            return self._responder(_pagina(APROBAR + (META_INVISIBLE if self.op.get("meta_invisible") else "")))
         if ruta == "/accounts/onetap/":
             return self._responder(_pagina("<p>Save your login info?</p><button>Save info</button><button>Not now</button>"))
         if ruta == "/accounts/suspended/":
@@ -199,6 +236,9 @@ class _IG(http.server.BaseHTTPRequestHandler):
             if clave != "clave-buena":                          # la página muestra un texto que no conocemos
                 return self._json({"user": True, "authenticated": False, "status": "ok",
                                    "mostrar": "The login information you entered is incorrect."})
+            if usuario == "robot":                              # manda a un «confirmá que sos vos» con captcha
+                return self._json({"message": "checkpoint_required", "checkpoint_url": "/challenge/robot/",
+                                   "lock": False, "status": "fail"})
             if usuario == "reto2":                              # pide «confirmá que sos vos» y la página no va sola
                 return self._json({"message": "checkpoint_required", "checkpoint_url": "/challenge/inicio/",
                                    "lock": False, "status": "fail"})
@@ -774,6 +814,132 @@ def test_si_el_boton_no_manda_nada_lo_dice_y_deja_la_captura(ig, cliente_api, mo
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG"
     assert cliente_api.get("/api/sesion_ig/diagnostico").json()["motivo"] == ig.M_NO_SE_MANDO
     assert cliente_api.get("/api/sesion_ig").json()["sesion_ig"]["captura"] is True
+
+
+@con_chrome
+def test_el_captcha_de_meta_en_un_marco_se_dice_captcha(ig, cliente_api, monkeypatch):
+    """Lo de Flora (26/11): Meta mostró el «No soy un robot» y el panel decía «el botón de entrar no respondió»."""
+    from hookline import almacen
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 3)
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 6)
+    _IG.op.update(spa_login=True, boton_mudo=True, captcha_marco=True)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    p = ig.publico()
+    assert p["estado"] == "error" and p["mensaje"] == ig.M_CAPTCHA, p
+    assert time.time() - t0 < 60 and float(ig.estado().get("espera_hasta") or 0) > time.time()   # frena un rato
+    datos = json.loads((almacen.dir_de("navegador") / "login-ultimo.json").read_text(encoding="utf-8"))
+    assert any(m.endswith("/recaptcha/api2/anchor") for m in datos["marcos"]), datos["marcos"]
+    assert "clave-del-sitio" not in json.dumps(datos) and "dato-de-la-sesion" not in json.dumps(datos)
+
+
+@con_chrome
+def test_un_captcha_invisible_no_se_confunde_con_uno_que_pide_algo(ig, monkeypatch):
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 3)
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 6)
+    _IG.op.update(spa_login=True, boton_mudo=True, captcha_invisible=True)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_NO_SE_MANDO, ig.publico()
+
+
+@con_chrome
+@pytest.mark.parametrize("op", ["captcha_invisible", "meta_invisible"])
+def test_con_un_captcha_invisible_el_login_entra(ig, monkeypatch, op):
+    """Instagram tarda en contestar y mientras tanto la página tiene un captcha invisible (suelto o envuelto por el
+    marco de Meta): no se corta (antes se cortaba con «captcha» en la primera vuelta)."""
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 2)
+    _IG.op.update({"spa_login": True, op: True, "demora_login": 6})
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+@pytest.mark.parametrize("op", ["meta_invisible", "captcha_escondido", "captcha_chiquito"])
+def test_un_captcha_que_no_pide_nada_no_cambia_el_mensaje(ig, monkeypatch, op):
+    """Trabado por otra cosa (el botón no manda nada) con un captcha que no se puede tocar: invisible envuelto por Meta,
+    cargado en un marco de 1x1 o de 1x1 adentro de uno normal. Sigue diciendo que el botón no respondió."""
+    monkeypatch.setattr(ig, "ESPERA_ENVIO", 3)
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 6)
+    _IG.op.update({"spa_login": True, "boton_mudo": True, op: True})
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_NO_SE_MANDO, ig.publico()
+
+
+@con_chrome
+def test_esperando_la_aprobacion_un_captcha_invisible_envuelto_no_corta(ig, monkeypatch):
+    """Revisión: el invisible de Google envuelto por el marco de Meta (que dice «recaptcha») mientras se espera que
+    aprueben desde el celular. El chequeo de cada vuelta lo tomaba por un captcha y cortaba un login que iba a entrar."""
+    _IG.op["meta_invisible"] = True
+    ig.guardar_credenciales("aprobar", "clave-buena")
+    ig.iniciar()
+    h = _en_hilo(_worker)
+    fin = time.time() + 60
+    while ig.publico()["mensaje"] != ig.M_APROBAR:                 # ya miró la página (con el marco) al menos una vez
+        assert time.time() < fin and ig.publico()["estado"] == "iniciando", ig.publico()
+        time.sleep(0.3)
+    time.sleep(4)                                                   # unas vueltas más mirando, sin cortar
+    assert ig.publico()["estado"] == "iniciando" and h.is_alive(), ig.publico()
+    _IG.op["aprobado"] = True
+    h.join(60)
+    assert ig.publico()["estado"] == "listo", ig.publico()
+
+
+@con_chrome
+def test_el_captcha_en_el_confirma_que_sos_vos_se_dice_enseguida(ig, monkeypatch):
+    """El captcha de Meta, en un marco, en la pantalla de «confirmá que sos vos» (no en la de login): antes se sabía
+    recién al final del tiempo máximo (8 minutos en el servidor). SIN_RESPUESTA más que los 8 s que tarda en ir al
+    checkpoint, como en el servidor (45 s)."""
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 15)
+    monkeypatch.setattr(ig, "TIEMPO_MAX", 120)
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("robot", "clave-buena")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_CAPTCHA, ig.publico()
+    assert time.time() - t0 < 60 and float(ig.estado().get("espera_hasta") or 0) > time.time()
+
+
+@con_chrome
+def test_el_captcha_se_dice_tambien_si_se_acaba_el_tiempo(ig, monkeypatch):
+    """Si se acaba el tiempo máximo antes de llevar SIN_RESPUESTA trabado (con Instagram lento puede pasar), el chequeo
+    del final también ve el captcha (antes: «Instagram no terminó el inicio de sesión»)."""
+    monkeypatch.setattr(ig, "SIN_RESPUESTA", 45)
+    monkeypatch.setattr(ig, "TIEMPO_MAX", 25)
+    _IG.op["spa_login"] = True
+    ig.guardar_credenciales("robot", "clave-buena")
+    ig.iniciar()
+    t0 = time.time()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_CAPTCHA, ig.publico()
+    assert time.time() - t0 < 60
+
+
+@con_chrome
+def test_si_toco_usar_otro_perfil_y_sale_el_captcha_dice_captcha(ig):
+    _IG.op.update(elegir_siempre=True, solo_captcha=True)
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_CAPTCHA, ig.publico()
+
+
+@con_chrome
+def test_si_meta_muestra_el_captcha_en_vez_del_formulario_lo_dice(ig):
+    _IG.op["solo_captcha"] = True
+    ig.guardar_credenciales("bien", "clave-buena")
+    ig.iniciar()
+    _worker()
+    assert ig.publico()["mensaje"] == ig.M_CAPTCHA, ig.publico()
+    assert float(ig.estado().get("espera_hasta") or 0) > time.time()      # frena un rato: no insiste enseguida
 
 
 @con_chrome
