@@ -512,9 +512,7 @@ def _motivos(monkeypatch) -> dict:
 def test_hacer_n_pone_otro_link_solo_si_el_problema_es_de_ese_link(monkeypatch, caso):
     """«Hacer N» (fabrica, #38) pone otro link guardado en el lugar de uno que no baja, salvo que el motivo diga
     «sesión»: ahí fallarían todos y se gastaría el banco. Los mensajes de bajar_video tienen que respetar eso (se prueba
-    con fabrica tal cual, sin tocarla): los que son de ese link no dicen «sesión»; los de la sesión de Instagram o de
-    Instagram fallando, sí. Lo que falla en el propio servidor (disco lleno, sin red) no dice «sesión» y repone: queda
-    avisado a quien hizo «Hacer N» (no se toca fabrica)."""
+    con fabrica tal cual, sin tocarla): los que son de ese link no dicen «sesión»; los que fallarían con cualquiera, sí."""
     from hookline.db import sesion
     from hookline.modelos import LinkBanco
     from hookline.servicios import fabrica, material
