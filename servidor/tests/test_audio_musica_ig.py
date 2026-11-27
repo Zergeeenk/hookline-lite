@@ -306,8 +306,8 @@ def test_la_captura_funciona_con_el_extractor_real(tmp_path):
     from hookline.servicios import material
     d = tmp_path / "api"
     (d / "api" / "v1" / "media" / "123" / "info").mkdir(parents=True)
-    (d / "api" / "v1" / "media" / "123" / "info" / "index.html").write_text('{"items": [{"pk": "123"}]}')
-    (d / "otra.json").write_text('{"x": 1}')
+    (d / "api" / "v1" / "media" / "123" / "info" / "index.html").write_text('{"items": [{"pk": "123"}]}', encoding="utf-8")
+    (d / "otra.json").write_text('{"x": 1}', encoding="utf-8")
     srv = _servir(d, [])
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
