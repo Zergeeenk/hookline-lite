@@ -84,6 +84,33 @@ def test_fabrica_completa_y_reparto_para_aprobar(tmp_path, modelo_con_multi):
         assert p.archivos[0].startswith("para-subir/multi1/.reel-")
 
 
+def test_juez_de_una_version_vieja_no_rehace_encima_del_ajuste_a_mano(tmp_path, modelo_con_multi):
+    """27/11: mientras el juez miraba, ella ajustó el reel a mano. El juez contestó sobre la versión vieja, lo rehízo
+    encima del ajuste y, como el ajuste reinicia el contador, dio 7 vueltas en vez de 2."""
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "cuando me dice que no", "texto_y": 0.2,
+                                                    "texto_tam": 0.04, "modelo": 1, "notas": "ok"})
+    assert fabrica._datos(cid)["juez"]["estado"] == "mirando"
+    fabrica.armar(cid, {"texto": "lo cambié yo"})          # ajuste a mano mientras el juez mira
+    _vaciar_cola()
+    antes = fabrica._datos(cid)
+    _responder("juez", {"nota_texto": 1, "nota_tecnica": 1, "motivo": "feo", "arreglo": "texto", "texto_y": 0.6})
+    _vaciar_cola()
+    c = fabrica._datos(cid)
+    assert c["texto"] == "lo cambié yo" and c["render_n"] == antes["render_n"]   # no se volvió a armar
+    assert c["juez"] == {} and c["texto_y"] == antes["texto_y"]                  # ni se tocó el juez ni el texto
+
+
+def test_juez_de_la_version_actual_sigue_igual(tmp_path, modelo_con_multi):
+    from hookline.servicios import fabrica
+    cid = _copia_lista(tmp_path, modelo_con_multi, {"corte": 2.0, "texto": "cuando me dice que no", "texto_y": 0.2,
+                                                    "texto_tam": 0.04, "modelo": 1, "notas": "ok"})
+    n = fabrica._datos(cid)["render_n"]
+    _responder("juez", {"nota_texto": 1, "nota_tecnica": 4, "motivo": "texto bajo", "arreglo": "texto", "texto_y": 0.3})
+    c = fabrica._datos(cid)
+    assert c["juez"]["estado"] == "rehaciendo" and c["juez"]["intentos"] == 1 and c["render_n"] == n + 1
+
+
 def test_menor_se_descarta(tmp_path, modelo_con_multi):
     from hookline.servicios import fabrica
     cid = _copia_lista(tmp_path, modelo_con_multi, {"descartar": "menor"})

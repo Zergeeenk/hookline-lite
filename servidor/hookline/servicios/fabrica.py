@@ -1744,7 +1744,8 @@ def _al_juez(cid: str, video: Path, dur: float) -> None:
     _datos(cid, juez={**(c.get("juez") or {}), "estado": "mirando"}, revision="revision.jpg")
     fotos_hoja, _ = _candidatas(c.get("cuenta") or "")
     tareas.crear("juez", {"hay_fotos": bool(fotos_hoja),
-                          "modelo_verificada": bool(fotos_hoja) and _modelo_verificada(c.get("cuenta") or "")},
+                          "modelo_verificada": bool(fotos_hoja) and _modelo_verificada(c.get("cuenta") or ""),
+                          "render_n": int(c.get("render_n") or 0)},   # qué versión mira: ver _juicio_viejo
                  referencia=cid,
                  imagenes=[almacen.relativa(d / "revision.jpg"), almacen.relativa(d / "hoja.jpg")])
 
@@ -1761,11 +1762,23 @@ def _juzgado(t, j: dict) -> None:
             pass
 
 
+def _juicio_viejo(t, c: dict) -> bool:
+    """¿El juez miró una versión que ya no es la actual? Pasa si ella lo ajustó a mano (u otra cosa lo volvió a armar)
+    mientras el juez miraba: esa respuesta ya no vale. Sin esto, el juez rehacía el reel encima del ajuste a mano y,
+    como el ajuste reinicia el contador, daba más vueltas que REINTENTOS (pasó el 27/11: 7 en vez de 2)."""
+    n = ((t.entrada or {}).get("datos") or {}).get("render_n")
+    return n is not None and int(c.get("render_n") or 0) != int(n)
+
+
 def _juzgado_ya(t, j: dict) -> None:
     cid = t.referencia
     try:
         c = _datos(cid)
     except ValueError:
+        return
+    if _juicio_viejo(t, c):
+        log.info("juez de %s: miró la versión %s y ya va por la %s; no se usa", cid,
+                 ((t.entrada or {}).get("datos") or {}).get("render_n"), c.get("render_n"))
         return
     juez = c.get("juez") or {}
     notas = [int(_num(j.get(k), 0, 0, 5)) for k in ("nota_texto", "nota_tecnica") if j.get(k) not in (None, "")]
@@ -1806,6 +1819,8 @@ def _juzgado_ya(t, j: dict) -> None:
 def _juez_fallo(t, motivo: str) -> None:
     try:
         c = _datos(t.referencia)
+        if _juicio_viejo(t, c):   # falló el de una versión que ya no está: no pisa el estado de la actual
+            return
         _datos(t.referencia, juez={**(c.get("juez") or {}), "estado": "sin_juez", "motivo": motivo[:200]})
     except ValueError:
         pass
